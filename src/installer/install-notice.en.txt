@@ -1,0 +1,17 @@
+﻿Before installing MDNote
+
+• Runs on Windows 10/11 x64 with .NET Framework 4.8 or later.
+• Installs for all users on this computer and requests administrator privileges.
+• The default installation location is C:\Program Files\MDNote. If the Windows Program Files location is different, that location is used.
+• Select the installation path on the next screen. A new dedicated folder is recommended.
+• Before installing an update, please save your documents in MDNote and close all windows.
+• Along with the program, source code, build scripts, usage guide, and example documents are installed.
+• After installation, you can select MDNote in Open with for .md files. The default app is not forcibly changed.
+• Display settings such as font, font size, line spacing, text color, dark mode, and language are saved separately for each user account in LocalAppData\MDNote\settings.xml, and are kept even when updated.
+• You can uninstall 'MDNote' from Windows Settings > Apps > Installed apps or Control Panel > Programs and Features.
+• Uninstalling deletes installed files, shortcuts, and app registration. Deleting the display settings of the account running the uninstallation can be selected separately. Settings of other accounts are not deleted.
+• Documents you created yourself or added separately are not removed. If any user files remain, the installation folder also remains.
+• A digital signature has not been applied. Windows may display it as an unverified publisher.
+• MDNote is distributed under the GNU General Public License v3.0. Please refer to LICENSE.
+
+If you have checked the information, please click 'Continue'.

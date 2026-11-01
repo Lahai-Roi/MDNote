@@ -1,0 +1,42 @@
+Third-party components and platform dependencies — MDNote 2.0
+
+MDNote-authored source code is distributed under the GNU General Public License v3.0 in LICENSE.
+Copyright (c) 2026 Lahai-Roi(shs7034).
+That license does not replace the licenses of third-party tools or platforms.
+
+NSIS 3.13 — installer generation and installer runtime
+Copyright (C) 1999-2026 Contributors.
+NSIS is used unmodified to build the setup executable. The MDNote package does
+not include the NSIS compiler toolchain itself. Its generated installer contains
+NSIS runtime code and uses LZMA compression.
+The applicable NSIS license text, including zlib/libpng, compression-module
+terms and the special LZMA linking exception, is reproduced unchanged in:
+  installer/NSIS-LICENSE.txt
+Official license: https://nsis.sourceforge.io/Docs/AppendixI.html
+Official source/distribution: https://nsis.sourceforge.io/
+The special exception permits linking application code with the NSIS LZMA
+module without applying the CPL 1.0 to that application code. No NSIS or LZMA
+module source modifications are made by this project.
+
+Microsoft .NET Framework 4.8 / Windows desktop APIs
+MDNote references the framework assemblies installed on Windows, including WPF,
+Windows Forms and System.Drawing. Framework assemblies, Windows system DLLs,
+SDK/compiler binaries and font files are not included in the MDNote payload.
+Those platform components remain subject to their respective Microsoft terms;
+MDNote's GPL v3.0 license does not relicense them.
+
+Markdown reference links
+The guides link to CommonMark help and travel-reference sites. A link does not
+incorporate those websites' content into the MDNote source or change their terms.
+
+AvalonEdit 6.3.1 — text editor engine (modified)
+Copyright (c) AvalonEdit Contributors
+Distributed under the MIT license reproduced unchanged in:
+  vendor/AvalonEdit/LICENSE
+Upstream: https://github.com/icsharpcode/AvalonEdit
+Source commit: 862415d51eddc9eac93f462dbc522ffbf929cd52
+The modified source and change summary are included in vendor/AvalonEdit.
+Local changes include line-height settings, Unicode newline recognition and
+linear-time height metric updates. The upstream license applies to this
+component; MDNote's LICENSE does not replace its copyright notice.
+

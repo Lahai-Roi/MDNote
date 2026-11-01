@@ -1,0 +1,14 @@
+﻿MDNote 1.6 아이콘
+제작: 내장 image_gen으로 기존 아이콘 편집. 별도 API/CLI 호출 없음.
+
+Edit this existing Windows Markdown app icon. Preserve the identity exactly: dark rounded square tile, white bold angular M / folded-paper monogram, small electric-blue square at lower right. Enlarge the WHITE MONOGRAM AND BLUE ACCENT substantially inside the tile: white mark should fill about 82% of tile width and 80% of tile height, leaving only ~8% inner margin on each side instead of the current huge padding. Tile should fill 96% of square canvas. This must be very clear at 24px and 32px Windows taskbar sizes. Clean truly flat geometry, no shadows/textures/gradients/glow or extra details. Transparent background outside rounded tile. Single icon, centered, same design and colors; change only sizing/proportions to make the visible glyph much larger.
+
+프로젝트 원본: icon.png
+ICO 생성: make-icon.ps1. 알파 경계를 잘라 검정 타일까지 캔버스 전체에 맞춤(inset=0).
+검증 이미지: test-results/taskbar-icon.png (실제 Windows ICON_BIG 32px)
+1.7.1 아이콘 편집 프롬프트 (내장 image_gen):
+Edit this exact existing app icon, preserving its identity and geometry. Keep the outer dark rounded-square tile exactly the same large size and silhouette. Only reduce the inner white folded-paper M monogram and blue square together by about 10% around the center of the tile, so the dark border/margin around the white M becomes visibly thicker. Aim for white M about 74% of tile width rather than current 86%; maintain strong legibility at 24 and 32 pixels. Keep the same folded corner, M shape, blue accent position relative to M, and colors. No redesign, no extra elements, no new shadows, no text, no glow. Actual transparent background outside black tile. Single centered square Windows taskbar icon.
+
+
+1.9.1 최종 편집 (내장 image_gen, 배경만 변경):
+Precise color-only edit of the existing MDNote app icon. Make the dark tile BACKGROUND DARKER, an almost-black charcoal gray #1B1E23, clearly closer to black than the input. Keep some dark-gray identity rather than pure #000000. Preserve exactly all geometry, rounded tile silhouette and size, white folded M monogram dimensions/margins/position, blue square accent dimensions/position/color. Do not enlarge or shrink anything. Flat uniform matte fill, no textures or gradients, no shadows, no glow. Actual transparent background outside rounded tile. Only change tile background from current gray to nearly black charcoal #1B1E23.
