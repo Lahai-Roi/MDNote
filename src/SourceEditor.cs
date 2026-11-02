@@ -779,7 +779,6 @@ if(ImeTrace.Enabled){if(msg==0x010D||msg==0x010E||msg==0x010F)ImeTrace.Write("im
 // The hook is window-wide: a composition owned by another control (the find box) must not latch this editor (same rule as MarkdownLivePreview.CompositionMessage); one that started here is still finished here.
 if((msg==0x010D||msg==0x010F)&&!imeComposing&&!TextArea.IsKeyboardFocusWithin)return IntPtr.Zero;
 if(msg==0x010D||msg==0x010F)imeLastCompositionTick=Environment.TickCount;
-if(msg==0x010D)imeListMove=TextArea.IsKeyboardFocused&&KoreanLayout();else if(msg==0x010E)imeListMove=false;
 // A form parked while the Korean layout was active outlives a switch to ja/zh, whose IMEs then open at the screen's top-left: bring it back to the caret first.
 if(msg==0x010D&&TextArea.IsKeyboardFocused&&!KoreanLayout())UnparkImeForm(hwnd);
 // Korean: the form is parked only while a composition runs (see IMN_SETCOMPOSITIONWINDOW below), from its first message on.
@@ -831,7 +830,6 @@ bool AnswerCharPosition(IntPtr hwnd,IntPtr lParam){
     ClientToScreen(hwnd,ref at);ClientToScreen(hwnd,ref docTop);ClientToScreen(hwnd,ref docBottom);
     info.pt=at;info.cLineHeight=height;info.rcDocument.Left=docTop.X;info.rcDocument.Top=docTop.Y;info.rcDocument.Right=docBottom.X;info.rcDocument.Bottom=docBottom.Y;
     System.Runtime.InteropServices.Marshal.StructureToPtr(info,lParam,false);
-    imeListAt.X=at.X;imeListAt.Y=at.Y+height;imeListAtTop=at.Y;imeListAtValid=true;
     if(ImeTrace.Enabled)ImeTrace.Write("ime charposition pos="+info.dwCharPos+" at="+at.X+","+at.Y+" height="+height+" saved="+saved);
     return true;
 }
@@ -937,9 +935,6 @@ static readonly System.Collections.Generic.Dictionary<IntPtr,int> imeBoxesHidden
 // The IME opens its Hanja / symbol lists next to its composition box, so the Hanja key gives the form back at the caret (RestoreParkedForm)
 // for the rest of that composition; the box stays transparent there. Before that the form at the caret brings back the IME's own copy of the syllable.
 bool imeHanjaAtCaret;int imeLastCompositionTick;
-// Fallback for the same lists: while a Korean composition runs, an IME window that shows at the monitor's top-left is moved to just
-// below the caret (imeListAt, refreshed by every IMR_QUERYCHARPOSITION answer).
-static bool imeListMove;static ImeScreenPoint imeListAt;static int imeListAtTop;static bool imeListAtValid;
 static IntPtr imeParkedWindow;
 static void RestoreParkedForm(){
     if(imeParkedWindow==IntPtr.Zero||!imeCaretFormSaved)return;
@@ -952,7 +947,6 @@ static void WatchImeBoxes(){
         imeBoxEvents=OnImeBoxEvent;int pid=GetCurrentProcessId(),tid=GetCurrentThreadId();
         // EVENT_OBJECT_DESTROY..EVENT_OBJECT_SHOW and EVENT_OBJECT_LOCATIONCHANGE, out of context (delivered through this thread's message loop).
         SetWinEventHook(0x8001,0x8002,IntPtr.Zero,imeBoxEvents,pid,tid,0);SetWinEventHook(0x800B,0x800B,IntPtr.Zero,imeBoxEvents,pid,tid,0);
-        if(ImeTrace.Enabled){imeShowEvents=OnAnyShowEvent;SetWinEventHook(0x8002,0x8002,IntPtr.Zero,imeShowEvents,0,0,0);SetWinEventHook(0x800B,0x800B,IntPtr.Zero,imeShowEvents,0,0,0);}
     }
     // A box left at the corner by an earlier composition goes transparent before the IME shows it again.
     EnumThreadWindows(GetCurrentThreadId(),delegate(IntPtr window,IntPtr unused){CheckImeBox(window);return true;},IntPtr.Zero);
@@ -967,7 +961,7 @@ static void CheckImeBox(IntPtr hwnd){
     ImeRect r;if(!GetWindowRect(hwnd,out r))return;
     int width=r.Right-r.Left,height=r.Bottom-r.Top;bool small=width>0&&height>0&&width<=320&&height<=120;bool hidden=imeBoxesHidden.ContainsKey(hwnd);
     string cls=name.ToString();
-    if(cls!="CiceroUIWndFrame"||!small){if(!hidden){MoveImeList(hwnd,cls,r);return;}}
+    if((cls!="CiceroUIWndFrame"||!small)&&!hidden)return;
     // Once seen at a corner the box stays transparent wherever the IME moves it next: between compositions the form follows the caret,
     // and the next composition may show the box there before its first message parks the form again. A window grown into a list is given back.
     bool box=small&&(hidden||AtMonitorCorner(hwnd,r));
@@ -985,33 +979,6 @@ static void CheckImeBox(IntPtr hwnd){
         if(added!=0)SetWindowLongW(hwnd,-20,GetWindowLongW(hwnd,-20)&~added);
         if(ImeTrace.Enabled)ImeTrace.Write("ime box restored rect="+r.Left+","+r.Top+","+r.Right+","+r.Bottom);
     }
-}
-[System.Runtime.InteropServices.DllImport("user32.dll")]static extern bool IsWindowVisible(IntPtr hwnd);
-[System.Runtime.InteropServices.DllImport("user32.dll")]static extern IntPtr MonitorFromPoint(ImeScreenPoint point,int flags);
-[System.Runtime.InteropServices.DllImport("user32.dll")]static extern int GetWindowThreadProcessId(IntPtr hwnd,out int processId);
-static void MoveImeList(IntPtr hwnd,string cls,ImeRect r){
-    if(!imeListMove||!imeListAtValid||cls.StartsWith("HwndWrapper")||!IsWindowVisible(hwnd))return;
-    int width=r.Right-r.Left,height=r.Bottom-r.Top;if(width<=0||height<=0)return;
-    IntPtr monitor=MonitorFromWindow(hwnd,2);if(monitor==IntPtr.Zero)return;
-    var info=new ImeMonitorInfo();info.cbSize=System.Runtime.InteropServices.Marshal.SizeOf(typeof(ImeMonitorInfo));if(!GetMonitorInfoW(monitor,ref info))return;
-    // At the corner: flush left, and at the top or just under the (transparent) composition box there.
-    bool corner=r.Left-info.rcMonitor.Left>=0&&r.Left-info.rcMonitor.Left<=2&&r.Top-info.rcMonitor.Top>=0&&r.Top-info.rcMonitor.Top<=80;
-    if(ImeTrace.Enabled)ImeTrace.Write("ime window "+cls+" rect="+r.Left+","+r.Top+","+r.Right+","+r.Bottom+" corner="+corner);
-    if(!corner)return;
-    IntPtr target=MonitorFromPoint(imeListAt,2);var area=new ImeMonitorInfo();area.cbSize=info.cbSize;if(target==IntPtr.Zero||!GetMonitorInfoW(target,ref area))area=info;
-    int x=Math.Max(area.rcWork.Left,Math.Min(imeListAt.X,area.rcWork.Right-width)),y=imeListAt.Y;
-    if(y+height>area.rcWork.Bottom)y=Math.Max(area.rcWork.Top,imeListAtTop-height);
-    SetWindowPos(hwnd,IntPtr.Zero,x,y,0,0,0x0015); /* SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE */
-    if(ImeTrace.Enabled)ImeTrace.Write("ime list moved to="+x+","+y);
-}
-// Trace only: windows other processes show during a Korean composition (to see where an IME's list lives).
-static WinEventProc imeShowEvents;
-static void OnAnyShowEvent(IntPtr hook,int eventType,IntPtr hwnd,int idObject,int idChild,int thread,int time){
-    if(!imeListMove||hwnd==IntPtr.Zero||idObject!=0||idChild!=0)return;
-    int pid;GetWindowThreadProcessId(hwnd,out pid);if(pid==GetCurrentProcessId())return;
-    var name=new System.Text.StringBuilder(64);GetClassNameW(hwnd,name,name.Capacity);ImeRect r;GetWindowRect(hwnd,out r);
-    string process="?";try{process=System.Diagnostics.Process.GetProcessById(pid).ProcessName;}catch(Exception){}
-    ImeTrace.Write("ime other window "+name+" pid="+pid+" "+process+" rect="+r.Left+","+r.Top+","+r.Right+","+r.Bottom+" event=0x"+eventType.ToString("X"));
 }
 static bool AtMonitorCorner(IntPtr hwnd,ImeRect r){
     IntPtr monitor=MonitorFromWindow(hwnd,2);if(monitor==IntPtr.Zero)return false; /* MONITOR_DEFAULTTONEAREST */

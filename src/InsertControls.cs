@@ -438,6 +438,8 @@ namespace MDNote {public partial class MainWindow {
         RegisterOverflow(linkButton,"link",null,linkButton,linkButton,null,null,null);
         RegisterOverflow(imageButton,"image",null,imageButton,imageButton,null,null,null);
         RegisterOverflow(tableButton,"table",null,tableButton,tableButton,null,OpenTableFromOverflow,null);
+        /* the bar's own {···} mark, drawn like the other » entries (Ui.MenuSourceIcon) */
+        sourceOverflowCommand=RegisterOverflow(null,null,Ui.MenuSourceIcon,null,preview,null,ToggleSourceFromOverflow,"원문");
         var commands=quickFind.Parent as Panel;
         if(commands!=null)foreach(UIElement child in commands.Children){
             var button=child as Button;if(button==null)continue;
@@ -536,6 +538,8 @@ namespace MDNote {public partial class MainWindow {
        the gap again at its end, so one pass per width is enough. */
     static void ResetOverflowOffset(Button button){if(button==null)return;Thickness margin=button.Margin;if(margin.Right!=0)button.Margin=new Thickness(margin.Left,margin.Top,0,margin.Bottom);}
     void UpdateRibbonOverflow(){
+        /* the 원문 toggle starts every pass on the bar; it moves into the » list only when the row overflows (below) */
+        ribbonSourceFolded=false;ribbonPreviewHost.Visibility=Visibility.Visible;
         if(ribbonHost.Visibility!=Visibility.Visible||ribbonHost.ActualWidth<=0){ResetOverflowOffset(ribbonOverflow);ribbonOverflow.Visibility=Visibility.Collapsed;return;}
         ResetOverflowOffset(ribbonOverflow);
         ShowOverflowUnits(ribbonOverflowUnits);
@@ -547,8 +551,11 @@ namespace MDNote {public partial class MainWindow {
         MeasureOverflowUnits(ribbonOverflowUnits);
         double width=ribbonHost.ActualWidth,total=margins+preview+SumOverflowWidth(ribbonOverflowUnits);
         int visible=ribbonOverflowUnits.Count;
-        if(total>width+0.01){visible=OverflowRibbonTo(visible,width-preview-margins);}
-        else if(width-total<2){ribbonScroll.UpdateLayout();if(ribbonScroll.ScrollableWidth>0.5)visible=OverflowRibbonTo(visible,width-preview-margins);}
+        bool over=total>width+0.01;
+        if(!over&&width-total<2){ribbonScroll.UpdateLayout();over=ribbonScroll.ScrollableWidth>0.5;}
+        /* 2.0.1 (user, 11-02): like the top row's end items, the 원문 toggle is the first to go: once the row overflows at all it
+           leaves the bar and becomes the » list's final entry, and its width goes back to the commands. */
+        if(over){ribbonSourceFolded=true;ribbonPreviewHost.Visibility=Visibility.Collapsed;visible=OverflowRibbonTo(visible,width-margins);}
         ribbonOverflowVisibleCount=visible;
         BuildRibbonOverflowMenu(visible);
         PlaceOverflowNearLastUnit(ribbonOverflow,ribbonHost,ribbonOverflowUnits,visible);
@@ -667,8 +674,15 @@ namespace MDNote {public partial class MainWindow {
             menu.Items.Add(OverflowMenuItem(unit.Command));
             lastGroup=unit.Group;
         }
+        if(ribbonSourceFolded&&sourceOverflowCommand!=null){
+            if(menu.Items.Count>0)menu.Items.Add(new Separator());
+            menu.Items.Add(OverflowMenuItem(sourceOverflowCommand));
+        }
         Ui.ToolbarText(menu,FontFamily);TranslateTree(menu);
     }
+    bool ribbonSourceFolded;
+    OverflowCommand sourceOverflowCommand;
+    void ToggleSourceFromOverflow(){preview.IsChecked=preview.IsChecked!=true;}
     void BuildTopOverflowMenu(int visibleCount){
         var menu=topOverflowMenu;if(menu==null)return;
         menu.Items.Clear();

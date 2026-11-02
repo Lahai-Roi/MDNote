@@ -402,6 +402,14 @@ internal static class Ui {
         Rect bounds=Rect.Empty;foreach(UIElement part in icon.Children){var path=part as Path;if(path!=null)bounds.Union(path.Data.GetRenderBounds(new Pen(Brushes.Black,IconLine*IconScale/scale){LineJoin=PenLineJoin.Round,StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round}));}
         var slot=new Canvas {Width=bounds.Width*scale,Height=height,VerticalAlignment=VerticalAlignment.Center};Canvas.SetLeft(icon,-bounds.Left*scale);Canvas.SetTop(icon,-bounds.Top*scale);slot.Children.Add(icon);return slot;
     }
+    /* 2.0.1 (user, 11-02): the {···} mark in the » list goes through the same 20 px grid and 0.85 scale as its neighbours. Its two upright
+       strokes (x 0.57 / 11.35) sit on the 표 frame's uprights (grid x 2.5 / 17.5), so they land on the pixels exactly like the rest of the
+       column; at CenteredInkIcon's own scale they fell on pixel centres and read crisper and thinner than every other icon. */
+    internal static FrameworkElement MenuSourceIcon(){
+        var geometry=Geometry.Parse(GridData("sourceBraceA")).Clone();double fit=15/10.78;
+        var place=new TransformGroup();place.Children.Add(new ScaleTransform(fit,fit));place.Children.Add(new TranslateTransform(2.5-0.57*fit,10-6*fit));geometry.Transform=place;
+        var line=GridStroke("M0 0",IconLine,null);line.Data=geometry;return GridCanvas(line);
+    }
     internal static FrameworkElement CenteredInkIcon(string name,double height,double nudge){
         var slot=(Canvas)InkSizedIcon(name,height);var icon=(Canvas)slot.Children[0];
         double scale=(height-IconLine*IconScale)/12;Rect bounds=Rect.Empty;foreach(UIElement part in icon.Children){var path=part as Path;if(path!=null)bounds.Union(path.Data.GetRenderBounds(new Pen(Brushes.Black,IconLine*IconScale/scale){LineJoin=PenLineJoin.Round,StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round}));}

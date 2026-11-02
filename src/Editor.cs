@@ -198,7 +198,8 @@ public partial class MainWindow : Window {
         int key=(int)scroll.ScrollableWidth*4096+(int)scroll.ActualWidth;
         if(key==ribbonDockKey)return;
         ribbonDockKey=key;
-        Dock dock=scroll.ScrollableWidth>0.5?Dock.Left:Dock.Right;
+        /* 2.0.1 (user, 11-02): the Source toggle stays at the right end; a narrow row folds it into » (UpdateRibbonOverflow) instead of moving it left. */
+        Dock dock=Dock.Right;
         if(DockPanel.GetDock(ribbonPreviewHost)!=dock)DockPanel.SetDock(ribbonPreviewHost,dock);
     }
     void SetupButton(Button b,string name,Action action){b.Content=name;b.ToolTip=name;b.MinHeight=26;b.Focusable=false;b.Click+=delegate{action();};}
