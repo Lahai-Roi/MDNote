@@ -6,6 +6,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 
 | Menu | Shortcut | Description |
 | --- | --- | --- |
+| Continue previous session | | When on, closes unsaved documents without prompting and reopens them as they were the next time you open MDNote. Off by default. |
 | ![New](guide-new.png) New | Ctrl+N, Ctrl+T | Open a new document. |
 | ![Open](guide-open.png) Open… | Ctrl+O | Open an MD or TXT file. |
 | Open with encoding… | | Reopen a file with a chosen encoding if text looks garbled. |
@@ -41,6 +42,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 - Documents open straight into the editing screen while **Always open for editing** is on (the default), or in the **Read** screen when it is off. In basic mode's editing screen, symbols like `#` and `**` stay hidden while you edit directly in the formatted view. In **Live mode** (View menu), symbols appear in the editing screen only on the cursor line and any selected lines.
 - Switching to **TXT mode** strips Markdown symbols and leaves only visible text, separating table cells with Tabs. Switching from TXT back to MD does not suddenly turn existing symbols into formatting. If you switched by mistake, press Ctrl+Z to undo.
 - **Paste** preserves bold, italic, strikethrough, links, and custom text colors. In TXT mode, pasting always inserts plain text only.
+- **Insert images**: Paste a copied image with Ctrl+V, paste or drag in an image file, or select Insert image… to display it immediately. When saving, a folder with the same name is created next to the document (e.g., `Memo.md` → `Memo\`), storing only the images remaining in the document and updating their links. Images deleted before saving are excluded, and images already in that folder are not copied again. Using Save As copies the document's images into a folder matching the new name.
 - You can also drag an image file into the editing window to insert it.
 - Press the same shortcut again to close Find or Replace.
 

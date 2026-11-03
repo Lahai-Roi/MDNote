@@ -52,6 +52,17 @@ public partial class MainWindow {
         }else{livePreview.Update(LiveSettings());UpdateLongLines(true);}
         RefreshSearchForView();
     }
+    /* A save that binds the document to a file (the first save of an untitled document, or a Save
+       As into another folder) changes the folder relative references resolve against, and the live
+       session keeps its own copy of that folder (Session.imageBase). Hand the new one over here:
+       Update sees the base change, drops the image cache and redraws the visible lines, which is
+       what makes the pictures a first save just moved render in the same turn instead of after a
+       reopen. A view with no session attached is left alone (its next attach reads the path
+       itself), so a raw-source or TXT view pays nothing. */
+    void RefreshLiveDocumentPath(){
+        if(livePreview==null||livePreview.IsDisposed||!LivePreviewAttached)return;
+        livePreview.Update(LiveSettings());
+    }
     // Ctrl+click targets: "#^id" jumps to the footnote definition, "ref:id" opens the URL of the
     // "[id]: url" definition (case-insensitive), "#heading" jumps to that heading (the basic
     // view's rule, Workspace.cs:153) and any other "#" target stays inside the document the way

@@ -24,6 +24,8 @@ internal static class DropProbe {
     const string SvgText="<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"2\" height=\"2\"/></svg>\n";
     static string FixtureDir,DocPath,SamePath,SubPath,JpgPath,GifPath,SvgPath,PickPath,TxtPath;
     static string SameAlt,SameRef,SubAlt,SubRef,JpgAlt,JpgRef,GifAlt,GifRef,OtherPath,SameFull,UnsavedRef;
+    static string OutsidePath,ClashPathA,ClashPathB,OutsideAlt,OutsideRef;
+    static string OutsideDir,DocImageFolder,SameRefCopy,SubRefCopy,JpgRefCopy,GifRefCopy;
 
     sealed class DropOutcome {internal bool Handled;internal bool PreviewHandled;internal DragDropEffects Effects;internal Exception Error;}
 
@@ -233,8 +235,54 @@ internal static class DropProbe {
         encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
         using(var stream=File.Create(file))encoder.Save(stream);
     }
+    // Two files holding the same bytes: the copy rule reuses an identical picture instead of
+    // adding -2, so the checks compare content the same way the product does.
+    static bool SameBytes(string left,string right){
+        try{
+            byte[] one=File.ReadAllBytes(left),two=File.ReadAllBytes(right);
+            if(one.Length!=two.Length)return false;
+            for(int i=0;i<one.Length;i++)if(one[i]!=two[i])return false;
+            return true;
+        }catch(Exception){return false;}
+    }
+    // The product's shared picture folder (Documents\MDNote\images), read from the product's own
+    // helper so the probe cannot drift from the folder a paste uses.
+    static string TempPictureFolder(){
+        MethodInfo method=typeof(MainWindow).GetMethod("PastedImageTempFolder",Members);
+        if(method==null)throw new MissingMemberException("MainWindow PastedImageTempFolder");
+        return (string)method.Invoke(null,new object[0]);
+    }
+    // Every picture the copy rule put into <docdir>\<docname> (FixtureDir\doc) is a copy this probe
+    // made, so the folder starts empty for each case that counts files by name. The folder itself is
+    // recreated on the next copy.
+    static void ResetDocImageFolder(){
+        ClearTempPictureFolder();
+        try{
+            if(String.IsNullOrEmpty(DocImageFolder)||!Directory.Exists(DocImageFolder))return;
+            foreach(string file in Directory.GetFiles(DocImageFolder)){
+                try{File.Delete(file);}catch(Exception){}
+            }
+            foreach(string folder in Directory.GetDirectories(DocImageFolder)){
+                try{Directory.Delete(folder,true);}catch(Exception){}
+            }
+        }catch(Exception){}
+    }
+    // The shared picture folder is the probe's own (the product helper reads the override), so the
+    // run never touches Documents\MDNote\images and starts from an empty one.
+    static void ClearTempPictureFolder(){
+        try{
+            string temp=TempPictureFolder();
+            if(!Directory.Exists(temp))return;
+            foreach(string file in Directory.GetFiles(temp)){try{File.Delete(file);}catch(Exception){}}
+        }catch(Exception){}
+    }
+    // The link text an insert writes for a picture staged in the shared folder (absolute path).
+    static string StagedRef(string fileName){return EscapeRef(Path.Combine(TempPictureFolder(),fileName).Replace('\\','/'));}
     static void PrepareFixture(){
         OutDir=Path.GetFullPath(OutDir);
+        MainWindow.ImageTempFolderOverride=Path.Combine(OutDir,"temp-images");
+        Directory.CreateDirectory(MainWindow.ImageTempFolderOverride);
+        ClearTempPictureFolder();
         FixtureDir=Path.Combine(OutDir,"drop-fixture");
         Directory.CreateDirectory(FixtureDir);
         Directory.CreateDirectory(Path.Combine(FixtureDir,"sub"));
@@ -259,8 +307,41 @@ internal static class DropProbe {
         SubAlt="inside";SubRef="sub/inside.png";
         JpgAlt="photo";JpgRef="photo.jpg";
         GifAlt="anim";GifRef="anim.gif";
+        /* 2026-11-03 copy rule: doc.md lives in FixtureDir, so its own picture folder is
+           FixtureDir\doc. A picture merely beside the .md or in FixtureDir\sub is NOT inside that
+           folder, so an insert copies it into doc\ and links the copy relatively. */
+        DocImageFolder=Path.Combine(FixtureDir,"doc");
+        /* 2026-11-03 staging rule: an insert never touches <docname>\ ; the picture waits in the
+           shared temp folder with an absolute link, and the save moves it (RunStageSave). */
+        SameRefCopy=StagedRef(Path.GetFileName(SamePath));
+        SubRefCopy=StagedRef("inside.png");
+        JpgRefCopy=StagedRef("photo.jpg");
+        GifRefCopy=StagedRef("anim.gif");
         OtherPath="D:\\pics\\tail.png";
+        /* A picture from OUTSIDE the document folder: the new rule copies it into doc\ first (the
+           document is <FixtureDir>\doc.md, so the copy goes to <FixtureDir>\doc\). */
+        OutsideDir=Path.Combine(OutDir,"outside-pictures");
+        Directory.CreateDirectory(OutsideDir);
+        OutsidePath=Path.Combine(OutsideDir,"outside.png");
+        /* Two different pictures that both want the name a.png: the second copy takes a-2. */
+        ClashPathA=Path.Combine(Path.Combine(OutDir,"clash-a"),"a.png");
+        ClashPathB=Path.Combine(Path.Combine(OutDir,"clash-b"),"a.png");
+        Directory.CreateDirectory(Path.GetDirectoryName(ClashPathA));
+        Directory.CreateDirectory(Path.GetDirectoryName(ClashPathB));
+        WriteImage(OutsidePath,new System.Windows.Media.Imaging.PngBitmapEncoder());
+        WriteImage(ClashPathA,new System.Windows.Media.Imaging.PngBitmapEncoder());
+        WriteImage(ClashPathB,new System.Windows.Media.Imaging.JpegBitmapEncoder());
+        /* The pictures the copy rule puts into doc\ are judged by their names, so every earlier copy
+           is removed first (a folder from an earlier run would otherwise decide the -2 checks). */
+        try{
+            if(Directory.Exists(DocImageFolder))
+                foreach(string stale in Directory.GetFiles(DocImageFolder)){
+                    try{File.Delete(stale);}catch(Exception){}
+                }
+        }catch(Exception){}
         UnsavedRef=EscapeRef(SameFull.Replace('\\','/'));
+        OutsideAlt="outside";
+        OutsideRef=StagedRef("outside.png");
         string[] expected=new string[]{"# 제목 줄","","첫 문단 줄입니다.","둘째 문단 줄입니다.","","- 목록 항목 하나","- 목록 항목 둘","","| A | B |","|---|---|","| a1 | b1 |","| a2 | b2 |","","```text","code line one","code line two","```","","마지막 문단."};
         string[] actual=FixtureText.Split('\n');
         bool linesOk=actual.Length==expected.Length;
@@ -339,7 +420,7 @@ internal static class DropProbe {
             SourceEditor editor=Source(window);
             Check(label+" starts in read mode",!Field<bool>(window,"editing"),"editing="+Field<bool>(window,"editing"));
             string before=editor.Document.Text;
-            string markup=Markup(SameAlt,SameRef);
+            string markup=Markup(SameAlt,SameRefCopy);
             var view=editor.TextArea.TextView;
             var last=view.GetOrConstructVisualLine(editor.Document.GetLineByNumber(editor.Document.LineCount));
             Point point=new Point(40,last.VisualTop+last.Height+6-view.ScrollOffset.Y);
@@ -376,7 +457,7 @@ internal static class DropProbe {
             int insertedAt=InsertStart(before,after);
             string inserted=InsertedText(before,after);
             int caret=editor.CaretIndex,selection=editor.SelectionLength;
-            string markup=Markup(SameAlt,SameRef);
+            string markup=Markup(SameAlt,SameRefCopy);
             bool inCell=pipe1>0&&pipe2>pipe1&&at>lineOffset+pipe1&&at<lineOffset+pipe2;
             Check(label+" handler",outcome.Error==null&&outcome.Handled&&dispatchOk,outcome.Error==null?("handled="+outcome.Handled):("error="+outcome.Error.GetType().Name+": "+outcome.Error.Message));
             bool placed=LineOf(editor,at)==line&&inCell&&insertedAt==at&&inserted==markup&&CountChar(afterRow,'|')==CountChar(row,'|')&&afterRow.StartsWith("|",StringComparison.Ordinal)&&afterRow.EndsWith("|",StringComparison.Ordinal);
@@ -418,7 +499,7 @@ internal static class DropProbe {
         try{
             SourceEditor editor=Source(window);
             string before=editor.Document.Text;
-            string want=Markup(SameAlt,SameRef)+"\n"+Markup(SubAlt,SubRef);
+            string want=Markup(SameAlt,SameRefCopy)+"\n"+Markup(SubAlt,SubRefCopy);
             Point point=DropPoint(editor,3,3,0,false);
             int at=HitOffset(editor,point);
             DropOutcome outcome=RaiseDrop(window,FileDrop(new string[]{SamePath,SubPath}),point,DragDropEffects.Copy,DragDropKeyStates.LeftMouseButton,false);
@@ -614,22 +695,22 @@ internal static class DropProbe {
             Check(mode+" surface state",raw?!nowAttached:nowAttached,"attached="+nowAttached+", editing="+Field<bool>(window,"editing"));
             SourceEditor editor=Source(window);
             int lastLength=LineText(editor,19).Length;
-            RunImageCase(window,mode+" image paragraph",SamePath,Markup(SameAlt,SameRef),3,3,0,false,null,-1);
-            RunImageCase(window,mode+" image list item",SamePath,Markup(SameAlt,SameRef),6,5,0,false,"- ",-1);
-            RunImageCase(window,mode+" image heading",SamePath,Markup(SameAlt,SameRef),1,4,0,false,"# ",-1);
+            RunImageCase(window,mode+" image paragraph",SamePath,Markup(SameAlt,SameRefCopy),3,3,0,false,null,-1);
+            RunImageCase(window,mode+" image list item",SamePath,Markup(SameAlt,SameRefCopy),6,5,0,false,"- ",-1);
+            RunImageCase(window,mode+" image heading",SamePath,Markup(SameAlt,SameRefCopy),1,4,0,false,"# ",-1);
             TableImageCase(window,mode);
             CodeImageCase(window,mode);
-            RunImageCase(window,mode+" image document end",SamePath,Markup(SameAlt,SameRef),19,lastLength+1,120,true,null,-1);
+            RunImageCase(window,mode+" image document end",SamePath,Markup(SameAlt,SameRefCopy),19,lastLength+1,120,true,null,-1);
             MultipleImagesCase(window,mode);
             if(!raw){
-                RunImageCase(window,mode+" image same folder",SamePath,Markup(SameAlt,SameRef),3,3,0,false,null,-1);
-                RunImageCase(window,mode+" image sub folder",SubPath,Markup(SubAlt,SubRef),3,3,0,false,null,-1);
+                RunImageCase(window,mode+" image beside the document",SamePath,Markup(SameAlt,SameRefCopy),3,3,0,false,null,-1);
+                RunImageCase(window,mode+" image sub folder",SubPath,Markup(SubAlt,SubRefCopy),3,3,0,false,null,-1);
                 // The other-drive form is a path rule, not an insert: D:\pics\tail.png is not on disk
                 // and the probe must not create it, so check what the shared reference helper writes.
                 string otherReference=MarkdownCommands.ImageReference(DocPath,OtherPath);
                 Check(mode+" image other drive path stays absolute",otherReference=="D:/pics/tail.png","reference='"+otherReference+"', document='"+DocPath+"'");
-                RunImageCase(window,mode+" image jpg",JpgPath,Markup(JpgAlt,JpgRef),3,3,0,false,null,-1);
-                RunImageCase(window,mode+" image gif",GifPath,Markup(GifAlt,GifRef),4,3,0,false,null,-1);
+                RunImageCase(window,mode+" image jpg",JpgPath,Markup(JpgAlt,JpgRefCopy),3,3,0,false,null,-1);
+                RunImageCase(window,mode+" image gif",GifPath,Markup(GifAlt,GifRefCopy),4,3,0,false,null,-1);
                 MissingImageCase(window,mode+" missing image",Path.Combine(FixtureDir,"missing image.png"),"non-existent image file does not insert broken syntax");
                 MissingImageCase(window,mode+" image other drive",OtherPath,"missing file inserts nothing");
                 MissingTextPreviewCase(window,mode);
@@ -654,7 +735,7 @@ internal static class DropProbe {
             window=OpenDocument(DocPath,false);
             Check("read mode window opened out of editing",window.OpenDocumentCount==1&&Text(window)==FixtureText&&!Field<bool>(window,"editing"),"documents="+window.OpenDocumentCount+", editing="+Field<bool>(window,"editing")+", text='"+Excerpt(Text(window))+"'");
             Check("read mode keeps the live surface attached and read-only",Prop<bool>(window,"LivePreviewAttached")&&Source(window).IsReadOnly,"attached="+Prop<bool>(window,"LivePreviewAttached")+", readOnly="+Source(window).IsReadOnly);
-            ReadModeImageCase(window,"read mode image",SamePath,Markup(SameAlt,SameRef),3,3);
+            ReadModeImageCase(window,"read mode image",SamePath,Markup(SameAlt,SameRefCopy),3,3);
             window.SetMode(false);Pump();
             int notices=0;string notice=null;
             MainWindow.ImageDropNotice=delegate(string message){notices++;notice=message;};
@@ -733,14 +814,218 @@ internal static class DropProbe {
             Check(label+" is consumed without opening a document",consumed,"handled="+(outcome.Error==null?outcome.Handled.ToString():"error="+outcome.Error.GetType().Name+": "+outcome.Error.Message)+", documents="+window.OpenDocumentCount+", path='"+Field<string>(window,"path")+"', text='"+Excerpt(editor.Document.Text)+"'");
         }catch(Exception ex){Check(label+" exception",false,ex.GetType().Name+": "+ex.Message);}
     }
+    /* The copy rule (user, 2026-11-03, narrowed the same day): only a picture already inside the
+       document's own picture folder (<docdir>\<docname>, subfolders included) is linked where it is;
+       a picture beside the .md or in another subfolder of the document's directory is copied into
+       <docdir>\<docname> and linked relatively. All of this runs through the window's own insert path
+       (InsertImageFilesAtCaret), the one the drop, the Ctrl+V file paste and the image button share. */
+    static void InsertImageFileCopyCase(MainWindow window){
+        string label="image file copy";
+        try{
+            SourceEditor editor=Source(window);
+            string docFolder=Path.Combine(FixtureDir,"doc");
+            string stage=TempPictureFolder();
+            string destination=Path.Combine(stage,"outside.png");
+            string markup=Markup(OutsideAlt,OutsideRef);
+            Check(label+" starts without the copy",!File.Exists(destination),"destination='"+destination+"'");
+            string before=editor.Document.Text;
+            int caret=editor.Document.GetLineByNumber(3).Offset;
+            editor.Select(caret,0);Pump();
+            object handled=Call(window,"InsertImageFilesAtCaret",new object[]{new string[]{OutsidePath}});
+            Pump();
+            string after=editor.Document.Text;
+            bool inserted=after==before.Insert(caret,markup);
+            Check(label+" inserts the staged copy's absolute link",inserted,"handled="+handled+", caret="+caret+", inserted='"+Excerpt(InsertedText(before,after))+"'");
+            Check(label+" staged the picture in the shared folder and left <docname>\\ alone",File.Exists(destination)&&SameBytes(OutsidePath,destination)&&!File.Exists(Path.Combine(docFolder,"outside.png")),"destination='"+destination+"', exists="+File.Exists(destination)+", same="+SameBytes(OutsidePath,destination)+", docFolderCopy="+File.Exists(Path.Combine(docFolder,"outside.png")));
+            Check(label+" keeps the original file",File.Exists(OutsidePath),"original='"+OutsidePath+"'");
+            Call(window,"Undo");Pump();
+            Check(label+" one undo restores the document",editor.Document.Text==before,Excerpt(editor.Document.Text));
+            if(editor.Document.Text!=before)ResetEditor(window,BaseText);
+            /* A picture beside the .md (the document's directory, but outside its own picture folder)
+               is copied too: that was the "no copy" case before the rule was narrowed. */
+            string besideCopy=Path.Combine(stage,Path.GetFileName(SamePath));
+            string beforeBeside=editor.Document.Text;
+            int caretBeside=editor.Document.GetLineByNumber(4).Offset;
+            editor.Select(caretBeside,0);Pump();
+            Call(window,"InsertImageFilesAtCaret",new object[]{new string[]{SamePath}});
+            Pump();
+            string afterBeside=editor.Document.Text;
+            Check(label+" a picture beside the .md is staged and linked absolutely",afterBeside==beforeBeside.Insert(caretBeside,Markup(SameAlt,SameRefCopy))&&File.Exists(besideCopy)&&SameBytes(SamePath,besideCopy),"inserted='"+Excerpt(InsertedText(beforeBeside,afterBeside))+"', copy="+File.Exists(besideCopy));
+            Call(window,"Undo");Pump();
+            if(editor.Document.Text!=beforeBeside)ResetEditor(window,BaseText);
+            /* A picture in another subfolder of the document's directory is copied as well. */
+            string subCopy=Path.Combine(stage,"inside.png");
+            string beforeSub=editor.Document.Text;
+            int caretSub=editor.Document.GetLineByNumber(5).Offset;
+            editor.Select(caretSub,0);Pump();
+            Call(window,"InsertImageFilesAtCaret",new object[]{new string[]{SubPath}});
+            Pump();
+            string afterSub=editor.Document.Text;
+            Check(label+" a picture in another subfolder is staged and linked absolutely",afterSub==beforeSub.Insert(caretSub,Markup(SubAlt,SubRefCopy))&&File.Exists(subCopy)&&SameBytes(SubPath,subCopy),"inserted='"+Excerpt(InsertedText(beforeSub,afterSub))+"', copy="+File.Exists(subCopy));
+            Call(window,"Undo");Pump();
+            if(editor.Document.Text!=beforeSub)ResetEditor(window,BaseText);
+            /* Already inside the document's own picture folder: linked where it is, nothing copied. */
+            Directory.CreateDirectory(docFolder);
+            string insideTarget=Path.Combine(docFolder,"inside-keep.png");
+            File.Copy(OutsidePath,insideTarget,true);
+            string insideMarkup=Markup("inside-keep",EscapeRef("doc/inside-keep.png"));
+            string beforeInside=editor.Document.Text;
+            int caretInside=editor.Document.GetLineByNumber(4).Offset;
+            editor.Select(caretInside,0);Pump();
+            Call(window,"InsertImageFilesAtCaret",new object[]{new string[]{insideTarget}});
+            Pump();
+            string afterInside=editor.Document.Text;
+            Check(label+" links a picture inside its own picture folder without copying",afterInside==beforeInside.Insert(caretInside,insideMarkup)&&File.Exists(insideTarget)&&!File.Exists(Path.Combine(docFolder,"inside-keep-2.png")),"inserted='"+Excerpt(InsertedText(beforeInside,afterInside))+"'");
+            Call(window,"Undo");Pump();
+            if(editor.Document.Text!=beforeInside)ResetEditor(window,BaseText);
+            /* A subfolder of the document's own picture folder counts as inside too. */
+            string deepFolder=Path.Combine(docFolder,"deep");
+            Directory.CreateDirectory(deepFolder);
+            string deepTarget=Path.Combine(deepFolder,"deep.png");
+            File.Copy(OutsidePath,deepTarget,true);
+            string deepMarkup=Markup("deep",EscapeRef("doc/deep/deep.png"));
+            string beforeDeep=editor.Document.Text;
+            int caretDeep=editor.Document.GetLineByNumber(5).Offset;
+            editor.Select(caretDeep,0);Pump();
+            Call(window,"InsertImageFilesAtCaret",new object[]{new string[]{deepTarget}});
+            Pump();
+            string afterDeep=editor.Document.Text;
+            Check(label+" a subfolder of the picture folder is also left in place",afterDeep==beforeDeep.Insert(caretDeep,deepMarkup)&&File.Exists(deepTarget)&&!File.Exists(Path.Combine(docFolder,"deep-2.png")),"inserted='"+Excerpt(InsertedText(beforeDeep,afterDeep))+"'");
+            Call(window,"Undo");Pump();
+            if(editor.Document.Text!=beforeDeep)ResetEditor(window,BaseText);
+            /* The image button's file dialog goes through InsertLiveImageFile, which is the same
+               copy rule (the dialog itself cannot be driven from a probe). */
+            string buttonSource=Path.Combine(OutsideDir,"button.png");
+            File.Delete(buttonSource);
+            File.Copy(OutsidePath,buttonSource);
+            string buttonCopy=Path.Combine(stage,"button.png");
+            string beforeButton=editor.Document.Text;
+            int caretButton=editor.Document.GetLineByNumber(6).Offset;
+            editor.Select(caretButton,0);Pump();
+            bool buttonInserted=(bool)Call(window,"InsertLiveImageFile",new object[]{buttonSource});
+            Pump();
+            string afterButton=editor.Document.Text;
+            Check(label+" the image button copies an outside file too",buttonInserted&&afterButton==beforeButton.Insert(caretButton,Markup("button",StagedRef("button.png")))&&File.Exists(buttonCopy)&&SameBytes(buttonSource,buttonCopy),"inserted="+buttonInserted+", inserted='"+Excerpt(InsertedText(beforeButton,afterButton))+"', copy="+File.Exists(buttonCopy));
+            Call(window,"Undo");Pump();
+            if(editor.Document.Text!=beforeButton)ResetEditor(window,BaseText);
+            /* A different picture with the same name takes -2. */
+            string clash=Path.Combine(stage,"a-2.png");
+            File.Delete(Path.Combine(stage,"a.png"));File.Delete(clash);
+            Call(window,"InsertImageFilesAtCaret",new object[]{new string[]{ClashPathA}});
+            Pump();
+            Call(window,"InsertImageFilesAtCaret",new object[]{new string[]{ClashPathB}});
+            Pump();
+            Check(label+" a different picture with the same name takes -2",File.Exists(Path.Combine(stage,"a.png"))&&File.Exists(clash)&&SameBytes(ClashPathA,Path.Combine(stage,"a.png"))&&SameBytes(ClashPathB,clash)&&!SameBytes(Path.Combine(stage,"a.png"),clash),"a='"+Path.Combine(stage,"a.png")+"' is A="+SameBytes(ClashPathA,Path.Combine(stage,"a.png"))+", a-2='"+clash+"' is B="+SameBytes(ClashPathB,clash));
+            Call(window,"Undo");Pump();Call(window,"Undo");Pump();
+            /* The same picture again under the same name reuses the file instead of adding -3. */
+            Call(window,"InsertImageFilesAtCaret",new object[]{new string[]{OutsidePath}});
+            Pump();
+            Check(label+" a second copy of the same picture is reused",SameBytes(OutsidePath,destination)&&!File.Exists(Path.Combine(stage,"outside-2.png")),"outside-2 exists="+File.Exists(Path.Combine(stage,"outside-2.png")));
+            Call(window,"Undo");Pump();
+            if(editor.Document.Text!=before)ResetEditor(window,BaseText);
+        }catch(Exception ex){Check(label+" exception",false,ex.GetType().Name+": "+ex.Message);try{ResetEditor(window,BaseText);}catch(Exception){}}
+    }
+    /* Explorer's Ctrl+V of copied picture files: the clipboard holds a file list and no bitmap, so
+       the paste has to answer it as a picture insert with the same copy rule. The handler reads its
+       IDataObject, so a DataObject built here drives the real code path without touching the user's
+       clipboard (probes must never overwrite it). */
+    static void ClipboardImageFilePasteCase(MainWindow window){
+        string label="clipboard image file paste";
+        try{
+            SourceEditor editor=Source(window);
+            ResetDocImageFolder();
+            string docFolder=TempPictureFolder();
+            string destination=Path.Combine(docFolder,"outside.png");
+            string before=editor.Document.Text;
+            int caret=editor.Document.GetLineByNumber(3).Offset;
+            editor.Select(caret,0);Pump();
+            /* The real key path: PasteClipboard -> PasteClipboardImage -> ClipboardImageFiles, with
+               the clipboard's data object handed in directly (PasteClipboardImage(data)). */
+            var data=new DataObject();
+            data.SetData(DataFormats.FileDrop,new string[]{OutsidePath});
+            bool answered=(bool)Call(window,"PasteClipboardImage",new object[]{data});
+            Pump();
+            string after=editor.Document.Text;
+            string want=Markup(OutsideAlt,OutsideRef);
+            Check(label+" a file list with an image is a picture paste",answered&&after==before.Insert(caret,want),"answered="+answered+", inserted='"+Excerpt(InsertedText(before,after))+"'");
+            Check(label+" stages the picture in the shared folder first",File.Exists(destination)&&SameBytes(OutsidePath,destination),"destination='"+destination+"', exists="+File.Exists(destination));
+            Call(window,"Undo");Pump();
+            Check(label+" one undo restores the document",editor.Document.Text==before,Excerpt(editor.Document.Text));
+            if(editor.Document.Text!=before)ResetEditor(window,BaseText);
+            /* Two files in one paste: one link each, in file order, and one undo takes both out. */
+            string aDestination=Path.Combine(docFolder,"a.png"),bDestination=Path.Combine(docFolder,"a-2.png");
+            try{if(File.Exists(aDestination))File.Delete(aDestination);if(File.Exists(bDestination))File.Delete(bDestination);}catch(Exception){}
+            var two=new DataObject();
+            two.SetData(DataFormats.FileDrop,new string[]{ClashPathA,ClashPathB});
+            string beforeTwo=editor.Document.Text;
+            bool twoAnswered=(bool)Call(window,"PasteClipboardImage",new object[]{two});
+            Pump();
+            string afterTwo=editor.Document.Text;
+            string wantTwo=Markup("a",StagedRef("a.png"))+"\n"+Markup("a-2",StagedRef("a-2.png"));
+            Check(label+" two files paste two links in file order",twoAnswered&&afterTwo==beforeTwo.Insert(caret==beforeTwo.Length?beforeTwo.Length:Math.Min(caret,beforeTwo.Length),wantTwo)&&File.Exists(aDestination)&&File.Exists(bDestination),"inserted='"+Excerpt(InsertedText(beforeTwo,afterTwo))+"'");
+            Call(window,"Undo");Pump();
+            Check(label+" one undo takes both links out",editor.Document.Text==beforeTwo,Excerpt(editor.Document.Text));
+            if(editor.Document.Text!=beforeTwo)ResetEditor(window,BaseText);
+            /* A list with a document in it is not a picture paste: the text paste answers it. */
+            var mixed=new DataObject();
+            mixed.SetData(DataFormats.FileDrop,new string[]{OutsidePath,TxtPath});
+            bool mixedAnswered=(bool)Call(window,"PasteClipboardImage",new object[]{mixed});
+            Check(label+" a mixed file list is left to the text paste",!mixedAnswered&&editor.Document.Text==beforeTwo,"answered="+mixedAnswered+", changed="+(editor.Document.Text!=beforeTwo));
+            /* Explorer copies the file names into the text format as well: the picture-file list
+               must still win, or Ctrl+V would paste the names as text. */
+            var withText=new DataObject();
+            withText.SetData(DataFormats.FileDrop,new string[]{OutsidePath});
+            withText.SetData(DataFormats.UnicodeText,OutsidePath+"\r\n");
+            string beforeText=editor.Document.Text;
+            bool textAnswered=(bool)Call(window,"PasteClipboardImage",new object[]{withText});
+            Pump();
+            string afterText=editor.Document.Text;
+            Check(label+" a picture-file list wins over the file names in the text format",textAnswered&&afterText.IndexOf(Markup("outside",OutsideRef),StringComparison.Ordinal)>=0&&afterText.IndexOf(OutsidePath,StringComparison.Ordinal)<0,"answered="+textAnswered+", inserted='"+Excerpt(InsertedText(beforeText,afterText))+"'");
+            Call(window,"Undo");Pump();
+            if(editor.Document.Text!=beforeText)ResetEditor(window,BaseText);
+        }catch(Exception ex){Check(label+" exception",false,ex.GetType().Name+": "+ex.Message);try{ResetEditor(window,BaseText);}catch(Exception){}}
+    }
+    // Untitled document: the picture goes to the shared temp folder (Documents\MDNote\images) with
+    // an absolute link, which the first save then moves beside the file.
+    static void UnsavedImageFileCopyCase(MainWindow window){
+        string label="unsaved image file copy";
+        try{
+            SourceEditor editor=Source(window);
+            string temp=TempPictureFolder();
+            Directory.CreateDirectory(temp);
+            string source=Path.Combine(OutsideDir,"untitled.png");
+            File.Delete(source);
+            File.Copy(OutsidePath,source);
+            string destination=Path.Combine(temp,"untitled.png");
+            File.Delete(destination);
+            string markup=Markup("untitled",EscapeRef(destination.Replace('\\','/')));
+            string before=editor.Document.Text;
+            int caret=editor.Document.GetLineByNumber(1).Offset;
+            editor.Select(caret,0);Pump();
+            Call(window,"InsertImageFilesAtCaret",new object[]{new string[]{source}});
+            Pump();
+            string after=editor.Document.Text;
+            Check(label+" copies into the shared picture folder with an absolute link",after==before.Insert(caret,markup),"inserted='"+Excerpt(InsertedText(before,after))+"'");
+            Check(label+" made the copy",File.Exists(destination)&&SameBytes(source,destination),"destination='"+destination+"', exists="+File.Exists(destination));
+            Call(window,"Undo");Pump();
+            if(editor.Document.Text!=before)ResetEditor(window,BaseText);
+        }catch(Exception ex){Check(label+" exception",false,ex.GetType().Name+": "+ex.Message);try{ResetEditor(window,BaseText);}catch(Exception){}}
+    }
     static void RunWindowImage(){
         MainWindow window=null;
         BaseText=FixtureText;
         try{
+            /* Every image drop in this run now copies into FixtureDir\doc, so the folder starts empty
+               and each case reads the picture its own insert made (the -2 checks depend on it). */
+            ResetDocImageFolder();
             window=OpenDocument(DocPath);
-            WindowImageCase(window,"window image drop edit mode",SamePath,Markup(SameAlt,SameRef),false);
-            WindowImageCase(window,"window image drop read mode",SamePath,Markup(SameAlt,SameRef),true);
+            WindowImageCase(window,"window image drop edit mode",SamePath,Markup(SameAlt,SameRefCopy),false);
+            WindowImageCase(window,"window image drop read mode",SamePath,Markup(SameAlt,SameRefCopy),true);
             WindowMissingImageCase(window);
+            ResetDocImageFolder();
+            InsertImageFileCopyCase(window);
+            ResetDocImageFolder();
+            ClipboardImageFilePasteCase(window);
         }catch(Exception ex){Check("window image drop run",false,ex.GetType().Name+": "+ex.Message);}
         finally{SafeClose(window);}
     }
@@ -757,9 +1042,25 @@ internal static class DropProbe {
             Check("unsaved window is a new Markdown document",Field<string>(window,"path")==""&&!Prop<bool>(window,"PlainText"),"path='"+Field<string>(window,"path")+"', plain="+Prop<bool>(window,"PlainText"));
             string markup=Markup(SameAlt,UnsavedRef);
             Check("unsaved reference is an absolute path (brief listed file:///)",markup.IndexOf("file:",StringComparison.OrdinalIgnoreCase)<0&&markup.IndexOf(UnsavedRef,StringComparison.Ordinal)>=0,"expected='"+markup+"' (MarkdownCommands.ImageReference uses an absolute path for an unsaved document; UserFixProbe.cs:1005-1012 pins that form)");
+            /* The new copy rule: SamePath lies outside every folder of this untitled document, so
+               the drop copies it into Documents\MDNote\images under its own name and the link names
+               that copy, in the absolute form an untitled document writes. */
+            string tempFolder=TempPictureFolder();
+            Directory.CreateDirectory(tempFolder);
+            string tempCopy=Path.Combine(tempFolder,Path.GetFileName(SamePath));
+            try{if(File.Exists(tempCopy))File.Delete(tempCopy);}catch(Exception){}
+            string escapedCopy=EscapeRef(tempCopy.Replace('\\','/'));
+            markup=Markup(SameAlt,escapedCopy);
             RunImageCase(window,"unsaved image drop",SamePath,markup,1,3,0,false,null,-1);
+            Check("unsaved image drop copies into the shared picture folder",File.Exists(tempCopy)&&SameBytes(SamePath,tempCopy),"copy='"+tempCopy+"', exists="+File.Exists(tempCopy));
+            UnsavedImageFileCopyCase(window);
             SetRaw(window,true);
             RunImageCase(window,"unsaved raw image drop",SamePath,markup,2,3,0,false,null,-1);
+            /* The probe's own copies in the shared pictures folder are removed again: the folder is
+               the user's (Documents\MDNote\images), not this run's scratch space. */
+            foreach(string copy in new string[]{tempCopy,Path.Combine(tempFolder,"untitled.png")}){
+                try{if(File.Exists(copy))File.Delete(copy);}catch(Exception){}
+            }
         }catch(Exception ex){Check("unsaved run",false,ex.GetType().Name+": "+ex.Message);}
         finally{SafeClose(window);BaseText=FixtureText;}
     }
@@ -789,12 +1090,144 @@ internal static class DropProbe {
         }catch(Exception ex){Check("open-as-document run",false,ex.GetType().Name+": "+ex.Message);}
         finally{SafeClose(window);}
     }
+    /* Staging and the save (user, 2026-11-03). An insert into a SAVED document leaves <docname>\ alone
+       (the picture waits in the shared temp folder with an absolute link); every save moves the
+       pictures the text still links into <docname>\ of the save target and rewrites the links; a
+       Save As of a saved document copies the pictures it links from the old <docname>\ into the new
+       one; a save that does not write puts everything back. All four run through the window's real
+       Save (the SaveTargetPicker seam stands in for the native dialog). */
+    static string ReadDisk(string file){return File.ReadAllText(file,new UTF8Encoding(false));}
+    static int FileCount(string folder){return Directory.Exists(folder)?Directory.GetFiles(folder).Length:0;}
+    static bool SaveWith(MainWindow window,bool saveAs,string pickTarget,out string error){
+        error=null;
+        Func<string,string> oldPicker=MainWindow.SaveTargetPicker;
+        if(pickTarget!=null)MainWindow.SaveTargetPicker=delegate(string name){return pickTarget;};
+        try{return (bool)Call(window,"Save",saveAs);}
+        catch(TargetInvocationException ex){error=ex.InnerException!=null?ex.InnerException.GetType().Name+": "+ex.InnerException.Message:ex.Message;return false;}
+        finally{MainWindow.SaveTargetPicker=oldPicker;Pump();}
+    }
+    static void RunStageSave(){
+        MainWindow window=null;
+        try{
+            string root=Path.Combine(OutDir,"stage-save");
+            if(Directory.Exists(root))Directory.Delete(root,true);
+            Directory.CreateDirectory(root);
+            ClearTempPictureFolder();
+            string docFile=Path.Combine(root,"memo.md");
+            File.WriteAllText(docFile,"# memo\n\nfirst line\nsecond line\n",new UTF8Encoding(false));
+            string picA=Path.Combine(OutsideDir,"stage-a.png"),picB=Path.Combine(OutsideDir,"stage-b.jpg");
+            File.Copy(OutsidePath,picA,true);
+            WriteImage(picB,new System.Windows.Media.Imaging.JpegBitmapEncoder());
+            string docFolder=Path.Combine(root,"memo");
+            string stage=TempPictureFolder();
+            string label="staged save";
+            window=OpenDocument(docFile);
+            SourceEditor editor=Source(window);
+            string start=editor.Document.Text;
+            editor.Select(editor.Document.GetLineByNumber(3).Offset,0);Pump();
+            Call(window,"InsertImageFilesAtCaret",new object[]{new string[]{picA}});Pump();
+            string afterA=editor.Document.Text;
+            editor.Select(editor.Document.TextLength,0);Pump();
+            Call(window,"InsertImageFilesAtCaret",new object[]{new string[]{picB}});Pump();
+            string afterB=editor.Document.Text;
+            string markA=Markup("stage-a",StagedRef("stage-a.png")),markB=Markup("stage-b",StagedRef("stage-b.jpg"));
+            Check(label+" saved document links both pictures by their staged absolute path",afterB.IndexOf(markA,StringComparison.Ordinal)>=0&&afterB.IndexOf(markB,StringComparison.Ordinal)>=0,"text='"+Excerpt(afterB)+"'");
+            Check(label+" insert staged the files and did not touch <docname>\\",File.Exists(Path.Combine(stage,"stage-a.png"))&&File.Exists(Path.Combine(stage,"stage-b.jpg"))&&!Directory.Exists(docFolder),"temp a="+File.Exists(Path.Combine(stage,"stage-a.png"))+", b="+File.Exists(Path.Combine(stage,"stage-b.jpg"))+", docFolder exists="+Directory.Exists(docFolder));
+            /* A clipboard bitmap takes the same staging in a saved document. */
+            var bitmap=new System.Windows.Media.Imaging.RenderTargetBitmap(8,8,96,96,System.Windows.Media.PixelFormats.Pbgra32);
+            var visual=new System.Windows.Media.DrawingVisual();
+            using(var context=visual.RenderOpen())context.DrawRectangle(System.Windows.Media.Brushes.Tomato,null,new Rect(0,0,8,8));
+            bitmap.Render(visual);
+            var bitmapData=new DataObject();bitmapData.SetData(DataFormats.Bitmap,bitmap);
+            editor.Select(editor.Document.TextLength,0);Pump();
+            string beforePaste=editor.Document.Text;
+            int stagedBefore=FileCount(stage);
+            bool pasted=(bool)Call(window,"PasteClipboardImage",new object[]{bitmapData});Pump();
+            string afterPaste=editor.Document.Text;
+            string pastedLink=EscapeRef(stage.Replace('\\','/')+"/image-");
+            Check(label+" a clipboard bitmap is staged too and <docname>\\ stays absent",pasted&&afterPaste.IndexOf("!["+"image-",StringComparison.Ordinal)>=0&&afterPaste.IndexOf(pastedLink,StringComparison.Ordinal)>=0&&FileCount(stage)==stagedBefore+1&&!Directory.Exists(docFolder),"pasted="+pasted+", inserted='"+Excerpt(InsertedText(beforePaste,afterPaste))+"', staged "+stagedBefore+"->"+FileCount(stage));
+            Call(window,"Undo");Pump();
+            Check(label+" undo takes the pasted link out",editor.Document.Text==beforePaste,Excerpt(editor.Document.Text));
+            /* Inserted, then removed before saving: the picture must never reach <docname>\. */
+            Call(window,"Undo");Pump();
+            Check(label+" undo takes the second picture's link out",editor.Document.Text==afterA,Excerpt(editor.Document.Text));
+            Check(label+" the removed picture's file stays in the shared folder (nothing is deleted)",File.Exists(Path.Combine(stage,"stage-b.jpg")),"temp b="+File.Exists(Path.Combine(stage,"stage-b.jpg")));
+            string error;
+            bool saved=SaveWith(window,false,null,out error);
+            string afterSave=editor.Document.Text;
+            Check(label+" save succeeded",saved,error);
+            string movedA=Path.Combine(docFolder,"stage-a.png");
+            Check(label+" the linked picture moved into <docname>\\",File.Exists(movedA)&&SameBytes(picA,movedA)&&!File.Exists(Path.Combine(stage,"stage-a.png")),"moved="+File.Exists(movedA)+", still staged="+File.Exists(Path.Combine(stage,"stage-a.png")));
+            Check(label+" the removed picture did not land in <docname>\\",!File.Exists(Path.Combine(docFolder,"stage-b.jpg"))&&FileCount(docFolder)==1,"files in <docname>\\ = "+FileCount(docFolder));
+            Check(label+" the link is relative now",afterSave==afterA.Replace(markA,Markup("stage-a","memo/stage-a.png")),"text='"+Excerpt(afterSave)+"'");
+            Check(label+" the file on disk holds the relative link",ReadDisk(docFile)==afterSave,"disk='"+Excerpt(ReadDisk(docFile))+"'");
+            Call(window,"Undo");Pump();
+            Check(label+" the link rewrite is one undo step",editor.Document.Text==afterA,Excerpt(editor.Document.Text));
+            Call(window,"Redo");Pump();
+            string again;
+            bool savedAgain=SaveWith(window,false,null,out again);
+            Check(label+" a second plain save changes nothing",savedAgain&&editor.Document.Text==afterSave&&FileCount(docFolder)==1&&ReadDisk(docFile)==afterSave,"saved="+savedAgain+", files="+FileCount(docFolder)+" "+again);
+
+            /* Save As to another name and folder: the linked picture is COPIED, the rest is not. */
+            File.Copy(OutsidePath,Path.Combine(docFolder,"unused.png"),true);
+            string withExtras=editor.Document.Text+"\n![web](https://example.com/a.png)\n![beside](beside.png)\n";
+            ResetEditor(window,withExtras);
+            string newDir=Path.Combine(OutDir,"stage-save-new");
+            if(Directory.Exists(newDir))Directory.Delete(newDir,true);
+            Directory.CreateDirectory(newDir);
+            string newDoc=Path.Combine(newDir,"새글.md");
+            string newFolder=Path.Combine(newDir,"새글");
+            string oldDisk=ReadDisk(docFile);
+            bool savedAs=SaveWith(window,true,newDoc,out error);
+            string afterAs=editor.Document.Text;
+            label="save as copy";
+            Check(label+" save succeeded and the tab now points at the new file",savedAs&&String.Equals(Field<string>(window,"path"),newDoc,StringComparison.OrdinalIgnoreCase),"saved="+savedAs+", path='"+Field<string>(window,"path")+"' "+error);
+            string copiedA=Path.Combine(newFolder,"stage-a.png");
+            Check(label+" copied the linked picture into the new <newname>\\",File.Exists(copiedA)&&SameBytes(picA,copiedA)&&FileCount(newFolder)==1,"copy="+File.Exists(copiedA)+", files="+FileCount(newFolder));
+            Check(label+" left the old picture and folder as they were",File.Exists(movedA)&&File.Exists(Path.Combine(docFolder,"unused.png"))&&FileCount(docFolder)==2&&ReadDisk(docFile)==oldDisk,"old files="+FileCount(docFolder));
+            Check(label+" rewrote only the copied picture's link",afterAs==withExtras.Replace(Markup("stage-a","memo/stage-a.png"),Markup("stage-a","새글/stage-a.png")),"text='"+Excerpt(afterAs)+"'");
+            Check(label+" kept the web link and the unrelated relative link",afterAs.IndexOf("![web](https://example.com/a.png)",StringComparison.Ordinal)>=0&&afterAs.IndexOf("![beside](beside.png)",StringComparison.Ordinal)>=0,"text='"+Excerpt(afterAs)+"'");
+            Check(label+" the new file on disk holds the new links",ReadDisk(newDoc)==afterAs,"disk='"+Excerpt(ReadDisk(newDoc))+"'");
+            Call(window,"Undo");Pump();
+            Check(label+" the link rewrite is one undo step",editor.Document.Text==withExtras,Excerpt(editor.Document.Text));
+            SafeClose(window);window=null;
+
+            /* A save that does not write (the target is open in another window) puts it all back. */
+            string failRoot=Path.Combine(OutDir,"stage-fail");
+            if(Directory.Exists(failRoot))Directory.Delete(failRoot,true);
+            Directory.CreateDirectory(Path.Combine(failRoot,"src-doc"));
+            string srcDoc=Path.Combine(failRoot,"src-doc.md"),dstDoc=Path.Combine(failRoot,"dst-doc.md");
+            File.Copy(OutsidePath,Path.Combine(failRoot,"src-doc","old.png"),true);
+            File.WriteAllText(srcDoc,"![old](src-doc/old.png)\n\nbody\n",new UTF8Encoding(false));
+            File.WriteAllText(dstDoc,"other\n",new UTF8Encoding(false));
+            string picC=Path.Combine(OutsideDir,"stage-c.png");
+            File.Copy(OutsidePath,picC,true);
+            MainWindow holder=OpenDocument(dstDoc);
+            window=OpenDocument(srcDoc);
+            editor=Source(window);
+            editor.Select(editor.Document.TextLength,0);Pump();
+            Call(window,"InsertImageFilesAtCaret",new object[]{new string[]{picC}});Pump();
+            string beforeFail=editor.Document.Text;
+            string notice=null;
+            Action<string> oldNotice=MainWindow.SaveTargetInUseNotice;
+            MainWindow.SaveTargetInUseNotice=delegate(string message){notice=message;};
+            bool failed;string failError;
+            try{failed=SaveWith(window,true,dstDoc,out failError);}finally{MainWindow.SaveTargetInUseNotice=oldNotice;}
+            label="failed save";
+            Check(label+" refused (the target is open elsewhere)",!failed&&notice!=null,"saved="+failed+", notice='"+Excerpt(notice)+"' "+failError);
+            Check(label+" restored every link",editor.Document.Text==beforeFail,"text='"+Excerpt(editor.Document.Text)+"'");
+            string failFolder=Path.Combine(failRoot,"dst-doc");
+            Check(label+" removed the copies and moved the staged picture back",FileCount(failFolder)==0&&File.Exists(Path.Combine(stage,"stage-c.png"))&&File.Exists(Path.Combine(failRoot,"src-doc","old.png")),"new folder files="+FileCount(failFolder)+", staged c="+File.Exists(Path.Combine(stage,"stage-c.png")));
+            SafeClose(holder);
+        }catch(Exception ex){Check("stage save run",false,ex.GetType().Name+": "+ex.Message);}
+        finally{SafeClose(window);}
+    }
     static void WriteReport(){
         string marker=Path.Combine(OutDir,"drop-probe-"+(All?"PASS":"FAIL")+".txt");
         string opposite=Path.Combine(OutDir,"drop-probe-"+(All?"FAIL":"PASS")+".txt");
         try{if(File.Exists(opposite))File.Delete(opposite);}catch(Exception){}
         Report.Append('\n').Append("NOTES\n");
-        Report.Append("- Unsaved documents use an absolute file path (MarkdownCommands.ImageReference); the brief listed file:/// but the app's own test pins the absolute form (UserFixProbe.cs:1005-1012).\n");
+        Report.Append("- Unsaved documents use an absolute file path (MarkdownCommands.ImageReference) for a picture in the shared picture folder; the brief listed file:/// but the app's own test pins the absolute form (UserFixProbe.cs:1005-1012). The probe deletes the copies it makes in Documents\\MDNote\\images again.\n");
         Report.Append("- svg is not in MarkdownCommands.IsImageFile; an svg drop follows the open-as-document answer by design.\n");
         Report.Append("- The other-drive case does not create D:\\pics\\tail.png; it checks MarkdownCommands.ImageReference against the saved fixture document (D:/pics/tail.png) and that dropping the missing file inserts nothing.\n");
         Report.Append("- Drops are real routed PreviewDrop/Drop events with real DataObjects at TextView hit points; the OS drag pipeline (mouse capture, cursor) is not exercised.\n");
@@ -803,6 +1236,7 @@ internal static class DropProbe {
         Report.Append("- Read mode runs in its own window (the state a .md opens in): an existing image drop turns editing on through the Ctrl+E entry point and inserts at the hit point, a drop in the empty space under the last line appends at the document end, and a name that is gone inserts nothing while the window still consumes the image-only drop (no document opens, no decoder box).\n");
         Report.Append("- Window-level drops (status bar, tab strip, ribbon, margins) are raised on the window itself: an all-image drop on a Markdown document inserts at the caret as one undo step, read mode included, and an all-image drop never reaches LoadFile. Mixed drops keep the open-as-document answer.\n");
         Report.Append("- An image dropped inside a fenced code block is refused: a token written there would be literal text, so the source consumes the drop and neither the text nor the caret changes.\n");
+        Report.Append("- Staging rule (2026-11-03): only a picture inside the document's own picture folder (<docdir>\\<docname>, subfolders included) is linked where it is. Any other inserted picture, saved document or not, is copied into the shared picture folder (the probe points it at <dir>\\temp-images through MainWindow.ImageTempFolderOverride; original name, an identical file is reused, a different one with that name takes -2) and linked by its absolute path. Every save moves the pictures the text still links from that folder into <docname>\\ of the target and rewrites the links to relative; a Save As of a saved document copies the pictures it links from the old <docname>\\; a save that does not write restores both (RunStageSave). A failed copy keeps the original path. The same rule covers a drop, a Ctrl+V of copied files, a clipboard bitmap and the image button's dialog.\n");
         Report.Append("- Elapsed ").Append(Clock.ElapsedMilliseconds).Append(" ms.\n");
         File.WriteAllText(Path.Combine(OutDir,"drop-probe.txt"),Report.ToString(),new UTF8Encoding(false));
         File.WriteAllText(marker,"DropProbe "+(All?"PASS":"FAIL")+"  "+Passes+" PASS, "+Fails+" FAIL, "+Clock.ElapsedMilliseconds+" ms\n",new UTF8Encoding(false));
@@ -822,8 +1256,10 @@ internal static class DropProbe {
             RunTxtMode();
             RunWindowImage();
             RunUnsaved();
+            RunStageSave();
             RunOpenAsDocument();
         }catch(Exception ex){Check("probe run",false,ex.GetType().Name+": "+ex.Message);}
+        MainWindow.ImageTempFolderOverride=null;
         Clock.Stop();
         Report.Append('\n').Append("SUMMARY: ").Append(Passes).Append(" PASS, ").Append(Fails).Append(" FAIL, ").Append(Clock.ElapsedMilliseconds).Append(" ms\n");
         WriteReport();

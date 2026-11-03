@@ -36,9 +36,36 @@ public partial class MainWindow {
             window.LoadFileCore(file); LongLineBench.Idle();
             window.SetMode(true); LongLineBench.Idle();
             var doc = window.source.Document; var area = window.source.TextArea;
+            // The whole key press a probe can raise, in the two steps a real key takes: the
+            // TextArea's PreviewKeyDown (the product's structural handler is the first stop), then
+            // the vendor command the key reaches when that handler declined it. Every other key
+            // probe in this tree already does it this way (TableCaretProbe.PressLiveKey,
+            // LiveSyncProbe.PressWindowKey, MarkdownTableCommandsTests.PressBackspaceKey - "a probe
+            // cannot drive the command routing itself").
+            // This probe alone raised a bare synthetic KeyDown and left the command to WPF, and that
+            // hand-off is what made it flaky. The routed KeyDown a probe raises is not the input WPF
+            // resolves gestures from: command translation runs in WPF's own input plumbing, and the
+            // gesture's modifier half is "this.Modifiers == Keyboard.Modifiers" (source.dot.net,
+            // PresentationCore KeyGesture.cs), i.e. the LIVE global keyboard state, never the raised
+            // KeyEventArgs (only its key is read). The Backspace binding is ModifierKeys.None
+            // (vendor Editing/EditingCommandHandler.cs:66) and the same key is bound again with
+            // Shift (:67) and Control (:68), so a modifier held down at that moment on the user's PC
+            // can select a different command or none. The item then fails with the document
+            // untouched and passes on the next run. The probe cannot reproduce this on demand, so
+            // this is the reading of the code that explains the symptom, not a captured trace;
+            // executing the command directly removes the dependency either way, which is why the
+            // other probes take this shape. The product's own PreviewExecuted handlers (hidden
+            // markers, table cells, header Home/End) still run, because those are command handlers.
             Action<Key> key = delegate(Key k) {
-                var args = new KeyEventArgs(Keyboard.PrimaryDevice, System.Windows.PresentationSource.FromVisual(window.source), 0, k) { RoutedEvent = Keyboard.KeyDownEvent };
-                area.RaiseEvent(args); LongLineBench.Idle();
+                var presentation = System.Windows.PresentationSource.FromVisual(window.source);
+                if (presentation == null) { LongLineBench.Idle(); return; }
+                var preview = new KeyEventArgs(Keyboard.PrimaryDevice, presentation, 0, k) { RoutedEvent = Keyboard.PreviewKeyDownEvent };
+                area.RaiseEvent(preview);
+                if (!preview.Handled) {
+                    var command = UserFixKeyCommand(k);
+                    if (command != null) command.Execute(null, area);
+                }
+                LongLineBench.Idle();
             };
             Func<double> caretX = delegate { area.TextView.EnsureVisualLines(); return area.Caret.CalculateCaretRectangle().X; };
             string original = window.text;
@@ -50,6 +77,7 @@ public partial class MainWindow {
             // #5: one Backspace removes the empty line.
             int lines = doc.LineCount;
             key(Key.Back);
+            UserFixWait(window, delegate { return doc.LineCount == lines - 1; }, 500);
             check("5 one Backspace deletes empty line", doc.LineCount == lines - 1 && window.text.StartsWith("첫 줄\n셋째 줄", StringComparison.Ordinal), "lines " + lines + "->" + doc.LineCount);
             window.Undo(); LongLineBench.Idle();
             // #4: a new line made by Enter also starts at the left edge.
@@ -74,9 +102,25 @@ public partial class MainWindow {
             key(Key.Home);
             check("Home reaches the line start", window.source.CaretIndex == third.Offset, "caret=" + window.source.CaretIndex);
             window.source.CaretIndex = third.Offset; LongLineBench.Idle();
+            // Re-read the line right before the key: the offset the item names must be the one the
+            // key sees, and the caret is reported so a snap (a hidden boundary, a table guard) shows
+            // up as its own fact instead of a bare "line2" that looks like a product failure.
+            // Select(offset, 0) rather than CaretIndex alone: the item is the user's plain caret at
+            // a line start, and a selection left over from an earlier step would make the key
+            // delete that selection instead of the newline.
+            DocumentLine joinLine = doc.GetLineByNumber(3);
+            window.source.Select(joinLine.Offset, 0); LongLineBench.Idle();
+            // Take the start offset now: the merge deletes this line object (the blank line above it
+            // is the one that survives and absorbs the text - LineManager.Remove removes the end line
+            // of the deleted delimiter), and DocumentLine.Offset throws once the line is deleted.
+            int joinCaret = window.source.CaretIndex, joinOffset = joinLine.Offset, joinLines = doc.LineCount;
+            string joinBefore = window.text;
             key(Key.Back);
-            bool joined = doc.GetText(doc.GetLineByNumber(2)) == "셋째 줄";
-            check("Backspace at line start joins in one press", joined, "line2='" + doc.GetText(doc.GetLineByNumber(2)) + "'");
+            UserFixWait(window, delegate { return doc.LineCount == joinLines - 1; }, 500);
+            string joinText = doc.LineCount >= 2 ? doc.GetText(doc.GetLineByNumber(2)) : "";
+            bool joined = joinCaret == joinOffset && joinText == "셋째 줄";
+            check("Backspace at line start joins in one press", joined, "caret=" + joinCaret + "/" + joinOffset + ", lines=" + joinLines + "->" + doc.LineCount + ", line2='" + joinText + "', before='" + joinBefore.Replace("\n", "/") + "', after='" + window.text.Replace("\n", "/") + "'");
+            // The join is what the next item's undo premise rests on: take it back before moving on.
             window.Undo(); LongLineBench.Idle();
 
             // #7: a format command waits for the pending IME commit instead of letting the
@@ -198,6 +242,33 @@ public partial class MainWindow {
         UserFixWatch.Stop();
         System.Threading.SynchronizationContext.SetSynchronizationContext(previousContext);
         return all ? 0 : 1;
+    }
+    // The vendor command each plain editing key runs once the product's PreviewKeyDown handler has
+    // declined it (vendor Editing/EditingCommandHandler binds these on the TextArea). WPF resolves a
+    // key to its KeyBinding inside CommandManager.TranslateInput, which a probe cannot reach, so the
+    // probe executes the same command the key would - the shape the other key probes use.
+    static System.Windows.Input.RoutedUICommand UserFixKeyCommand(Key k) {
+        switch (k) {
+            case Key.Back: return System.Windows.Documents.EditingCommands.Backspace;
+            case Key.Delete: return System.Windows.Documents.EditingCommands.Delete;
+            case Key.End: return System.Windows.Documents.EditingCommands.MoveToLineEnd;
+            case Key.Home: return System.Windows.Documents.EditingCommands.MoveToLineStart;
+            case Key.Left: return System.Windows.Documents.EditingCommands.MoveLeftByCharacter;
+            case Key.Right: return System.Windows.Documents.EditingCommands.MoveRightByCharacter;
+            default: return null;
+        }
+    }
+    // Wait, in bounded steps, for the reading the check wants: a deferred dispatcher pass (the
+    // table-caret guard, a layout settle) may still be about to change the document or the caret,
+    // so reading once and failing was the flaky shape. UserFixPump is the bounded idle used by the
+    // stand-in checks, so a starved dispatcher ends the wait instead of hanging it.
+    static bool UserFixWait(MainWindow window, Func<bool> condition, int milliseconds) {
+        for (int waited = 0; ; waited += 20) {
+            if (condition()) return true;
+            if (waited >= milliseconds) return false;
+            UserFixPump(window, 150);
+            System.Threading.Thread.Sleep(20);
+        }
     }
     static System.Windows.Controls.Button RetestHistoryButton(System.Windows.DependencyObject node,bool redo) {
         var button=node as System.Windows.Controls.Button;
@@ -1072,16 +1143,22 @@ public partial class MainWindow {
             window.SetMode(true); LongLineBench.Idle();
             check("drop live surface active", window.LiveFormat && window.livePreview != null, "live=" + window.LiveFormat);
             System.Windows.Point livePoint = DropPointInSource(window.source, 3);
+            // 2026-11-03 (2.1.0): an inserted picture is staged in the temp image folder until the next
+            // save, so the probe points that folder at its own scratch place.
+            string stageDir = Path.GetFullPath(docPath) + "-stage"; Directory.CreateDirectory(stageDir); MainWindow.ImageTempFolderOverride = stageDir;
+            string stagePrefix = stageDir.Replace('\\', '/').Replace("%", "%25").Replace("(", "%28").Replace(")", "%29").Replace(" ", "%20") + "/";
             bool liveAccepted = window.AcceptSourceImageDrop(new string[] { spaced, up }, livePoint);
             window.FlushDocumentChanges(); LongLineBench.Idle();
             string[] liveLines = window.text.Split('\n');
+            // A picture that is not inside the document's own image folder is staged (copied into the
+            // temp image folder, absolute link) and only moved into <docname>\ by the next save.
             check("drop live inserts at the drop line",
-                liveAccepted && liveLines.Length >= 4 && liveLines[2] == "![two words (1)](two%20words%20%281%29.png)" && liveLines[3].StartsWith("![up](../imagedrop-other/up.png)", StringComparison.Ordinal),
+                liveAccepted && liveLines.Length >= 4 && liveLines[2] == "![two words (1)](" + stagePrefix + "two%20words%20%281%29.png)" && liveLines[3].StartsWith("![up](" + stagePrefix + "up.png)", StringComparison.Ordinal),
                 "accepted=" + liveAccepted + ", text='" + window.text.Replace("\n", "\\n") + "'");
             MarkdownLivePreview.Replacement? liveImage = null;
             var info = window.livePreview.Info(window.source.Document.GetLineByNumber(3));
             if (info != null) foreach (MarkdownLivePreview.Replacement replacement in info.Replacements) if (replacement.Kind == MarkdownLivePreview.ReplacementKind.Image) liveImage = replacement;
-            check("drop live line is an image for the renderer", liveImage.HasValue && liveImage.Value.Source == "two%20words%20%281%29.png",
+            check("drop live line is an image for the renderer", liveImage.HasValue && liveImage.Value.Source == stagePrefix + "two%20words%20%281%29.png",
                 "found=" + liveImage.HasValue + ", source='" + (liveImage.HasValue ? liveImage.Value.Source : "-") + "'");
             System.Windows.Controls.Image decoded = null;
             for (int wait = 0; wait < 100 && decoded == null && liveImage.HasValue; wait++) {
@@ -1091,13 +1168,14 @@ public partial class MainWindow {
             check("drop live image decodes from the shared reference", decoded != null && decoded.Source != null, "decoded=" + (decoded != null));
             window.Undo(); LongLineBench.Idle(); window.FlushDocumentChanges(); LongLineBench.Idle();
             check("drop live is one undo step", window.text == original, "text='" + window.text.Replace("\n", "\\n") + "'");
-            // The live image button writes the same reference as the drop.
+            // The live image button writes the same reference as the drop (and copies the same way).
             window.InsertLiveImageFile(spaced); window.FlushDocumentChanges(); LongLineBench.Idle();
             check("drop live image button uses the shared reference",
-                window.text.Contains("![two words (1)](two%20words%20%281%29.png)") && !window.text.Contains("file:"),
+                window.text.Contains("![two words (1)](" + stagePrefix + "two%20words%20%281%29.png)") && !window.text.Contains("file:"),
                 "text='" + window.text.Replace("\n", "\\n") + "'");
             window.Undo(); LongLineBench.Idle(); window.FlushDocumentChanges(); LongLineBench.Idle();
             check("drop live image button undo", window.text == original, "text='" + window.text.Replace("\n", "\\n") + "'");
+            MainWindow.ImageTempFolderOverride = null;
 
             // (4) A TXT document cannot hold an image: warn and change nothing.
             int notices = 0; string notice = null;

@@ -36,6 +36,12 @@ public partial class MainWindow : Window {
     readonly StackPanel search=new StackPanel {Orientation=Orientation.Horizontal,Visibility=Visibility.Collapsed};
     string path="",saved="",sizeText="";
     bool editing,loading,dark,wordWrap=true,updatingTools;
+    /* 이전 세션 계속하기 (user, 2026-11-03): the File-menu option and its check, and the pictures a
+       paste wrote for each tab, so the first save of an untitled document can move them next to the
+       file it is being saved as (Recovery.cs / PasteSupport.cs own the two behaviours). The table's
+       keys are weak: a closed tab is collected with its list. */
+    bool continueSession;MenuItem continueSessionToggle;
+    readonly System.Runtime.CompilerServices.ConditionalWeakTable<DocumentTab,List<string>> pastedImages=new System.Runtime.CompilerServices.ConditionalWeakTable<DocumentTab,List<string>>();
     double fontSize=16;
     string family=ViewPreferences.DefaultFamily(null);
     Color? customColor;
@@ -82,7 +88,7 @@ public partial class MainWindow : Window {
         // popup (that completion made the first item click land on the document). Harmless when
         // nothing is composing: the handler returns after two cheap IMM checks.
         menu.PreviewMouseMove+=delegate(object sender,System.Windows.Input.MouseEventArgs args){CommitCompositionForMenu("menu hover");};
-        var file=AddMenu(menu,"파일(_F)");Item(file,"새로 만들기","Ctrl+N",NewFile);Item(file,"열기…","Ctrl+O",delegate{RunAfterCompositionOrNow(OpenDialog);});Item(file,T("저장"),"Ctrl+S",delegate{SaveFromUi(false);});Item(file,"다른 이름으로 저장…","Ctrl+Shift+S",delegate{SaveFromUi(true);});file.Items.Add(new Separator());Item(file,"인쇄…","Ctrl+P",Print);file.Items.Add(new Separator());Item(file,"끝내기","Alt+F4",Close);
+        var file=AddMenu(menu,"파일(_F)");var continueItem=continueSessionToggle=new MenuItem {Header="이전 세션 계속하기",IsCheckable=true,IsChecked=continueSession};continueItem.Click+=delegate{SetContinueSession(continueItem.IsChecked);};file.Items.Add(continueItem);file.Items.Add(new Separator());Item(file,"새로 만들기","Ctrl+N",NewFile);Item(file,"열기…","Ctrl+O",delegate{RunAfterCompositionOrNow(OpenDialog);});Item(file,T("저장"),"Ctrl+S",delegate{SaveFromUi(false);});Item(file,"다른 이름으로 저장…","Ctrl+Shift+S",delegate{SaveFromUi(true);});file.Items.Add(new Separator());Item(file,"인쇄…","Ctrl+P",Print);file.Items.Add(new Separator());Item(file,"끝내기","Alt+F4",Close);
         var edit=AddMenu(menu,"편집(_E)");Item(edit,"수정 시작/종료","Ctrl+E",Toggle);edit.Items.Add(new Separator());Item(edit,"실행 취소","Ctrl+Z",Undo);Item(edit,"다시 실행","Ctrl+Y",Redo);edit.Items.Add(new Separator());Item(edit,"모두 선택","Ctrl+A",delegate{source.SelectAll();});Item(edit,"복사","Ctrl+C",delegate{source.Copy();});Item(edit,"잘라내기","Ctrl+X",delegate{if(editing)source.Cut();});Item(edit,"붙여넣기","Ctrl+V",delegate{PasteClipboard(false);});Item(edit,"서식 없이 붙여넣기","Ctrl+Shift+V",delegate{PasteClipboard(true);});Item(edit,"이미지 삽입…","Ctrl+Shift+I",delegate{RunAfterCompositionOrNow(InsertImage);});edit.Items.Add(new Separator());Item(edit,"찾기…","Ctrl+F",delegate{ToggleSearch(false);});Item(edit,"바꾸기…","Ctrl+H",delegate{ToggleSearch(true);});
         var view=AddMenu(menu,"보기(_V)");var wrap=wrapToggle=new MenuItem {Header="자동 줄바꿈",IsCheckable=true,IsChecked=true};wrap.Click+=delegate{SetWrap(wrap.IsChecked);};view.Items.Add(wrap);view.Items.Add(new Separator());BuildLiveViewItem(view);view.Items.Add(new Separator());Item(view,"글자 확대","Ctrl++",delegate{Zoom(2);});Item(view,"글자 축소","Ctrl+-",delegate{Zoom(-2);});Item(view,"기본 글자 크기","Ctrl+0",delegate{SetBaseFont(family,16);});BuildLineMenu(view);view.Items.Add(new Separator());Item(view,"글꼴 및 크기…","",delegate{RunAfterCompositionOrNow(ChooseFont);});Item(view,"기본 글자색…","",delegate{RunAfterCompositionOrNow(ChooseColor);});Item(view,"기본 글자색 초기화","",delegate{customColor=null;RenderPreservingView();});view.Items.Add(new Separator());darkToggle=new MenuItem {Header="다크 모드",IsCheckable=true,IsChecked=dark};darkToggle.Click+=delegate{SetDark(darkToggle.IsChecked);};view.Items.Add(darkToggle);
         var help=AddMenu(menu,"도움말(_H)");Item(help,"MD파일 작성방법","",OpenUsage);Item(help,"MDNote 사용법","",OpenAppUsage);help.Items.Add(new Separator());Item(help,"MDNote 정보","",ShowAbout);
@@ -400,14 +406,20 @@ public partial class MainWindow : Window {
     // and an entry over the discarded span would let Ctrl+Z bring back exactly the text the
     // prompt just threw away.
     void DiscardEditExitChanges(){
-        recoveredDocument=false;
+        /* A session-restored tab's save point is the recovered text itself, and that text never
+           reached its file: the discard drops this edit session's changes, not the recovered text,
+           so the tab has to stay modified. Clearing the mark here dropped the * and closing then
+           discarded the text with no prompt and no draft. A crash-restored tab (an empty save
+           point) really does revert to it and keeps the old behaviour. */
+        bool keepRecovered=recoveredDocument&&saved.Length>0;
+        recoveredDocument=keepRecovered;
         int caret=source==null?0:source.CaretIndex;
         CancelEditorRefresh();
         History.Clear();
         text=saved;
         Render();
         if(source!=null){if(caret>source.Document.TextLength)caret=source.Document.TextLength;if(caret<0)caret=0;source.Select(caret,0);}
-        ForgetRecovery(activeDocument);
+        if(!keepRecovered)ForgetRecovery(activeDocument);
     }
     internal bool ApplyEditExit(SaveChoice choice){if(!HasUnsavedChanges){SetMode(false);return true;}if(choice==SaveChoice.Cancel)return false;if(choice==SaveChoice.Save&&!Save(false))return false;if(choice==SaveChoice.Discard)DiscardEditExitChanges();SetMode(false);return true;}
     // The command path awaits the save so a large format-changing write finishes (and the overlay
@@ -624,6 +636,7 @@ public partial class MainWindow : Window {
     // the visible tab. A tab is switched (invisibly) only when the user saves it, and the window is
     // restored only when that save needs a Save As dialog.
     async System.Threading.Tasks.Task<bool> ConfirmTabsMinimized(){
+        if(TryCloseWithSession())return true;
         CaptureTab();var previous=activeDocument;
         try{
             foreach(var state in new List<DocumentTab>(documents)){
@@ -646,7 +659,7 @@ public partial class MainWindow : Window {
     // Awaitable counterparts used by the close batch (WindowPlacement.ProcessWindowCloses). The
     // synchronous Confirm/ConfirmTabs in Workspace.cs stay for the self-test close path.
     async System.Threading.Tasks.Task<bool> ConfirmAsync(){if(!HasUnsavedChanges)return true;var answer=AskSave();if(answer==SaveChoice.Discard)return true;if(answer!=SaveChoice.Save)return false;if(await SaveTaskOnDispatcher(false))return true;if(!Program.IsSelfTest&&!LastSaveCancelled&&!LastSaveReported){EnsureVisibleForeground();MessageBox.Show(this,LastSaveFailure??T("저장할 수 없습니다.\n"),"MDNote");}return false;}
-    async System.Threading.Tasks.Task<bool> ConfirmTabsAsync(){CaptureTab();var previous=activeDocument;try{foreach(var state in new List<DocumentTab>(documents)){bool current=Object.ReferenceEquals(state,activeDocument);if(!current&&state.Text==state.Saved&&!state.Recovered)continue;if(!current){switchingTabs=true;documentTabs.SelectedItem=state.Item;switchingTabs=false;SwitchTab(state);}if(!(await ConfirmAsync()))return false;}return true;}finally{if(previous!=null&&documents.Contains(previous)&&!Object.ReferenceEquals(activeDocument,previous)){switchingTabs=true;documentTabs.SelectedItem=previous.Item;switchingTabs=false;SwitchTab(previous);}}}
+    async System.Threading.Tasks.Task<bool> ConfirmTabsAsync(){/* 이전 세션 계속하기: the option answers the close for the whole window at once, before any tab is switched, so the prompt never opens and the session's first document is the one that was on screen. */if(TryCloseWithSession())return true;CaptureTab();var previous=activeDocument;try{foreach(var state in new List<DocumentTab>(documents)){bool current=Object.ReferenceEquals(state,activeDocument);if(!current&&state.Text==state.Saved&&!state.Recovered)continue;if(!current){switchingTabs=true;documentTabs.SelectedItem=state.Item;switchingTabs=false;SwitchTab(state);}if(!(await ConfirmAsync()))return false;}return true;}finally{if(previous!=null&&documents.Contains(previous)&&!Object.ReferenceEquals(activeDocument,previous)){switchingTabs=true;documentTabs.SelectedItem=previous.Item;switchingTabs=false;SwitchTab(previous);}}}
     void NewFile(){if(fileOpenRunning)CancelFileOpen();if(!openInTabs){if(path==""&&text==""&&saved==""&&!recoveredDocument){SetMode(true);return;}var window=new MainWindow();window.SetOpenInTabs(false);window.Show();window.EnsureVisibleForeground();window.SetMode(true);return;}CreateTab();SetMode(true);}
     void OpenDialog(){var d=new Microsoft.Win32.OpenFileDialog {Multiselect=true,Filter=T("Markdown / 텍스트|*.md;*.markdown;*.txt|모든 파일|*.*")};if(d.ShowDialog(this)==true)foreach(string selected in d.FileNames)LoadFile(selected);}
     void LoadFileCore(string name){try{Encoding encoding;string fingerprint;byte[] originalBytes;string value=ReadTextFileVersion(name,out encoding,out fingerprint,out originalBytes);bool plain=String.Equals(System.IO.Path.GetExtension(name),".txt",StringComparison.OrdinalIgnoreCase);/* One normalization, one length: the size decisions below and ApplyLoadedFile's buffer (and its basic-view flag) must agree on a body just past the limit, where a file whose detected newline is CRLF is shorter on disk than in the buffer if it also holds bare LF breaks. */string newline=DetectNewline(value);string buffer=NormalizeLineEndings(value,newline);if(buffer==value)originalBytes=null;ApplyLoadedFile(name,value,encoding,fingerprint,originalBytes,buffer,newline);}catch(Exception ex){if(Program.IsSelfTest)throw;EnsureVisibleForeground();MessageBox.Show(this,T("파일을 열 수 없습니다.\n")+ex.Message,"MDNote");}}
@@ -708,6 +721,9 @@ public partial class MainWindow : Window {
                write another tab's text to the path that was chosen for this one. */
             if(!Object.ReferenceEquals(saveTab,activeDocument)){LastSaveCancelled=true;return false;}
         }
+        /* The first save's picture move, when it ran: a save that does not write puts the pictures
+           and their absolute links back (the failure paths below call this too). */
+        PastedImageMoveState movedPictures=null;
         try{
             Encoding encoding=documentEncoding;
             if(choose){
@@ -732,17 +748,35 @@ public partial class MainWindow : Window {
                     if(selected.Encoding!=NativeSaveDialog.KeepEncoding)encoding=StrictEncoding(selected.Encoding);
                 }
             }
+            /* Every save (user, 2026-11-03): the pictures the text links from the shared temp folder
+               move into <docname>\ beside the target and their links become relative before the
+               bytes are written, so the file on disk holds the relative form; a Save As of a saved
+               document also copies the pictures it links from the old <docname>\ (PasteSupport.cs
+               MovePastedImagesToDocument). Without staged or old-folder pictures it only parses. */
+            movedPictures=MovePastedImagesToDocument(target);
             bool saved=await SaveToPathAsyncCore(target,encoding,choose,approved);
+            /* Nothing was written: the tab is still untitled and must not be left pointing at
+               pictures that left the temp folder for a file that was never made. */
+            if(!saved)RestorePastedImagesAfterFailedSave(movedPictures);
+            /* The write binds the document to `target` (DocumentEncoding.WriteConvertedToPath sets
+               path), so the folder relative image links resolve against has changed. The rewrite
+               above ran while the tab was still untitled, and a live session resolves against the
+               folder it was last given: without this hand-over the pictures the move just placed
+               stayed placeholders until the view was rebuilt for another reason (a reopen). Only a
+               save that could pick a path (the first save, a Save As) runs it; an ordinary Ctrl+S
+               keeps its path, and Update returns at once when the folder did not actually change. */
+            if(saved&&(choose||movedPictures!=null))RefreshLiveDocumentPath();
             if(!saved)LastSaveFailure=T("문서가 저장되지 않았습니다.")+Environment.NewLine+T("저장이 취소되었거나 다른 작업 때문에 중단되었습니다.");
             return saved;
         }catch(SaveTargetInUseException ex){
+            RestorePastedImagesAfterFailedSave(movedPictures);
             /* The picked Save As target is another tab's or window's file: refuse before touching
                it (UI bug hunt 4 item 2). The observer seam keeps a hidden run off the modal box. */
             LastSaveReported=true;Action<string> notice=SaveTargetInUseNotice;
             if(notice!=null){try{notice(ex.Message);}catch(Exception){}return false;}
             if(Program.IsSelfTest)throw;
             EnsureVisibleForeground();MessageBox.Show(this,ex.Message,"MDNote");return false;
-        }catch(SaveConflictException ex){if(Program.IsSelfTest&&!ConflictAnswer.HasValue)throw;ConflictPrompts++;MessageBoxResult answer=ConflictAnswer.HasValue?ConflictAnswer.Value:MessageBoxResult.No;if(!ConflictAnswer.HasValue){EnsureVisibleForeground();answer=MessageBox.Show(this,ex.Message+"\n\n"+T("다른 이름으로 저장하시겠습니까?"),"MDNote",MessageBoxButton.YesNo,MessageBoxImage.Warning);}if(answer==MessageBoxResult.Yes){
+        }catch(SaveConflictException ex){RestorePastedImagesAfterFailedSave(movedPictures);if(Program.IsSelfTest&&!ConflictAnswer.HasValue)throw;ConflictPrompts++;MessageBoxResult answer=ConflictAnswer.HasValue?ConflictAnswer.Value:MessageBoxResult.No;if(!ConflictAnswer.HasValue){EnsureVisibleForeground();answer=MessageBox.Show(this,ex.Message+"\n\n"+T("다른 이름으로 저장하시겠습니까?"),"MDNote",MessageBoxButton.YesNo,MessageBoxImage.Warning);}if(answer==MessageBoxResult.Yes){
             /* A retry that already carried the approval for this exact file and met the conflict
                again is a write the open queue could not approve: a format-changing conversion of a
                large document writes inside DrainFileOpens, which has no approved path. Retrying it
@@ -752,9 +786,11 @@ public partial class MainWindow : Window {
             retry=true;approved=documentFingerprintPath;ConflictRetrySawBusy=documentOperationBusy||fileOpenRunning;}
             else{LastSaveReported=true;return false;}
         }catch(EncoderFallbackException){
+            RestorePastedImagesAfterFailedSave(movedPictures);
             if(Program.IsSelfTest)throw;
             LastSaveReported=true;MessageBox.Show(this,T("선택한 인코딩으로 저장할 수 없는 문자가 있습니다. UTF-8로 저장해 주세요."),"MDNote");return false;
         }catch(Exception ex){
+            RestorePastedImagesAfterFailedSave(movedPictures);
             if(Program.IsSelfTest)throw;
             LastSaveReported=true;MessageBox.Show(this,T("저장할 수 없습니다.\n")+ex.Message,"MDNote");return false;
         }if(retry)return await RetrySaveOnDispatcher(approved);return false;}

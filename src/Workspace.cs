@@ -286,9 +286,12 @@ public partial class MainWindow {
             if(!editing){ShowImageTxtNotice();return true;}
         }
         if(documentOperationBusy){ShowImageBusyNotice();return true;}
+        /* A picture outside the document's own picture folder is staged in the shared temp folder
+           first (PasteSupport.cs ImageFilesForInsert); the save moves it into <docname>\. */
+        files=ImageFilesForInsert(files);
         var references=new List<string>();
         var alts=new List<string>();
-        foreach(string file in files){references.Add(MarkdownCommands.ImageReference(path,file));alts.Add(System.IO.Path.GetFileNameWithoutExtension(file));}
+        foreach(string file in files){references.Add(ImageLinkReference(file));alts.Add(System.IO.Path.GetFileNameWithoutExtension(file));}
         var owner=source;var document=owner.Document;
         try{
             owner.RunAfterComposition(delegate{

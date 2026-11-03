@@ -150,7 +150,7 @@ static class ToolbarShotRunner {
                 MeasureSplits(window,host,report,dark,outDir,name);
                 MeasureSplitSegments(window,host,report,dark,outDir,name);
                 ValidateTheme(window.Resources,dark);
-                if(width==1050&&!dark){for(int level=0;level<=6;level++)MeasureCaption(window,level,report);window.ToolbarSearchPrefillCheck();report.AppendLine("search: no selection pre-fill, existing query kept PASS");}
+                if(width==1050&&!dark){var captionFaces=new List<string>();for(int level=0;level<=6;level++){string face=MeasureCaption(window,level,report);if(face.Length>0){if(captionFaces.IndexOf(face)>=0)throw new InvalidOperationException("Heading captions share a face: "+face);captionFaces.Add(face);}}report.AppendLine("caption faces: "+captionFaces.Count+" distinct level faces = "+String.Join(" / ",captionFaces.ToArray()));window.ToolbarSearchPrefillCheck();report.AppendLine("search: no selection pre-fill, existing query kept PASS");}
                 if(width==1050)MeasureDialogButtons(window,report,dark,outDir);
                 /* the narrow check needs the row in the host: it used to run after host.Child=null, so every
                    control was "detached" and the overlap test never looked at a single rectangle (b56) */
@@ -247,16 +247,33 @@ static class ToolbarShotRunner {
         for(int y=0;y<h;y++)for(int x=0;x<w;x++){int at=(y*w+x)*4;bool ink=dark?pixels[at]>100&&pixels[at+1]>100&&pixels[at+2]>100:pixels[at]<200&&pixels[at+1]<200&&pixels[at+2]<200;if(foreground.HasValue){Color color=foreground.Value;double paper=dark?39:255,contrast=paper-(color.R+color.G+color.B)/3.0;ink=(paper-(pixels[at]+pixels[at+1]+pixels[at+2])/3.0)/contrast>=.5;}if(ink){left=Math.Min(left,x);right=Math.Max(right,x);top=Math.Min(top,y);bottom=Math.Max(bottom,y);}}
         return right<left?Rect.Empty:new Rect(x0+left,y0+top,right-left+1,bottom-top+1);
     }
-    static double MeasureCaption(MainWindow window,int level,StringBuilder report){
+    /* 11-01 approved design (InsertControls.cs: HeadingWordWeight / HeadingDigitFaces / HeadingDigitWeights): the
+       word has only three Malgun faces - Bold for 1-2, Regular for 3-4, and the Malgun Gothic Semilight family at
+       Normal for 5-6 - and the trailing digit carries the step inside each pair with a named Segoe UI face
+       (Black, Bold, Semibold, then Semilight/Light families at Normal). The old expectation here (Light 300 words,
+       350/300 digit weights, one hardcoded "Malgun Gothic"/"Segoe UI" lookup for every level) predates that design,
+       which is why it threw on both 2.0 and the current build while the caption itself looked right. */
+    static readonly int[] CaptionWordWeights={400,700,700,400,400,400,400};
+    static readonly int[] CaptionDigitWeights={400,900,700,600,400,400,400};
+    static readonly string[] CaptionDigitFaces={"","Segoe UI Black","Segoe UI","Segoe UI Semibold","Segoe UI","Segoe UI Semilight","Segoe UI Light"};
+    static readonly string[] CaptionLightWordFaces={"","","","","","Malgun Gothic Semilight","Malgun Gothic Semilight"};
+    static string FirstFamily(FontFamily family){string source=family==null?"":family.Source;int comma=source.IndexOf(',');return (comma<0?source:source.Substring(0,comma)).Trim();}
+    static string MeasureCaption(MainWindow window,int level,StringBuilder report){
         var caption=(TextBlock)window.ToolbarCaptionMeasure(level);caption.HorizontalAlignment=HorizontalAlignment.Left;var holder=new ContentControl {Content=caption,HorizontalContentAlignment=HorizontalAlignment.Left,VerticalContentAlignment=VerticalAlignment.Center,FontFamily=Ui.LabelFamily,FontSize=Ui.LabelSize,Foreground=(Brush)window.Resources["Ink"]};
         var host=new Border {Child=holder,Width=80,Height=32,Background=Brushes.White,LayoutTransform=new ScaleTransform(4,4)};Settle(host,320,128);
         Rect pixels=PixelInk(Render(host,320,128),new Rect(0,0,320,128),false);double centre=(pixels.Left+pixels.Width/2)/4,offset=centre-(BoundsIn(caption,host).Left+(caption.ActualWidth+caption.Margin.Right-caption.Margin.Left)/2);string captionName=System.Windows.Automation.AutomationProperties.GetName(caption);
         var runs=new List<System.Windows.Documents.Run>();foreach(var inline in caption.Inlines){var run=inline as System.Windows.Documents.Run;if(run==null)throw new InvalidOperationException("Heading caption is not real text");runs.Add(run);}
         if(runs.Count!=(level==0?1:2)||caption.FontFamily.Source!=Ui.LabelFamily.Source||caption.FontSize!=13)throw new InvalidOperationException("Heading caption font/run count");
-        int[] wordWeights={400,700,700,400,400,300,300},numberWeights={400,900,700,600,400,350,300};if(runs[0].FontWeight.ToOpenTypeWeight()!=wordWeights[level]||(level>0&&runs[1].FontWeight.ToOpenTypeWeight()!=numberWeights[level]))throw new InvalidOperationException("Heading caption face weights");
-        string faces="";for(int i=0;i<runs.Count;i++){var face=new Typeface(new FontFamily(level==0||i==0?"Malgun Gothic":"Segoe UI"),FontStyles.Normal,runs[i].FontWeight,FontStretches.Normal);GlyphTypeface glyph;if(!face.TryGetGlyphTypeface(out glyph)||glyph.StyleSimulations!=StyleSimulations.None||glyph.Weight!=runs[i].FontWeight)throw new InvalidOperationException("Synthetic heading face");faces+=" "+runs[i].FontWeight;}
+        int wordWeight=runs[0].FontWeight.ToOpenTypeWeight();string wordFace=FirstFamily(runs[0].FontFamily);
+        if(wordWeight!=CaptionWordWeights[level])throw new InvalidOperationException("Heading caption word weight: "+captionName+" wanted "+CaptionWordWeights[level]+" got "+wordWeight);
+        if(CaptionLightWordFaces[level].Length>0&&!String.Equals(wordFace,CaptionLightWordFaces[level],StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Heading caption light word face: "+captionName+" wanted "+CaptionLightWordFaces[level]+" got "+wordFace);
+        string signature="word="+wordFace+"/"+wordWeight;
+        if(level>0){int digitWeight=runs[1].FontWeight.ToOpenTypeWeight();string digitFace=FirstFamily(runs[1].FontFamily);
+            if(digitWeight!=CaptionDigitWeights[level]||!String.Equals(digitFace,CaptionDigitFaces[level],StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Heading caption digit face: "+captionName+" wanted "+CaptionDigitFaces[level]+"/"+CaptionDigitWeights[level]+" got "+digitFace+"/"+digitWeight);
+            signature+=" digit="+digitFace+"/"+digitWeight;}
+        string faces="";for(int i=0;i<runs.Count;i++){var face=new Typeface(runs[i].FontFamily,FontStyles.Normal,runs[i].FontWeight,FontStretches.Normal);GlyphTypeface glyph;if(!face.TryGetGlyphTypeface(out glyph)||glyph.StyleSimulations!=StyleSimulations.None)throw new InvalidOperationException("Synthetic heading face: "+captionName+" "+runs[i].FontWeight);faces+=" "+FirstFamily(runs[i].FontFamily)+"/"+runs[i].FontWeight.ToOpenTypeWeight()+"(glyph "+glyph.Weight.ToOpenTypeWeight()+")";}
         report.AppendLine("caption "+captionName+" width="+F(caption.ActualWidth)+" pixel4x inkWidth="+F(pixels.Width/4)+" centreX="+F(centre)+" centredInkOffset="+F(offset)+" faces="+faces);host.Child=null;
-        if(Math.Abs(offset)>.5)throw new InvalidOperationException("Heading caption ink not centred: "+captionName+" "+F(offset));return pixels.Width/4;
+        if(Math.Abs(offset)>.5)throw new InvalidOperationException("Heading caption ink not centred: "+captionName+" "+F(offset));return signature;
     }
     static T Descendant<T>(DependencyObject node) where T:DependencyObject{for(int i=0;i<VisualTreeHelper.GetChildrenCount(node);i++){var child=VisualTreeHelper.GetChild(node,i);var hit=child as T;if(hit!=null)return hit;hit=Descendant<T>(child);if(hit!=null)return hit;}return null;}
     static void MeasureSourceToggle(MainWindow window,FrameworkElement host,StringBuilder report,bool dark){

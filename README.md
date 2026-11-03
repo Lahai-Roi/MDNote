@@ -21,8 +21,8 @@ A fast, lightweight Markdown and TXT editor for Windows—just like Notepad.
 
 [Download Latest Release (Releases)](https://github.com/Lahai-Roi/MDNote/releases/latest)
 
-- `MDNote-Setup-2.0.1.exe`: Installer. Choose your language on the first screen of the setup.
-- `MDNote-2.0.1-portable.zip`: Portable version (no installation required). Extract the ZIP and run `MDNote.exe`.
+- `MDNote-Setup-2.1.0.exe`: Installer. Choose your language on the first screen of the setup.
+- `MDNote-2.1.0-portable.zip`: Portable version (no installation required). Extract the ZIP and run `MDNote.exe`.
 - Requires Windows 10/11 64-bit and .NET Framework 4.8 (pre-installed on Windows).
 - Because the executable is not digitally signed, Windows may show a warning on first launch. Click **More info → Run anyway**.
 
@@ -33,6 +33,8 @@ A fast, lightweight Markdown and TXT editor for Windows—just like Notepad.
 - **Table Editing**: Type directly inside cells, and add, remove, or align rows and columns using the toolbar.
 - **TXT mode**: Plain text editing with line numbers. Converting MD to TXT strips formatting symbols and keeps only the visible text.
 - **Tabs, Windows, and Outline**: Open multiple documents in tabs or new windows, and jump to sections using the heading list.
+- **Insert images**: Whether added via paste, drag-and-drop, or the image button, images remaining in the document upon saving are collected into an adjacent folder of the same name and linked.
+- **Continue previous session**: When on, closes unsaved documents without prompting and resumes them right where you left off the next time you open MDNote.
 - **Find & Replace, Print, Encodings**: Open and save files in UTF-8, UTF-16, CP949, Shift JIS, GBK, Big5, and more.
 - **Dark mode, Font & Line Spacing, F1–F12 Shortcuts**: Customize display settings and function key shortcuts to your liking.
 - **5 Languages**: Supports 한국어, English, 日本語, 简体中文, and 繁體中文. Help guides and sample documents open in the selected language.
@@ -75,7 +77,7 @@ No. Typing right after the end of bold text switches back to normal text, while 
 This is because the executable is not digitally signed. Click **More info → Run anyway**.
 
 **Can I use it without installing?**
-Yes. Extract `MDNote-2.0.1-portable.zip` and run `MDNote.exe`.
+Yes. Extract `MDNote-2.1.0-portable.zip` and run `MDNote.exe`.
 
 **How do I uninstall it?**
 For the installed version, uninstall it from the Apps list in Windows Settings. If you manually placed any files in the installation folder, only those files will remain. For the portable version, simply delete the extracted folder.

@@ -228,6 +228,10 @@ public partial class MainWindow {
         {"저장",new[]{"Save","保存","保存","儲存"}},
         {"다른 이름으로 저장…",new[]{"Save as…","名前を付けて保存…","另存为…","另存新檔…"}},
         {"인쇄…",new[]{"Print…","印刷…","打印…","列印…"}},
+        /* 이전 세션 계속하기 (user, 2026-11-03): the File-menu option that closes without the save
+           prompt and reopens the unsaved text on the next start, named after Windows 11 Notepad's
+           own item. */
+        {"이전 세션 계속하기",new[]{"Continue previous session","前のセッションを続行","继续上一个会话","繼續先前的工作階段"}},
         {"끝내기",new[]{"Exit","終了","退出","結束"}},
         {"수정 시작/종료",new[]{"Toggle editing","編集の開始 / 終了","开始 / 结束编辑","開始 / 結束編輯"}},
         {"실행 취소",new[]{"Undo","元に戻す","撤销","復原"}},

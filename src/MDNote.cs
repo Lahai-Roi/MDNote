@@ -353,7 +353,7 @@ public partial class MainWindow {
     void PrepareSaveOwner(){ForegroundSaveWindow(this);}
     void SetupSaveDialogActivation(){SourceInitialized+=delegate{var hwnd=System.Windows.Interop.HwndSource.FromHwnd(new System.Windows.Interop.WindowInteropHelper(this).Handle);if(hwnd!=null)hwnd.AddHook(SaveCloseMessage);};}
     IntPtr SaveCloseMessage(IntPtr hwnd,int message,IntPtr wParam,IntPtr lParam,ref bool handled){
-        if(!closeApproved&&(message==0x10||message==0x112&&(wParam.ToInt64()&0xFFF0)==0xF060)){
+        if(!closeApproved&&!sessionEnding&&(message==0x10||message==0x112&&(wParam.ToInt64()&0xFFF0)==0xF060)){
             var dialog=saveConfirmationDialog;
             if(dialog!=null){ForegroundSaveWindow(dialog.Owner);ForegroundSaveWindow(dialog);}
             else{bool dirty=HasUnsavedChanges;foreach(var tab in documents)if(tab!=activeDocument&&(tab.Recovered||tab.Text!=tab.Saved))dirty=true;if(dirty)PrepareSaveOwner();}
@@ -473,6 +473,9 @@ public static class Program {
         // form, and support that same folder contract without bypassing the hidden desktop.
         if(args.Length==2&&args[0]=="--selftest"){Directory.CreateDirectory(args[1]);return SelfTest(new[]{"--selftest",Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"마크다운 작성 예제.md"),Path.Combine(args[1],"selftest.png")});}
         if(args.Length>0&&args[0]=="--selftest")return SelfTest(args);
+        /* 이전 세션 계속하기 (Recovery.cs) restores at every launch, with or without a document
+           argument: the argument file then becomes a tab of the first restored window (or selects
+           the restored tab that already holds it). */
         return DocumentActivation.Run(args);
     }
     internal static bool IsSelfTest;

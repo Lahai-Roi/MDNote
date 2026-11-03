@@ -1,6 +1,614 @@
-using System;using System.IO;using System.Text;using System.Collections.Generic;using System.Text.RegularExpressions;using System.Windows;using System.Windows.Controls;using System.Windows.Documents;
+using System;using System.IO;using System.Text;using System.Collections.Generic;using System.Text.RegularExpressions;using System.Windows;using System.Windows.Controls;using System.Windows.Documents;using System.Windows.Media.Imaging;using System.Globalization;
 namespace MDNote {public partial class MainWindow {
 static string NormalizeRtfUnicode(string value){var result=new StringBuilder();foreach(char character in value){if(character>127)result.Append("\\u").Append(unchecked((short)character)).Append('?');else result.Append(character);}return result.ToString();}
+/* Clipboard pictures (user, 2026-11-03): a clipboard that holds an image and no text is a picture
+   paste, in both views. A saved document keeps the picture in a folder named after itself beside
+   the .md (C:\notes\메모.md -> C:\notes\메모\), an untitled one in Documents\MDNote\images, and the
+   link is written by the drop's own rule (MarkdownCommands.ImageReference), so a name with a space,
+   a parenthesis or a '%' renders. The pictures an untitled document pasted are remembered per tab;
+   the first save moves the ones its text still links next to the file and rewrites their links
+   (MovePastedImagesToDocument), which is why the list is cleared once a document has a path of its
+   own. A document restored from a session or a crash draft has no list; its first save finds the
+   pictures in the text itself. */
+List<string> PastedImagesOf(DocumentTab state){
+    if(state==null)return null;
+    List<string> images;
+    if(!pastedImages.TryGetValue(state,out images)){images=new List<string>();pastedImages.Add(state,images);}
+    return images;
+}
+// A closed or saved tab drops its list; a list holding files that are still moving is dropped last.
+void ForgetPastedImages(DocumentTab state){
+    if(state==null)return;
+    try{pastedImages.Remove(state);}catch(Exception){}
+}
+// Documents\MDNote\images for an untitled document: one shared folder, created on first use.
+/* Probe seam: a run points the shared picture folder at its own scratch folder so it never touches
+   the user's Documents\MDNote\images. Null in the product. */
+internal static string ImageTempFolderOverride=null;
+static string PastedImageTempFolder(){
+    string forced=ImageTempFolderOverride;
+    if(!String.IsNullOrEmpty(forced))return forced;
+    string documents=Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+    if(String.IsNullOrEmpty(documents))documents=Path.GetTempPath();
+    return Path.Combine(Path.Combine(documents,"MDNote"),"images");
+}
+// <folder>\<document name without extension> for a saved document.
+static string PastedImageFolder(string documentPath){
+    try{
+        string folder=Path.GetDirectoryName(Path.GetFullPath(documentPath));
+        string name=Path.GetFileNameWithoutExtension(documentPath);
+        if(String.IsNullOrEmpty(folder)||String.IsNullOrEmpty(name))return null;
+        return Path.Combine(folder,name);
+    }catch(Exception){return null;}
+}
+// image-yyyyMMdd-HHmmss.png, then -2, -3 ... for a second picture in the same second.
+static string UniqueImagePath(string folder,string prefix){
+    string baseName=prefix+DateTime.Now.ToString("yyyyMMdd-HHmmss",CultureInfo.InvariantCulture);
+    string path=Path.Combine(folder,baseName+".png");
+    int number=1;
+    while(File.Exists(path)){number++;path=Path.Combine(folder,baseName+"-"+number.ToString(CultureInfo.InvariantCulture)+".png");}
+    return path;
+}
+static bool WritePng(BitmapSource image,string path){
+    var encoder=new PngBitmapEncoder();
+    encoder.Frames.Add(BitmapFrame.Create(image));
+    using(var stream=new FileStream(path,FileMode.CreateNew,FileAccess.Write))encoder.Save(stream);
+    return true;
+}
+/* Image FILES inserted into a document (user, 2026-11-03): a picture that already lives in the
+   document's own image folder (<docdir>\<docname>, subfolders included) is linked where it is, and
+   a picture from anywhere else - even directly beside the .md or in another subfolder of its
+   directory - is staged: copied into the shared Documents\MDNote\images folder (the one the
+   clipboard picture uses) and linked by its absolute path, in a saved document too. Every save
+   moves the staged pictures the text still links beside the file (MovePastedImagesToDocument). The same rule covers
+   an Explorer drop, a Ctrl+V of copied files and the image button's file dialog, so all three write
+   the link the drop always wrote. */
+static bool ImageInsideFolder(string file,string folder){
+    try{
+        string full=Path.GetFullPath(file);
+        string parent=Path.GetFullPath(folder);
+        if(parent.Length==0||parent[parent.Length-1]!='\\')parent=parent+"\\";
+        return full.Length>parent.Length&&full.StartsWith(parent,StringComparison.OrdinalIgnoreCase);
+    }catch(Exception){return false;}
+}
+// True when the file's own folder is exactly `folder` (no subfolder).
+static bool ImageDirectlyInFolder(string file,string folder){
+    try{
+        string parent=Path.GetDirectoryName(Path.GetFullPath(file));
+        string wanted=Path.GetFullPath(folder).TrimEnd('\\');
+        return !String.IsNullOrEmpty(parent)&&String.Equals(parent.TrimEnd('\\'),wanted,StringComparison.OrdinalIgnoreCase);
+    }catch(Exception){return false;}
+}
+/* The link text an insert writes for a picture: a staged one (directly in the shared temp folder)
+   keeps its absolute form even in a saved document, because the save finds and moves it by that
+   form (PastedImageTempFile); every other picture follows the document's own path rule. */
+string ImageLinkReference(string file){
+    if(ImageDirectlyInFolder(file,PastedImageTempFolder()))return MarkdownCommands.ImageReference("",file);
+    return MarkdownCommands.ImageReference(path,file);
+}
+// True when both files hold the same bytes: a second copy of one picture is the same picture.
+static bool SameImageContent(string left,string right){
+    try{
+        var one=new FileInfo(left);var two=new FileInfo(right);
+        if(one.Length!=two.Length)return false;
+        using(var first=File.OpenRead(left))
+        using(var second=File.OpenRead(right)){
+            var bufferA=new byte[81920];var bufferB=new byte[81920];
+            while(true){
+                int readA=first.Read(bufferA,0,bufferA.Length);
+                int readB=second.Read(bufferB,0,bufferB.Length);
+                if(readA!=readB)return false;
+                if(readA==0)return true;
+                for(int i=0;i<readA;i++)if(bufferA[i]!=bufferB[i])return false;
+            }
+        }
+    }catch(Exception){return false;}
+}
+/* The copy keeps the original file name; an identical file already under that name is reused, and a
+   different picture with the same name takes -2, -3 ... before the extension. Null means the copy
+   could not be made (the caller then links the original path). */
+static string CopiedImageFile(string source,string folder){
+    bool created;
+    return CopiedImageFile(source,folder,out created);
+}
+// created is true only when this call wrote a new file (a reused identical file is not ours to undo).
+static string CopiedImageFile(string source,string folder,out bool created){
+    created=false;
+    string name=Path.GetFileName(source);
+    string stem=Path.GetFileNameWithoutExtension(name);
+    string extension=Path.GetExtension(name);
+    for(int number=1;number<=999;number++){
+        string candidate=Path.Combine(folder,number==1?name:stem+"-"+number.ToString(CultureInfo.InvariantCulture)+extension);
+        try{
+            if(File.Exists(candidate)){
+                if(SameImageContent(source,candidate))return candidate;
+                continue;
+            }
+            File.Copy(source,candidate,false);
+            created=true;
+            return candidate;
+        }catch(IOException){
+            /* The name appeared between the check and the copy (another window copied the same
+               picture): the next round reuses an identical file or asks for the next number. */
+            if(!File.Exists(candidate))return null;
+        }catch(UnauthorizedAccessException){return null;}
+        catch(ArgumentException){return null;}
+        catch(NotSupportedException){return null;}
+    }
+    return null;
+}
+/* One image file as the insert should link it. Only a picture already inside the document's own
+   image folder (<docdir>\<docname>, subfolders included) or already staged keeps its place;
+   everything else - a picture beside the .md, one in another subfolder of the document's
+   directory, one on another drive - is copied into the shared temp folder. A
+   copy that fails keeps the original path, so the insert still reaches the picture, and a TXT
+   document is never touched (the callers answer it with the notice first). */
+string ImageFileForInsert(string file){
+    if(String.IsNullOrEmpty(file))return file;
+    string full;
+    try{full=Path.GetFullPath(file);}catch(Exception){return file;}
+    if(!File.Exists(full))return full;
+    string folder;
+    try{
+        /* Staging (user, 2026-11-03): saved or not, an inserted picture waits in the shared temp
+           folder with an absolute link. The save moves the ones the text still links into <docname>\
+           (MovePastedImagesToDocument), so a picture inserted and then deleted never lands there. */
+        folder=PastedImageTempFolder();
+        if(String.IsNullOrEmpty(folder))return full;
+        if(path==""){
+            /* A picture already in the shared folder needs no copy. */
+            if(ImageInsideFolder(full,folder))return full;
+        }else{
+            /* Already staged (directly in the shared folder) or already inside the document's own
+               picture folder: linked where it is. */
+            if(ImageDirectlyInFolder(full,folder))return full;
+            string own=PastedImageFolder(path);
+            if(!String.IsNullOrEmpty(own)&&ImageInsideFolder(full,own))return full;
+        }
+        Directory.CreateDirectory(folder);
+        string copied=CopiedImageFile(full,folder);
+        return copied==null?full:copied;
+    }catch(Exception error){
+        System.Diagnostics.Trace.TraceError("MDNote image copy: {0}: {1}",error.GetType().Name,error.Message);
+        return full;
+    }
+}
+// Every file of an image insert, in the same order; null and an empty list pass through.
+string[] ImageFilesForInsert(string[] files){
+    if(files==null||files.Length==0)return files;
+    if(PlainText)return files;
+    var result=new string[files.Length];
+    for(int i=0;i<files.Length;i++)result[i]=ImageFileForInsert(files[i]);
+    return result;
+}
+/* A picture that could not be written is not a paste, and the half-written file must not stay:
+   the WIC encoder, a bad image and a path the file system refuses all answer with exceptions
+   other than IOException (review item 7). The caller then falls back to the clipboard's text. */
+static void DiscardPastedImage(string file,Exception error){
+    System.Diagnostics.Trace.TraceError("MDNote image paste: {0}: {1}",error.GetType().Name,error.Message);
+    if(file==null)return;
+    try{File.Delete(file);}catch(Exception){}
+}
+/* The clipboard formats Windows offers for a copied picture, read through ClipboardRetry so a
+   program that holds the clipboard for a moment answers by waiting instead of failing. */
+static BitmapSource ClipboardImage(IDataObject data){
+    object value=null;
+    bool ok=ClipboardRetry.Try(delegate{
+        value=null;
+        if(data.GetDataPresent("PNG"))value=data.GetData("PNG");
+        if(value==null&&data.GetDataPresent(DataFormats.Bitmap))value=data.GetData(DataFormats.Bitmap);
+        if(value==null&&data.GetDataPresent("DeviceIndependentBitmap"))value=data.GetData("DeviceIndependentBitmap");
+    });
+    if(!ok)return null;
+    return BitmapSourceOf(value);
+}
+// PNG arrives as a stream, DataFormats.Bitmap as a BitmapSource or a drawing Bitmap, and the DIB
+// as raw bytes; the decoder and the drawing-to-PNG detour cover every shape without failing the paste.
+static BitmapSource BitmapSourceOf(object value){
+    if(value==null)return null;
+    var source=value as BitmapSource;
+    if(source!=null)return source;
+    var stream=value as Stream;
+    if(stream!=null){
+        try{var decoder=new PngBitmapDecoder(stream,BitmapCreateOptions.PreservePixelFormat,BitmapCacheOption.OnLoad);if(decoder.Frames.Count>0)return decoder.Frames[0];}catch(Exception){}
+        try{stream.Position=0;}catch(Exception){}
+        try{var bitmap=new BitmapImage();bitmap.BeginInit();bitmap.CacheOption=BitmapCacheOption.OnLoad;bitmap.StreamSource=stream;bitmap.EndInit();bitmap.Freeze();return bitmap;}catch(Exception){return null;}
+    }
+    var drawing=value as System.Drawing.Image;
+    if(drawing!=null){
+        /* The bitmap belongs to the clipboard data object, so it is not disposed here: the object
+           may still hand it out again. Only the stream this method owns is closed. */
+        using(var memory=new MemoryStream()){
+            drawing.Save(memory,System.Drawing.Imaging.ImageFormat.Png);
+            memory.Position=0;
+            try{var bitmap=new BitmapImage();bitmap.BeginInit();bitmap.CacheOption=BitmapCacheOption.OnLoad;bitmap.StreamSource=memory;bitmap.EndInit();bitmap.Freeze();return bitmap;}catch(Exception){return null;}
+        }
+    }
+    return null;
+}
+/* True means the paste was a picture and nothing else is inserted. False keeps today's text paste,
+   which is also every TXT document's answer and every clipboard that still carries text. */bool PasteClipboardImage(IDataObject data){
+    /* Explorer's own copy of picture files: the clipboard carries a file list, and some programs
+       put the names in the text format as well, so the picture-file list is read before the text
+       check - otherwise Ctrl+V would paste the file names as text. A TXT document keeps today's
+       answer, so its check still comes first. */
+    bool hasText=false;string text=null;
+    bool ok=ClipboardRetry.Try(delegate{hasText=data.GetDataPresent(DataFormats.UnicodeText);if(hasText)text=data.GetData(DataFormats.UnicodeText) as string;});
+    if(!ok)return false;
+    /* A TXT document keeps today's answer: no picture is taken, and the clipboard's text (if any)
+       is what the paste writes. Checked before the bitmap is read or decoded. */
+    if(PlainText)return false;
+    string[] imageFiles=ClipboardImageFileList(data);
+    if(imageFiles!=null){
+        if(documentOperationBusy){ShowImageBusyNotice();return true;}
+        InsertImageFilesAtCaret(imageFiles);
+        return true;
+    }
+    /* The text check: a copy from a web page carries both a picture and its alt text, and that
+       paste must stay a text paste exactly as before. */
+    if(hasText&&!String.IsNullOrEmpty(text))return false;
+    BitmapSource image=ClipboardImage(data);
+    if(image==null)return false;
+    if(documentOperationBusy){ShowImageBusyNotice();return true;}
+    /* Saved or not, the picture waits in the shared temp folder; the save moves it beside the file. */
+    string folder=PastedImageTempFolder();
+    if(String.IsNullOrEmpty(folder))return false;
+    string file=null;
+    try{
+        Directory.CreateDirectory(folder);
+        file=UniqueImagePath(folder,"image-");
+        WritePng(image,file);
+    }catch(IOException error){DiscardPastedImage(file,error);return false;}
+    catch(UnauthorizedAccessException error){DiscardPastedImage(file,error);return false;}
+    catch(Exception error){DiscardPastedImage(file,error);return false;}
+    /* The temporary folder is shared by every untitled document, so a tab remembers the pictures
+       it pasted; the first save moves the ones this document's text still links. */
+    if(path==""){
+        var images=PastedImagesOf(activeDocument);
+        if(images!=null)images.Add(file);
+    }
+    /* The drop's insertion path: one command result, applied after a pending IME commit, so undo
+       takes the picture out in one step and the live view draws it like any other image. The picture
+       was taken, so the paste is answered either way: a caret the command declines (inside code or
+       on structure) must not fall through and paste the clipboard's text over the document as well. */
+    InsertImageFilesAtCaret(new string[]{file});
+    return true;
+}
+/* Explorer's "복사" of picture files puts a file list on the clipboard and no bitmap, so Ctrl+V
+   used to do nothing at all. A list of nothing but existing image files is that paste: every file
+   takes the insert rule (an Explorer drop's own answer, ImageFilesForInsert), one link per file in
+   file order and one undo step. A list holding a document as well is left to the text paste, the
+   same answer a mixed drop gives. Null means this was not a picture-file paste. */
+string[] ClipboardImageFileList(IDataObject data){
+    string[] files=null;
+    bool read=ClipboardRetry.Try(delegate{
+        files=null;
+        if(!data.GetDataPresent(DataFormats.FileDrop))return;
+        files=data.GetData(DataFormats.FileDrop) as string[];
+    });
+    if(!read||files==null||files.Length==0)return null;
+    if(!MarkdownCommands.AllImageFiles(files))return null;
+    /* A list of names that are gone is not a picture paste: the clipboard's text (if any) is. */
+    string[] present=MarkdownCommands.ExistingImageFiles(files);
+    return present.Length==0?null:present;
+}
+/* One image token of the text whose target is a file directly inside the shared temp folder, and
+   the span the rewrite replaces (the target itself, '<>' included when the paste wrote them). */
+sealed class PastedImageLink {
+    internal int Offset,Length;
+    internal bool Angle;
+    internal string File;
+    /* False: File is a staged picture in the shared temp folder (a save moves it). True: File is a
+       picture inside the OLD document's own picture folder (a Save As copies it). */
+    internal bool Copy;
+    internal PastedImageLink(int offset,int length,bool angle,string file,bool copy){Offset=offset;Length=length;Angle=angle;File=file;Copy=copy;}
+}
+/* The full path when the reference names an existing file inside oldFolder (<olddir>\<oldname>,
+   subfolders included), resolved against oldDir, else null. Web and other scheme links ("http:",
+   "data:", "mailto:"), drive-relative and root-relative targets, a directory and a missing file are
+   not pictures of the old folder. Same escape rule as the paste writes (ImageReferenceText). */
+static string OldFolderImage(string reference,string oldDir,string oldFolder){
+    string value=reference??String.Empty;
+    if(value.Length>=2&&value[0]=='<'&&value[value.Length-1]=='>')value=value.Substring(1,value.Length-2);
+    if(value.IndexOf('<')>=0||value.IndexOf('>')>=0)return null;
+    value=ImageReferenceText(value).Replace('/','\\');
+    if(value.Length==0)return null;
+    int colon=value.IndexOf(':');
+    if(colon>=0&&colon!=1)return null;
+    try{
+        bool rooted=(value.Length>=3&&value[1]==':'&&value[2]=='\\')||(value.Length>=2&&value[0]=='\\'&&value[1]=='\\');
+        if(!rooted&&(colon==1||value[0]=='\\'))return null;
+        string full=rooted?Path.GetFullPath(value):Path.GetFullPath(Path.Combine(oldDir,value));
+        if(!ImageInsideFolder(full,oldFolder))return null;
+        if(!File.Exists(full))return null;
+        return full;
+    }catch(Exception){return null;}
+}
+/* Every image link of the body whose target names a file directly inside PastedImageTempFolder().
+   A document restored from a session (or a crash draft) has no per-tab list, so its first save
+   reads the document itself; this runs once per save, never on a keystroke. The token read is the
+   one the paste writes, "![label](target)": the label holds no ']' (ImageAlt drops brackets) and
+   the target is plain or wrapped in '<...>'. A token that cannot be read is left alone, and a
+   target outside the temp folder is never a pasted picture. */
+static void PastedImageLinks(string body,List<PastedImageLink> links,string oldDir,string oldFolder){
+    if(String.IsNullOrEmpty(body))return;
+    int at=0;
+    while(at<body.Length){
+        int open=body.IndexOf("![",at,StringComparison.Ordinal);
+        if(open<0)return;
+        at=open+2;
+        if(open>0&&body[open-1]=='\\')continue;   /* "\![x](y)" is literal text, not a picture */
+        int label=body.IndexOf(']',open+2);
+        if(label<0)return;
+        if(label+1>=body.Length||body[label+1]!='(')continue;
+        int start=label+2,end=-1;
+        bool angle=false;
+        if(start<body.Length&&body[start]=='<'){
+            int close=body.IndexOf('>',start+1);
+            if(close>0&&close+1<body.Length&&body[close+1]==')'){end=close+1;angle=true;}
+        }else{
+            int close=body.IndexOf(')',start);
+            if(close>=0)end=close;
+        }
+        if(end<0){at=start;continue;}
+        string raw=body.Substring(start,end-start);
+        string file=PastedImageTempFile(raw);
+        bool copy=false;
+        if(file==null&&oldFolder!=null){file=OldFolderImage(raw,oldDir,oldFolder);copy=file!=null;}
+        if(file!=null)links.Add(new PastedImageLink(start,end-start,angle,file,copy));
+        at=end+1;
+    }
+}
+/* The full path when the reference names a file directly inside the shared temp folder, else null.
+   The paste writes an absolute path with '/' and escapes '%', '#', '?', '(', ')' and ' '
+   (ImageReference with no document path); that form and a '<...>' wrapper are read here, and the
+   comparison is on the full, normalized path, so a differently spelled folder still matches. A
+   relative target, another folder, a missing file or a directory is not a pasted picture. */
+static string PastedImageTempFile(string reference){
+    string value=reference??String.Empty;
+    if(value.Length>=2&&value[0]=='<'&&value[value.Length-1]=='>')value=value.Substring(1,value.Length-2);
+    if(value.IndexOf('<')>=0||value.IndexOf('>')>=0)return null;
+    value=ImageReferenceText(value).Replace('/','\\');
+    string full,folder,parent;
+    try{
+        /* Fully qualified only (drive absolute or UNC): a drive-relative "C:name" would resolve
+           against the process's own current folder, which a pasted link never means. */
+        bool qualified=(value.Length>=3&&value[1]==':'&&value[2]=='\\')||(value.Length>=2&&value[0]=='\\'&&value[1]=='\\');
+        if(!qualified)return null;
+        full=Path.GetFullPath(value);
+        folder=Path.GetFullPath(PastedImageTempFolder());
+        parent=Path.GetDirectoryName(full);
+    }catch(Exception){return null;}
+    if(String.IsNullOrEmpty(parent)||!String.Equals(parent,folder,StringComparison.OrdinalIgnoreCase))return null;
+    if(!File.Exists(full))return null;
+    return full;
+}
+// The paste's escape rule (MarkdownCommands.ImageReference): '%' first, then '#', '?', '(' ,')'
+// and ' '. A '%' that is not followed by two hex digits stays literal.
+static string ImageReferenceText(string value){
+    if(value.IndexOf('%')<0)return value;
+    var result=new StringBuilder(value.Length);
+    for(int i=0;i<value.Length;i++){
+        char character=value[i];
+        if(character=='%'&&i+2<value.Length){
+            int high=ImageHexDigit(value[i+1]),low=ImageHexDigit(value[i+2]);
+            if(high>=0&&low>=0){result.Append((char)(high*16+low));i+=2;continue;}
+        }
+        result.Append(character);
+    }
+    return result.ToString();
+}
+static int ImageHexDigit(char value){
+    if(value>='0'&&value<='9')return value-'0';
+    if(value>='a'&&value<='f')return value-'a'+10;
+    if(value>='A'&&value<='F')return value-'A'+10;
+    return -1;
+}
+// One source picture, once: the per-tab list and the text can name the same file (and the same
+// file can be linked twice), so the full path is compared case-insensitively before it is added.
+static void ImageMoveSource(List<string> sources,string file){
+    if(String.IsNullOrEmpty(file))return;
+    string full;
+    try{full=Path.GetFullPath(file);}catch(Exception){return;}
+    for(int i=0;i<sources.Count;i++)if(String.Equals(sources[i],full,StringComparison.OrdinalIgnoreCase))return;
+    sources.Add(full);
+}
+/* The replacements applied as one command, sorted by offset. An image target span and the old
+   absolute path inside it are the same rewrite twice; the longer form at one offset wins (so a
+   '<...>' target keeps its wrapper) and every later edit touching a kept range is dropped, since
+   the host applies non-overlapping edits. */
+static List<SourceEdit> ImageEditsInOrder(List<SourceEdit> edits){
+    edits.Sort(ImageCompareEdits);
+    var kept=new List<SourceEdit>();
+    int end=-1;
+    for(int i=0;i<edits.Count;i++){
+        SourceEdit edit=edits[i];
+        if(edit.Offset<end)continue;
+        kept.Add(edit);
+        end=edit.Offset+edit.Length;
+    }
+    return kept;
+}
+static int ImageCompareEdits(SourceEdit a,SourceEdit b){
+    int order=a.Offset.CompareTo(b.Offset);
+    if(order!=0)return order;
+    return b.Length.CompareTo(a.Length);
+}
+/* What one first save moved, so a save that did not write can put it back (SaveAsync): the files
+   that left the shared temp folder, and each rewritten link span as the text holds it now. */
+sealed class PastedImageMoveState {
+    internal DocumentTab Tab;
+    internal SourceEditor Editor;
+    internal readonly List<string> From=new List<string>();
+    internal readonly List<string> To=new List<string>();
+    /* Files a Save As copy newly wrote into the new picture folder; only these are removed again
+       when the save does not write (an identical file that was reused is not ours). */
+    internal readonly List<string> Copied=new List<string>();
+    internal readonly List<PastedImageUndo> Undo=new List<PastedImageUndo>();
+}
+/* One link span after a rewrite: Offset is the span in the rewritten text, Expected what the
+   rewrite put there and Original the target text it replaced. */
+sealed class PastedImageUndo {
+    internal int Offset;
+    internal string Expected,Original;
+    internal PastedImageUndo(int offset,string expected,string original){Offset=offset;Expected=expected;Original=original;}
+}
+/* Every save (user, 2026-11-03): the pictures the text links from the shared temp folder move
+   into <docname>\ beside the save target, and their absolute links become the relative form the
+   drop writes; a Save As of a saved document also COPIES the pictures it links from the old
+   <olddir>\<oldname>\ into the new folder (the old file and folder stay as they are). A plain
+   Ctrl+S with no staged picture costs one parse of the body. Only links the text still holds move: a picture that was pasted and then deleted or
+   undone has no link and stays in the temp folder. Only parsed image links are rewritten, so a
+   path that merely appears in prose or a code block is left as text. Every replacement is one
+   command; the state that can undo it goes back to SaveAsync, which uses it when the save itself
+   does not write. A picture that cannot be moved keeps its absolute link and the paste still
+   reaches the file. A document restored from a session or a crash draft has no per-tab list; its
+   own text links are read the same way, and a link to any file outside that folder is never
+   touched. */
+PastedImageMoveState MovePastedImagesToDocument(string target){
+    if(source==null||source.Document==null)return null;
+    /* A clipboard picture has no place in a TXT document: the save that converts the document to
+       .txt writes plain text, so the links are not rewritten there. */
+    if(PlainText||String.Equals(Path.GetExtension(target),".txt",StringComparison.OrdinalIgnoreCase))return null;
+    string folder=PastedImageFolder(target);
+    if(String.IsNullOrEmpty(folder))return null;
+    FlushDocumentChanges();
+    /* Save As of a saved document into another name or folder (user, 2026-11-03): the pictures the
+       text links from the OLD <olddir>\<oldname>\ are copied (never moved) beside the new file. The
+       old folder is only looked at when the target really differs and has its own picture folder. */
+    string oldDir=null,oldFolder=null;
+    if(path.Length>0&&!SamePicturePath(path,target)){
+        oldFolder=PastedImageFolder(path);
+        try{oldDir=Path.GetDirectoryName(Path.GetFullPath(path));}catch(Exception){oldDir=null;}
+        if(String.IsNullOrEmpty(oldFolder)||String.IsNullOrEmpty(oldDir)||String.Equals(oldFolder.TrimEnd('\\'),folder.TrimEnd('\\'),StringComparison.OrdinalIgnoreCase)){oldFolder=null;oldDir=null;}
+    }
+    string body=source.Document.Text;
+    var links=new List<PastedImageLink>();
+    PastedImageLinks(body,links,oldDir,oldFolder);
+    if(links.Count==0)return null;
+    /* The text is the truth: a link that is still there names a picture that still belongs to this
+       document. The per-tab list described the same pastes, so it never decides a move. */
+    var sources=new List<string>();
+    var copySources=new List<string>();
+    for(int i=0;i<links.Count;i++)ImageMoveSource(links[i].Copy?copySources:sources,links[i].File);
+    var result=new CommandResult();
+    var edits=new List<SourceEdit>();
+    var move=new PastedImageMoveState {Tab=activeDocument,Editor=source};
+    for(int i=0;i<copySources.Count;i++){
+        string original=copySources[i];
+        string destination;
+        bool created;
+        try{
+            Directory.CreateDirectory(folder);
+            destination=CopiedImageFile(original,folder,out created);
+        }catch(IOException){continue;}
+        catch(UnauthorizedAccessException){continue;}
+        catch(ArgumentException){continue;}
+        if(destination==null)continue;
+        if(created)move.Copied.Add(destination);
+        string copyReference=MarkdownCommands.ImageReference(target,destination);
+        for(int k=0;k<links.Count;k++){
+            var link=links[k];
+            if(!link.Copy||!String.Equals(link.File,original,StringComparison.OrdinalIgnoreCase))continue;
+            string text=link.Angle?"<"+copyReference+">":copyReference;
+            /* Same text already (the new folder has the old folder's name): nothing to rewrite. */
+            if(String.Equals(body.Substring(link.Offset,link.Length),text,StringComparison.Ordinal))continue;
+            edits.Add(new SourceEdit(link.Offset,link.Length,text));
+        }
+    }
+    for(int i=0;i<sources.Count;i++){
+        string old=sources[i];
+        string oldReference=MarkdownCommands.ImageReference("",old);
+        string name=Path.GetFileName(old);
+        string destination=Path.Combine(folder,name);
+        try{
+            Directory.CreateDirectory(folder);
+            int number=1;
+            while(File.Exists(destination)){
+                number++;
+                destination=Path.Combine(folder,Path.GetFileNameWithoutExtension(name)+"-"+number.ToString(CultureInfo.InvariantCulture)+Path.GetExtension(name));
+            }
+            File.Move(old,destination);
+        }catch(IOException){continue;}
+        catch(UnauthorizedAccessException){continue;}
+        catch(ArgumentException){continue;}
+        move.From.Add(old);
+        move.To.Add(destination);
+        string newReference=MarkdownCommands.ImageReference(target,destination);
+        if(String.Equals(oldReference,newReference,StringComparison.Ordinal))continue;
+        /* The target span as the text holds it (the '<...>' wrapper included when the paste wrote
+           one): a path that only appears in prose or a code block is not an image link. */
+        for(int k=0;k<links.Count;k++){
+            var link=links[k];
+            if(link.Copy||!String.Equals(link.File,old,StringComparison.OrdinalIgnoreCase))continue;
+            edits.Add(new SourceEdit(link.Offset,link.Length,link.Angle?"<"+newReference+">":newReference));
+        }
+    }
+    if(edits.Count>0){
+        var kept=ImageEditsInOrder(edits);
+        int moved=0;
+        for(int i=0;i<kept.Count;i++){
+            SourceEdit edit=kept[i];
+            /* The positions the command applies are the ones the undo has to find afterwards. */
+            move.Undo.Add(new PastedImageUndo(edit.Offset+moved,edit.Text,body.Substring(edit.Offset,edit.Length)));
+            moved+=edit.Text.Length-edit.Length;
+            result.Add(edit.Offset,edit.Length,edit.Text);
+        }
+        result.SortEdits();
+        int caret=Math.Max(0,Math.Min(source.CaretIndex,body.Length));
+        /* The caret keeps its place in the text: every replacement shorter or longer than the
+           absolute path shifts it by the difference, counted only before the caret. */
+        int shift=0;
+        foreach(var edit in result.Edits)if(edit.Offset<caret)shift+=edit.Text.Length-edit.Length;
+        result.SelectionStart=Math.Max(0,Math.Min(caret+shift,source.Document.TextLength));
+        result.SelectionLength=0;
+        ApplyCommandResult(result);
+    }
+    return move.From.Count==0&&move.Copied.Count==0&&move.Undo.Count==0?null:move;
+}
+// True when both names are the same file (full paths, case-insensitive).
+static bool SamePicturePath(string left,string right){
+    try{return String.Equals(Path.GetFullPath(left),Path.GetFullPath(right),StringComparison.OrdinalIgnoreCase);}
+    catch(Exception){return String.Equals(left,right,StringComparison.OrdinalIgnoreCase);}
+}
+/* A first save that did not write leaves the tab untitled with its links relative to a file that
+   was never made: the pictures go back to the shared temp folder and every span the rewrite
+   changed returns to its original text, so a later save starts from the same document. Best
+   effort: a picture that cannot move back keeps its new place and its relative link. */
+void RestorePastedImagesAfterFailedSave(PastedImageMoveState move){
+    if(move==null)return;
+    for(int i=move.From.Count-1;i>=0;i--){
+        try{if(File.Exists(move.To[i])&&!File.Exists(move.From[i]))File.Move(move.To[i],move.From[i]);}catch(IOException){}catch(UnauthorizedAccessException){}
+    }
+    /* A Save As copy that did not write: only the copies this save just made are removed; the old
+       document's folder was never touched. */
+    for(int i=move.Copied.Count-1;i>=0;i--){
+        try{if(File.Exists(move.Copied[i]))File.Delete(move.Copied[i]);}catch(IOException){}catch(UnauthorizedAccessException){}
+    }
+    if(move.Undo.Count==0)return;
+    if(!Object.ReferenceEquals(move.Tab,activeDocument)||!Object.ReferenceEquals(move.Editor,source))return;
+    if(source==null||source.Document==null)return;
+    string body=source.Document.Text;
+    var result=new CommandResult();
+    var undo=new List<PastedImageUndo>();
+    for(int i=0;i<move.Undo.Count;i++){
+        PastedImageUndo edit=move.Undo[i];
+        if(edit.Offset<0||edit.Offset+edit.Expected.Length>body.Length)continue;
+        /* Another owner changed the span since the rewrite: leave it rather than replace text that
+           is no longer the link the move wrote. */
+        if(!String.Equals(body.Substring(edit.Offset,edit.Expected.Length),edit.Expected,StringComparison.Ordinal))continue;
+        result.Add(edit.Offset,edit.Expected.Length,edit.Original);
+        undo.Add(edit);
+    }
+    if(undo.Count==0)return;
+    result.SortEdits();
+    int caret=Math.Max(0,Math.Min(source.CaretIndex,body.Length));
+    int shift=0;
+    for(int i=0;i<undo.Count;i++)if(undo[i].Offset<caret)shift+=undo[i].Original.Length-undo[i].Expected.Length;
+    result.SelectionStart=Math.Max(0,Math.Min(caret+shift,source.Document.TextLength));
+    result.SelectionLength=0;
+    ApplyCommandResult(result);
+}
 // The clipboard read at the key press can be refused: another program holding the clipboard open
 // answers CLIPBRD_E_CANT_OPEN for a few milliseconds. The read waits it out (ClipboardRetry), and
 // a refusal that outlasts the retries is named in the status line instead of the key seeming to
@@ -11,8 +619,15 @@ bool PasteClipboard(bool plain){
     if(!ClipboardRetry.TryGetDataObject(out data))return ShowClipboardBusy();
     /* The insertion path may still raise a clipboard exception from the captured object; as
        before, it must not escape the key handler. */
-    try{return PasteData(data,plain);}
+    try{
+        /* An image with no text is a picture, unless the user asked for the text-only paste. */
+        if(!plain&&PasteClipboardImage(data))return true;
+        return PasteData(data,plain);
+    }
     catch(System.Runtime.InteropServices.ExternalException){return false;}
+    catch(IOException){return false;}
+    catch(UnauthorizedAccessException){return false;}
+    catch(ArgumentException){return false;}
 }
 // The answer to a clipboard that stayed locked: nothing is inserted, as before, but the status
 // line says why the key did nothing.

@@ -1413,7 +1413,11 @@ public partial class MainWindow {
     // the button and an Explorer drop write the same paths in this view and in the basic view.
     internal bool InsertLiveImageFile(string file){
         if(!LiveFormat)return false;
-        string reference=MarkdownCommands.ImageReference(path,file);
+        /* The image button's file dialog takes the same staging rule as a drop (PasteSupport.cs
+           ImageFilesForInsert): a picture outside the document's picture folder is staged in the shared
+           temp folder first and the save moves it into <docname>\. */
+        file=ImageFileForInsert(file);
+        string reference=ImageLinkReference(file);
         string alt=Path.GetFileNameWithoutExtension(file);
         return RunLiveCommand(delegate(TextDocument d,int s,int l){return MarkdownCommands.InsertImage(d,s+l,reference,alt);});
     }
@@ -1436,6 +1440,8 @@ public partial class MainWindow {
             // An open or save holds the document busy and read-only; say that instead of folding
             // the drop into the read-mode/TXT answers (the window's own path does the same).
             if(documentOperationBusy){ShowImageBusyNotice();return true;}
+            /* A picture outside the document's folder is copied in only once the editor will take
+               it (below), so a refused drop leaves no copy behind. */
             var view=source.TextArea.TextView;
             var hit=view.GetPositionFloor(point+view.ScrollOffset);
             // The empty space under the last line hits no text line of its own; a drop there lands
@@ -1448,9 +1454,13 @@ public partial class MainWindow {
                 if(!editing){ShowImageTxtNotice();return true;}
             }
             if(documentOperationBusy){ShowImageBusyNotice();return true;}
+            /* A picture outside the document's folder is copied in now (PasteSupport.cs
+               ImageFilesForInsert), after the read-mode switch so no copy is left behind by a drop
+               the editor then refuses; the link then names the copy beside the document. */
+            present=ImageFilesForInsert(present);
             var references=new List<string>();
             var alts=new List<string>();
-            foreach(string file in present){references.Add(MarkdownCommands.ImageReference(path,file));alts.Add(Path.GetFileNameWithoutExtension(file));}
+            foreach(string file in present){references.Add(ImageLinkReference(file));alts.Add(Path.GetFileNameWithoutExtension(file));}
             var owner=source;var document=owner.Document;
             try{
                 owner.RunAfterComposition(delegate{

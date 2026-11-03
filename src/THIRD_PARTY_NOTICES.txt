@@ -1,4 +1,4 @@
-Third-party components and platform dependencies — MDNote 2.0.1
+Third-party components and platform dependencies — MDNote 2.1.0
 
 MDNote-authored source code is distributed under the GNU General Public License v3.0 in LICENSE.
 Copyright (c) 2026 Lahai-Roi(shs7034).
