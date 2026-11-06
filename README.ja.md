@@ -21,9 +21,8 @@
 
 [最新版をダウンロード (Releases)](https://github.com/Lahai-Roi/MDNote/releases/latest)
 
-- `MDNote-Setup-2.2.0.exe`: インストーラーです。最初の画面で言語を選択します。
-- `MDNote-2.2.0-portable.zip`: インストール不要のポータブル版です。展開して `MDNote.exe` を実行してください。
-- **winget**: インストールは `winget install LahaiRoi.MDNote`、更新は `winget upgrade LahaiRoi.MDNote`。（MDNote は新しいバージョンを知らせるだけで自動インストールはしないため、最新版を保つにはこの方法が最も簡単です。）
+- `MDNote-Setup-2.2.1.exe`: インストーラーです。最初の画面で言語を選択します。
+- `MDNote-2.2.1-portable.zip`: インストール不要のポータブル版です。展開して `MDNote.exe` を実行してください。
 - Windows 10/11 64ビット、.NET Framework 4.8（Windowsに標準搭載）が必要です。
 - 実行ファイルにデジタル署名がないため、初回起動時にWindowsの警告が表示されることがあります。**詳細情報 → 実行** をクリックしてください。
 
@@ -82,7 +81,7 @@
 実行ファイルにデジタル署名がないためです。**詳細情報 → 実行** を押してください。
 
 **インストールせずに使えますか？**
-はい。`MDNote-2.2.0-portable.zip` を展開し、`MDNote.exe` を実行してください。
+はい。`MDNote-2.2.1-portable.zip` を展開し、`MDNote.exe` を実行してください。
 
 **アンインストールするにはどうすればいいですか？**
 インストーラー版は、Windowsの設定のアプリ一覧からアンインストールします。インストールフォルダに手動で入れたファイルがある場合は、そのファイルだけが残ります。ポータブル版は、展開したフォルダを削除するだけです。

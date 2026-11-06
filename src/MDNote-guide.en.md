@@ -7,11 +7,11 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | Menu | Shortcut | Description |
 | --- | --- | --- |
 | Continue previous session | | When on, closes unsaved documents without prompting and reopens them as they were the next time you open MDNote. Off by default. |
+| Recent files | | Reopen a recently opened document. |
+| Recover documents… | | Recover or delete documents that were closed without saving. |
 | ![New](guide-new.png) New | Ctrl+N, Ctrl+T | Open a new document. |
 | ![Open](guide-open.png) Open… | Ctrl+O | Open an MD or TXT file. |
 | Open with encoding… | | Reopen a file with a chosen encoding if text looks garbled. |
-| Recover documents… | | Recover or delete documents that were closed without saving. |
-| Recent files | | Reopen a recently opened document. |
 | ![Save](guide-save.png) Save | Ctrl+S | Save the current document. |
 | Save as… | Ctrl+Shift+S | Save with a new name and encoding. Choosing **HTML files (*.html)** creates only a separate .html file and leaves the open document as it is. |
 | Print… | Ctrl+P | Print the document. |
@@ -56,22 +56,22 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | --- | --- | --- |
 | Open files in tabs | | When on, files open in new tabs; when off, they open in new windows. |
 | Word wrap | | Wrap lines to fit the window width. |
+| Markdown Live Preview | | When on, shows only the cursor line and selected lines as source text (with symbols) in the editing screen. When off, uses the basic mode. |
 | Increase text size / Decrease text size | Ctrl++ / Ctrl+- | Also works with Ctrl+mouse wheel. |
 | Reset text size | Ctrl+0 | Return to the default text size. |
+| Line spacing | | Choose 100%, 125%, 150%, 200%, or Custom. |
 | Font and size… | | Set the default font and size. |
 | Default text color… / Reset default text color | | Set or reset the default text color for the whole document. |
 | ![dark](guide-btn-dark.png) Dark mode | | Switch to a dark color theme. |
 | Focus mode | | Choose Paragraph, Line, or Off. Paragraph keeps only the paragraph with the cursor clear, and Line keeps only the line with the cursor clear, while the rest is faded. Off by default. |
 | Typewriter mode | | When on, the line you are typing stays in the middle of the window. Off by default. |
-| Line spacing | | Choose 100%, 125%, 150%, 200%, or Custom. |
-| Markdown Live Preview | | When on, shows only the cursor line and selected lines as source text (with symbols) in the editing screen. When off, uses the basic mode. |
 
 - The moment you turn off **Open files in tabs**, any open tabs split into separate windows.
 - **Word wrap** does not insert actual line breaks into the file. When off, long lines scroll horizontally.
-- Text color on the formatting toolbar applies only to selected text and works separately from **Default text color**.
-- **Line spacing** defaults to 150% and applies to both MD and TXT.
 - **Basic mode** shows the entire document formatted and hides symbols like `**` and `#` even on the cursor line. MDNote starts in this mode on first launch.
 - **Live view** (View → **Markdown Live Preview**) shows only the cursor line and selected lines as source text (with symbols) in the editing screen (the Read screen always shows the formatted view). This is handy when editing Markdown syntax directly. It is off (basic mode) by default, and any change you make is remembered next time you launch the app.
+- **Line spacing** defaults to 150% and applies to both MD and TXT.
+- Text color on the formatting toolbar applies only to selected text and works separately from **Default text color**.
 - View settings only change how the screen looks and do not affect the file contents.
 
 ## 4. Shortcuts

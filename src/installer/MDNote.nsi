@@ -11,7 +11,7 @@
 !ifndef OUTPUT
  !error "OUTPUT is required"
 !endif
-!define VERSION "2.2.0"
+!define VERSION "2.2.1"
 !ifdef TEST_BUILD
  !define APP_NAME "MDNote (설치 검사)"
  !define APP_KEY "MDNoteInstallerSmokeTest"
@@ -39,7 +39,7 @@ SetOverwrite on
 ShowInstDetails show
 ShowUninstDetails show
 ManifestDPIAware true
-VIProductVersion "2.2.0.0"
+VIProductVersion "2.2.1.0"
 VIAddVersionKey /LANG=1042 "ProductName" "$(MDNoteText16)"
 VIAddVersionKey /LANG=1042 "FileDescription" "${APP_NAME} 설치 프로그램"
 VIAddVersionKey /LANG=1042 "FileVersion" "${VERSION}"

@@ -21,9 +21,8 @@
 
 [최신 버전 내려받기(Releases)](https://github.com/Lahai-Roi/MDNote/releases/latest)
 
-- `MDNote-Setup-2.2.0.exe`: 설치 파일입니다. 설치 첫 화면에서 언어를 고릅니다.
-- `MDNote-2.2.0-portable.zip`: 설치 없이 쓰는 파일입니다. 압축을 풀고 `MDNote.exe`를 실행합니다.
-- **winget**: 설치는 `winget install LahaiRoi.MDNote`, 업데이트는 `winget upgrade LahaiRoi.MDNote`. (MDNote는 새 버전을 알려 주기만 하고 직접 설치하지 않으므로, 이 방법이 최신 버전을 유지하기 가장 쉽습니다.)
+- `MDNote-Setup-2.2.1.exe`: 설치 파일입니다. 설치 첫 화면에서 언어를 고릅니다.
+- `MDNote-2.2.1-portable.zip`: 설치 없이 쓰는 파일입니다. 압축을 풀고 `MDNote.exe`를 실행합니다.
 - Windows 10/11 64비트, .NET Framework 4.8(Windows에 기본으로 들어 있음)이 필요합니다.
 - 실행 파일에 디지털 서명이 없어 처음 실행할 때 Windows가 경고를 띄울 수 있습니다. **추가 정보 → 실행**을 누르면 됩니다.
 
@@ -82,7 +81,7 @@
 실행 파일에 디지털 서명이 없어서 그렇습니다. **추가 정보 → 실행**을 누르면 됩니다.
 
 **설치하지 않고 쓸 수 있나요?**
-네. `MDNote-2.2.0-portable.zip`을 풀고 `MDNote.exe`를 실행하면 됩니다.
+네. `MDNote-2.2.1-portable.zip`을 풀고 `MDNote.exe`를 실행하면 됩니다.
 
 **지우려면 어떻게 하나요?**
 설치 버전은 Windows 설정의 앱 목록에서 제거합니다. 설치 폴더에 직접 넣은 파일이 있으면 그 파일만 남습니다. 무설치 버전은 압축을 푼 폴더를 지우면 됩니다.
