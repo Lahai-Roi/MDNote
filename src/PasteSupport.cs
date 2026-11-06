@@ -324,19 +324,156 @@ static string OldFolderImage(string reference,string oldDir,string oldFolder){
         return full;
     }catch(Exception){return null;}
 }
+/* Where the text of a line begins once any indent (spaces and tabs) and any '>' blockquote markers
+   (each with one optional space) are skipped; end when nothing but blanks and markers is left (a
+   blank line). Any indent counts for a fence, not only up to three spaces (a fenced block inside a
+   list item is indented): reading a line as a fence can only skip an image move (the picture keeps
+   its absolute link and still displays), while missing a fence would rewrite code. */
+static int CodeLineContent(string body,int at,int end){
+    int i=at;
+    while(true){
+        while(i<end&&(body[i]==' '||body[i]=='\t'))i++;
+        if(i<end&&body[i]=='>'){i++;if(i<end&&body[i]==' ')i++;continue;}
+        return i;
+    }
+}
+/* A fence opener: three or more backticks or tildes; a backtick fence whose info string holds a
+   backtick is an inline span ("```x```"), not a fence. */
+static bool CodeFenceOpens(string body,int at,int end,out char marker,out int length){
+    marker='\0';length=0;
+    int i=CodeLineContent(body,at,end);
+    if(i<0||i>=end)return false;
+    char c=body[i];
+    if(c!='`'&&c!='~')return false;
+    int e=i;
+    while(e<end&&body[e]==c)e++;
+    if(e-i<3)return false;
+    if(c=='`'){for(int k=e;k<end;k++)if(body[k]=='`')return false;}
+    marker=c;length=e-i;
+    return true;
+}
+/* A fence closer: the same character, at least as long, and nothing but blanks after it. */
+static bool CodeFenceCloses(string body,int at,int end,char marker,int length){
+    int i=CodeLineContent(body,at,end);
+    if(i<0||i>=end||body[i]!=marker)return false;
+    int e=i;
+    while(e<end&&body[e]==marker)e++;
+    if(e-i<length)return false;
+    for(int k=e;k<end;k++)if(body[k]!=' '&&body[k]!='\t')return false;
+    return true;
+}
+/* The inline code spans of one paragraph. runs holds its backtick runs as (position, length)
+   pairs, already effective: MarkdownCodeRanges drops the first backtick of a run that an odd
+   number of backslashes escapes, so an opener and a closer compare the same way. A run opens at
+   its position and closes at the next run of exactly the same length. A run with no closer is
+   literal. cache keeps, per length, the first run found after the last search, so a paragraph is
+   read once for each distinct length. */
+static void CodeSpanFlush(List<int> runs,List<int> ranges){
+    int count=runs.Count/2;
+    if(count>=2){
+        var cache=new Dictionary<int,int>();
+        int i=0;
+        while(i<count){
+            int pos=runs[i*2],length=runs[i*2+1];
+            int found;
+            if(!cache.TryGetValue(length,out found)||(found!=Int32.MaxValue&&found<=i)){
+                found=Int32.MaxValue;
+                for(int j=i+1;j<count;j++)if(runs[j*2+1]==length){found=j;break;}
+                cache[length]=found;
+            }
+            if(found==Int32.MaxValue){i++;continue;}
+            ranges.Add(pos);
+            ranges.Add(runs[found*2]+runs[found*2+1]);
+            i=found+1;
+        }
+    }
+    runs.Clear();
+}
+/* The code of a Markdown body as sorted, non-overlapping [start,end) pairs in one flat list
+   (start0,end0,start1,end1,...): fenced blocks (opening line start to closing line end, an
+   unclosed fence to the end of the body) and inline code spans outside them (a span may cross a
+   line break but not a blank line). Indented code is not code here: lists indent pictures. One
+   linear pass; it runs once per save, never on a keystroke. */
+static List<int> MarkdownCodeRanges(string body){
+    var ranges=new List<int>();
+    if(String.IsNullOrEmpty(body))return ranges;
+    var runs=new List<int>();
+    int n=body.Length,at=0;
+    char fenceChar='\0';
+    int fenceLength=0,fenceStart=0;
+    while(at<n){
+        int end=at;
+        while(end<n&&body[end]!='\n'&&body[end]!='\r')end++;
+        int next=end;
+        if(next<n){
+            if(body[next]=='\r'&&next+1<n&&body[next+1]=='\n')next+=2;
+            else next++;
+        }
+        if(fenceChar!='\0'){
+            if(CodeFenceCloses(body,at,end,fenceChar,fenceLength)){
+                ranges.Add(fenceStart);
+                ranges.Add(end);
+                fenceChar='\0';
+            }
+            at=next;
+            continue;
+        }
+        char marker;
+        int length;
+        if(CodeFenceOpens(body,at,end,out marker,out length)){
+            CodeSpanFlush(runs,ranges);
+            fenceChar=marker;fenceLength=length;fenceStart=at;
+            at=next;
+            continue;
+        }
+        /* A line of only blanks and '>' markers ("> >  ") is blank: it ends the paragraph too. */
+        bool blank=CodeLineContent(body,at,end)>=end;
+        if(blank){
+            CodeSpanFlush(runs,ranges);
+        }else{
+            int i=at;
+            while(i<end){
+                if(body[i]!='`'){i++;continue;}
+                int e=i;
+                while(e<end&&body[e]=='`')e++;
+                int slashes=0;
+                for(int k=i-1;k>=at&&body[k]=='\\';k--)slashes++;
+                /* An escaped first backtick is literal: the run starts one later and one shorter (gone if it was alone). */
+                if((slashes&1)!=0){
+                    if(e-i>1){runs.Add(i+1);runs.Add(e-i-1);}
+                }else{runs.Add(i);runs.Add(e-i);}
+                i=e;
+            }
+        }
+        at=next;
+    }
+    if(fenceChar!='\0'){
+        ranges.Add(fenceStart);
+        ranges.Add(n);
+    }else CodeSpanFlush(runs,ranges);
+    return ranges;
+}
 /* Every image link of the body whose target names a file directly inside PastedImageTempFolder().
    A document restored from a session (or a crash draft) has no per-tab list, so its first save
    reads the document itself; this runs once per save, never on a keystroke. The token read is the
    one the paste writes, "![label](target)": the label holds no ']' (ImageAlt drops brackets) and
    the target is plain or wrapped in '<...>'. A token that cannot be read is left alone, and a
-   target outside the temp folder is never a pasted picture. */
+   target outside the temp folder is never a pasted picture. A token inside a fenced code block or
+   an inline code span is code, literal text: it is neither read nor moved nor copied. */
 static void PastedImageLinks(string body,List<PastedImageLink> links,string oldDir,string oldFolder){
     if(String.IsNullOrEmpty(body))return;
-    int at=0;
+    /* No "![" at all (a plain Ctrl+S): nothing to read, so the code ranges are not even built. */
+    if(body.IndexOf("![",StringComparison.Ordinal)<0)return;
+    List<int> code=MarkdownCodeRanges(body);
+    int codeAt=0,at=0;
     while(at<body.Length){
         int open=body.IndexOf("![",at,StringComparison.Ordinal);
         if(open<0)return;
         at=open+2;
+        /* Code stays literal text: an "![" inside a fenced block or an inline code span is no link.
+           open only grows, so one moving index over the sorted ranges keeps this linear. */
+        while(codeAt<code.Count&&code[codeAt+1]<=open)codeAt+=2;
+        if(codeAt<code.Count&&code[codeAt]<=open){at=code[codeAt+1];continue;}
         if(open>0&&body[open-1]=='\\')continue;   /* "\![x](y)" is literal text, not a picture */
         int label=body.IndexOf(']',open+2);
         if(label<0)return;
@@ -459,8 +596,11 @@ sealed class PastedImageUndo {
    <olddir>\<oldname>\ into the new folder (the old file and folder stay as they are). A plain
    Ctrl+S with no staged picture costs one parse of the body. Only links the text still holds move: a picture that was pasted and then deleted or
    undone has no link and stays in the temp folder. Only parsed image links are rewritten, so a
-   path that merely appears in prose or a code block is left as text. Every replacement is one
-   command; the state that can undo it goes back to SaveAsync, which uses it when the save itself
+   path that merely appears in prose is left as text, and an image link inside a fenced code block
+   or an inline code span is skipped (MarkdownCodeRanges): its picture is not moved or copied. Every replacement is one
+   command; a staged picture that any OTHER open document (any tab of any window, saved or not)
+   also links is COPIED instead of moved, so that document's link keeps working (user, 2026-11-04,
+   TempImagesLinkedElsewhere); the state that can undo it goes back to SaveAsync, which uses it when the save itself
    does not write. A picture that cannot be moved keeps its absolute link and the paste still
    reaches the file. A document restored from a session or a crash draft has no per-tab list; its
    own text links are read the same way, and a link to any file outside that folder is never
@@ -516,11 +656,15 @@ PastedImageMoveState MovePastedImagesToDocument(string target){
             edits.Add(new SourceEdit(link.Offset,link.Length,text));
         }
     }
+    /* Staged pictures another open document also links stay in the temp folder (user, 2026-11-04):
+       they are copied, and only the ones nobody else links are moved. */
+    HashSet<string> shared=sources.Count==0?null:TempImagesLinkedElsewhere(sources);
     for(int i=0;i<sources.Count;i++){
         string old=sources[i];
         string oldReference=MarkdownCommands.ImageReference("",old);
         string name=Path.GetFileName(old);
         string destination=Path.Combine(folder,name);
+        bool keepStaged=shared!=null&&shared.Contains(old);
         try{
             Directory.CreateDirectory(folder);
             int number=1;
@@ -528,12 +672,17 @@ PastedImageMoveState MovePastedImagesToDocument(string target){
                 number++;
                 destination=Path.Combine(folder,Path.GetFileNameWithoutExtension(name)+"-"+number.ToString(CultureInfo.InvariantCulture)+Path.GetExtension(name));
             }
-            File.Move(old,destination);
+            if(keepStaged)File.Copy(old,destination,false);
+            else File.Move(old,destination);
         }catch(IOException){continue;}
         catch(UnauthorizedAccessException){continue;}
         catch(ArgumentException){continue;}
-        move.From.Add(old);
-        move.To.Add(destination);
+        /* A copy leaves nothing to put back in the temp folder; a failed save only removes it. */
+        if(keepStaged)move.Copied.Add(destination);
+        else{
+            move.From.Add(old);
+            move.To.Add(destination);
+        }
         string newReference=MarkdownCommands.ImageReference(target,destination);
         if(String.Equals(oldReference,newReference,StringComparison.Ordinal))continue;
         /* The target span as the text holds it (the '<...>' wrapper included when the paste wrote
@@ -565,6 +714,42 @@ PastedImageMoveState MovePastedImagesToDocument(string target){
         ApplyCommandResult(result);
     }
     return move.From.Count==0&&move.Copied.Count==0&&move.Undo.Count==0?null:move;
+}
+/* The staged pictures (full paths, from candidates) that another open document also links (user,
+   2026-11-04): every tab of every window of this process except the tab being saved, saved or
+   not. Each tab is read from its live editor buffer when it has one, else from the text it kept. The
+   same parser as the save (PastedImageLinks) reads it, so a link inside code is no link here
+   either. A tab that cannot be read counts as linking everything (a copy is the safe answer).
+   Runs on a save that has pictures to move, never on a keystroke. */
+HashSet<string> TempImagesLinkedElsewhere(List<string> candidates){
+    var found=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var wanted=new HashSet<string>(candidates,StringComparer.OrdinalIgnoreCase);
+    var windows=new List<MainWindow>();
+    windows.Add(this);
+    if(Application.Current!=null){
+        foreach(Window candidate in Application.Current.Windows){
+            MainWindow editor=candidate as MainWindow;
+            if(editor!=null&&!Object.ReferenceEquals(editor,this))windows.Add(editor);
+        }
+    }
+    for(int w=0;w<windows.Count&&found.Count<wanted.Count;w++){
+        MainWindow window=windows[w];
+        var tabs=new List<DocumentTab>(window.documents);
+        for(int t=0;t<tabs.Count&&found.Count<wanted.Count;t++){
+            DocumentTab tab=tabs[t];
+            if(Object.ReferenceEquals(tab,activeDocument))continue;
+            try{
+                /* The live editor first: its buffer is newer than the text a tab last stored. */
+                string body;
+                if(Object.ReferenceEquals(tab,window.activeDocument))body=window.source!=null&&window.source.Document!=null?window.source.Document.Text:window.text;
+                else body=tab.Source!=null&&tab.Source.Document!=null?tab.Source.Document.Text:tab.Text;
+                var links=new List<PastedImageLink>();
+                PastedImageLinks(body,links,null,null);
+                for(int k=0;k<links.Count;k++)if(wanted.Contains(links[k].File))found.Add(links[k].File);
+            }catch(Exception){return wanted;}
+        }
+    }
+    return found;
 }
 // True when both names are the same file (full paths, case-insensitive).
 static bool SamePicturePath(string left,string right){

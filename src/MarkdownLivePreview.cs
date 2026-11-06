@@ -193,7 +193,8 @@ internal static class LiveCompositionGeometry {
         double x=Math.Min(Math.Max(position.X,bounds.Left),Math.Max(bounds.Left,bounds.Right));
         double y=Math.Min(Math.Max(position.Y,bounds.Top),Math.Max(bounds.Top,bounds.Bottom));
         string name=face.FontFamily.Source;int comma=name.IndexOf(',');if (comma>0) name=name.Substring(0,comma).Trim();
-        var font=new Font {Height=-Math.Max(1,(int)Math.Round(size*VisualTreeHelper.GetDpi(editor).DpiScaleY)),Weight=face.Weight.ToOpenTypeWeight(),Italic=(byte)(face.Style==FontStyles.Normal ? 0 : 1),CharSet=1,Face=name.Length>31 ? name.Substring(0,31) : name};
+        // Quality 4 (ANTIALIASED) as SourceEditor.CompositionFont writes it: a different value made the two writers overwrite each other on every apply.
+        var font=new Font {Height=-Math.Max(1,(int)Math.Round(size*VisualTreeHelper.GetDpi(editor).DpiScaleY)),Weight=face.Weight.ToOpenTypeWeight(),Italic=(byte)(face.Style==FontStyles.Normal ? 0 : 1),CharSet=1,Quality=4,Face=name.Length>31 ? name.Substring(0,31) : name};
         var form=new Form {Style=CompositionFormStyle,X=(int)x,Y=(int)y,Left=(int)bounds.Left,Top=(int)bounds.Top,Right=(int)bounds.Right,Bottom=(int)bounds.Bottom};
         IntPtr context=ImmGetContext(source.Handle);if (context==IntPtr.Zero) return;
         try {
@@ -646,8 +647,14 @@ internal static partial class MarkdownLivePreview {
         // content is paragraph text, the state a lazy continuation line needs.
         internal int Quote;
         internal bool QuoteParagraph;
+        // An open display-math block ("$$" ... "$$" or a ```math fence that closes within
+        // MathRender.BlockLines): the lines still to come, the closer included (0 = none), and
+        // the opener line. Lines inside are formula source: no fence, list or table state.
+        internal int Math;
+        internal DocumentLine MathStart;
         public bool Equals(BlockState other) {
             return Fence == other.Fence && FenceLength == other.FenceLength && Table == other.Table && TableStart == other.TableStart && TableColumns == other.TableColumns &&
+                Math == other.Math && MathStart == other.MathStart &&
                 ListGap == other.ListGap && Setext == other.Setext && Quote == other.Quote && QuoteParagraph == other.QuoteParagraph &&
                 (List == other.List || List != null && List.Same(other.List));
         }
@@ -710,6 +717,8 @@ internal static partial class MarkdownLivePreview {
             }
         }
         BlockState Scan(DocumentLine line, BlockState before) {
+            // Inside a display-math block every line is formula source up to the closer.
+            if (before.Math > 0) return before.Math == 1 ? new BlockState() : new BlockState { Math=before.Math - 1, MathStart=before.MathStart };
             char fence;
             int length;
             bool tailBlank;
@@ -718,6 +727,8 @@ internal static partial class MarkdownLivePreview {
                 if (fence == before.Fence && length >= before.FenceLength && tailBlank) return new BlockState();
                 return before;
             }
+            int math = MathOpen(document, line, before);
+            if (math > 0) return new BlockState { Math=math, MathStart=line };
             if (length >= 3) return new BlockState { Fence=fence, FenceLength=length };
             string text = ShortText(document, line);
             bool pipe = HasTablePipe(text);
@@ -802,6 +813,55 @@ internal static partial class MarkdownLivePreview {
         else if (offset > document.TextLength) { offset = document.TextLength; length = 0; }
         if (length > document.TextLength - offset) length = document.TextLength - offset;
         return document.GetText(offset, length);
+    }
+
+    // The number of lines that follow a display-math opener, the closer included, or 0 when the
+    // line opens nothing: a line that is exactly "$$", or a "```math" fence, whose closer (a "$$"
+    // line / the matching fence) comes within MathRender.BlockLines lines with no blank line in
+    // between. The look-ahead is bounded, so the scan of one opener never reads more than that.
+    static int MathOpen(TextDocument document, DocumentLine line, BlockState before) {
+        if (before.Fence != '\0' || before.Math > 0 || before.Quote > 0) return 0;
+        if (line.Length < 2 || line.Length > 64 || line.Offset + line.Length > document.TextLength) return 0;
+        int p = 0;
+        while (p < line.Length && p < 4 && document.GetCharAt(line.Offset + p) == ' ') p++;
+        if (p > 3 || p >= line.Length) return 0;
+        char first = document.GetCharAt(line.Offset + p);
+        if (first != '$' && first != '`' && first != '~') return 0;
+        string text = ShortText(document, line);
+        char marker = '\0';
+        int markerLength = 0;
+        bool dollar = MathRender.IsDollarLine(text);
+        if (!dollar && !MathRender.IsMathFence(text, out marker, out markerLength)) return 0;
+        MathRender.Seen = true;
+        int count = 0;
+        for (DocumentLine next = line.NextLine; next != null && count < MathRender.BlockLines; next = next.NextLine) {
+            count++;
+            if (next.Length > ParseLimit) return 0;
+            string value = ShortText(document, next);
+            if (BlankLine(value)) return 0;
+            if (dollar) {
+                if (MathRender.IsDollarLine(value)) return count;
+            } else {
+                char other;
+                int otherLength;
+                bool otherBlank;
+                ReadFence(document, next, out other, out otherLength, out otherBlank);
+                if (other == marker && otherLength >= markerLength && otherBlank) return count;
+            }
+        }
+        return 0;
+    }
+    // The formula source of an opener that MathOpen accepted: the lines between the opener and
+    // the closer, trimmed and joined with spaces (TeX reads a line break as a blank).
+    static string MathBlockSource(TextDocument document, DocumentLine opener, int count) {
+        var source = new StringBuilder();
+        DocumentLine at = opener.NextLine;
+        for (int i = 1; i < count && at != null; i++, at = at.NextLine) {
+            string value = ShortText(document, at).Trim();
+            if (source.Length > 0) source.Append(' ');
+            source.Append(value);
+        }
+        return source.ToString();
     }
 
     static void ReadFence(TextDocument document, DocumentLine line, out char fence, out int length, out bool tailBlank) {
@@ -900,6 +960,14 @@ internal static partial class MarkdownLivePreview {
         }
         return cells;
     }
+    // True when text[from..to) holds a column pipe ("\|" is an escaped one and does not count).
+    static bool HasCellPipe(string text, int from, int to) {
+        for (int i = from; i < to && i < text.Length; i++) {
+            if (text[i] == '\\') { i++; continue; }
+            if (text[i] == '|') return true;
+        }
+        return false;
+    }
     static void AddTableStops(LineInfo info) {
         if (info.Cells.Count == 0) { info.Hide(0, info.Text.Length); return; }
         // Consume pipe + adjacent padding in one run. This keeps generator ranges
@@ -933,7 +1001,7 @@ internal static partial class MarkdownLivePreview {
         // font size, like the basic view's em/% rules.
         internal double SizeEm;
     }
-    internal enum ReplacementKind { Hidden, Spacer, Bullet, Number, Task, Column, Image, Glyph, LineBreak }
+    internal enum ReplacementKind { Hidden, Spacer, Bullet, Number, Task, Column, Image, Glyph, LineBreak, Math }
     internal struct Replacement {
         internal int Start, Length, Level, Column;
         internal double Width;
@@ -979,8 +1047,26 @@ internal static partial class MarkdownLivePreview {
         // Stage 3a: the run has no caret stop of its own, so the line starts at its text.
         internal int LeadEnd;
         internal bool Quote, Code, FenceLine, Rule, Table, Header, Delimiter;
+        // Display math. MathCount > 0: this line opens a block of that many more lines (the
+        // closer included) whose source is MathLatex. MathRemaining > 0: this line is inside such
+        // a block (itself included; 1 = the closer) and MathOpener is the opener line. A one-line
+        // "$$ x $$" has MathOne set and no block. Rendered, the opener line carries the formula
+        // and the other lines are folded to nothing; while the caret or a selection touches the
+        // block every line shows its source.
+        internal int MathCount, MathRemaining;
+        internal string MathLatex;
+        internal DocumentLine MathOpener;
+        internal bool MathOne;
+        // The line holds at least one inline formula.
+        internal bool MathInline;
+        // A table row only: the inline formulas of the row the caret or a selection touches, as ",<start>,<start>,"
+        // (line-relative starts), null when none. They show their source in the cell. Set before the row is laid out.
+        internal string MathTouchKey;
         // The line has no ">" of its own and continues the quote above it (lazy continuation).
         internal bool LazyQuote;
+        // How many quote levels the lazily continued line sits in (the line above's marker count):
+        // the line is drawn indented by that many quote spacers, like the quote's own lines.
+        internal int LazyLevels;
         internal readonly List<StyledPart> Styles = new List<StyledPart>();
         internal readonly List<Replacement> Replacements = new List<Replacement>();
         internal void Hide(int start, int length) {
@@ -1384,6 +1470,14 @@ internal static partial class MarkdownLivePreview {
         internal bool IsBreak(int index) { return Breaks!=null && index>=0 && index<Breaks.Length && Breaks[index]; }
         internal bool IsImage(int index) { return ImageSlots!=null && index>=0 && index<ImageSlots.Length && ImageSlots[index]>=0; }
         internal bool HasImage { get { return ImageSlots!=null; } }
+        // An inline formula inside the cell is one synthetic text position (MathCharacter) drawing a
+        // CellMathRun; MathSlots is null when the cell draws no formula (its source stays text).
+        internal const char MathCharacter=(char)0xFFFB;
+        internal readonly int[] MathSlots;
+        internal readonly MathVisual[] MathVisuals;
+        internal bool IsMath(int index) { return MathSlots!=null && index>=0 && index<MathSlots.Length && MathSlots[index]>=0; }
+        internal bool HasMath { get { return MathSlots!=null; } }
+        internal CellMathRun MathRun(int index,TextRunProperties properties) { return new CellMathRun(properties,MathVisuals[MathSlots[index]]); }
         internal CellImageRun ImageRun(int index,TextRunProperties properties) {
             int slot=ImageSlots[index];
             return new CellImageRun(properties,ImageBitmaps[slot],ImageWidths[slot],ImageHeights[slot],ContentWidth);
@@ -1397,6 +1491,7 @@ internal static partial class MarkdownLivePreview {
             Source=info.Text;SourceStart=cell.Start;SourceLength=cell.End-cell.Start;Plain=previous.Plain;
             Default=previous.Default;Text=previous.Text;Properties=previous.Properties;Breaks=previous.Breaks;
             ImageSlots=previous.ImageSlots;ImageBitmaps=previous.ImageBitmaps;ImageWidths=previous.ImageWidths;ImageHeights=previous.ImageHeights;
+            MathSlots=previous.MathSlots;MathVisuals=previous.MathVisuals;
             ContentWidth=previous.ContentWidth;
             FormatEnd=Text.Length;
             int delta=cell.Start-previous.SourceStart;Map=new int[previous.Map.Length];
@@ -1418,12 +1513,15 @@ internal static partial class MarkdownLivePreview {
             for (int p=previous.Text.Length;p<Text.Length;p++) Properties[p]=Default;
             FormatEnd=Text.Length;
         }
-        internal CellText(LineInfo info, Cell cell, Session session, bool raw, double contentWidth) {
+        internal CellText(LineInfo info, Cell cell, Session session, bool raw, double contentWidth) : this(info,cell,session,raw,contentWidth,info.MathTouchKey) { }
+        // touch: LineInfo.MathTouchKey (formulas drawn as source); the width measurement passes null.
+        internal CellText(LineInfo info, Cell cell, Session session, bool raw, double contentWidth, string touch) {
             Source=info.Text;SourceStart=cell.Start;SourceLength=cell.End-cell.Start;Plain=Session.PlainCell(info,cell);
             Default=session.CellDefaults[info.Header ? 1 : 0];ContentWidth=contentWidth;
             var text=new StringBuilder(); var map=new List<int>(); var properties=new List<TextRunProperties>();
             var breaks=new List<int>();
             var images=new List<int>(); var bitmaps=new List<BitmapSource>(); var widths=new List<double>(); var heights=new List<double>();
+            var formulas=new List<int>(); var drawings=new List<MathVisual>();
             var sourceProperties=new TextRunProperties[cell.End-cell.Start];
             for (int i=0;i<sourceProperties.Length;i++) sourceProperties[i]=Default;
             // Styles are bounded by MaxSpans, and built once per measured/visible row.
@@ -1471,6 +1569,18 @@ internal static partial class MarkdownLivePreview {
                             p=Math.Min(cell.End,p+item.Length); continue;
                         }
                     }
+                    if (item.Start==p && item.Kind==ReplacementKind.Math && p+item.Length<=cell.End &&
+                        (touch==null || touch.IndexOf(","+item.Start.ToString(CultureInfo.InvariantCulture)+",",StringComparison.Ordinal)<0)) {
+                        // An inline formula is one object position covering the "$...$" span, drawn in the
+                        // cell text's size and colour. A formula that does not parse, and one the caret or a
+                        // selection touches, keeps its source as ordinary cell text.
+                        MathVisual visual=session.CellMath(item.Source,sourceProperties[p-cell.Start]);
+                        if (visual!=null) {
+                            formulas.Add(text.Length); drawings.Add(visual);
+                            text.Append(MathCharacter); map.Add(p); properties.Add(sourceProperties[p-cell.Start]);
+                            p=Math.Min(cell.End,p+item.Length); continue;
+                        }
+                    }
                 }
                 text.Append(info.Text[p]); map.Add(p); properties.Add(sourceProperties[p-cell.Start]); p++;
             }
@@ -1486,6 +1596,12 @@ internal static partial class MarkdownLivePreview {
                 for (int i=0;i<images.Count && i<ImageSlots.Length;i++) ImageSlots[images[i]]=i;
                 ImageBitmaps=bitmaps.ToArray(); ImageWidths=widths.ToArray(); ImageHeights=heights.ToArray();
             }
+            if (formulas.Count>0) {
+                MathSlots=new int[Text.Length];
+                for (int i=0;i<MathSlots.Length;i++) MathSlots[i]=-1;
+                for (int i=0;i<formulas.Count && formulas[i]<MathSlots.Length;i++) MathSlots[formulas[i]]=i;
+                MathVisuals=drawings.ToArray();
+            }
         }
         public override TextRun GetTextRun(int index) {
             if (index>=Text.Length || index>=FormatEnd) return new TextEndOfParagraph(1);
@@ -1493,7 +1609,8 @@ internal static partial class MarkdownLivePreview {
             // line continues with the following run. Never draw the marker itself.
             if (IsBreak(index)) return new TextEndOfLine(1);
             if (IsImage(index)) return ImageRun(index,Properties[index]);
-            int end=index+1; while (end<Text.Length && end<FormatEnd && Properties[end]==Properties[index] && !IsBreak(end) && !IsImage(end)) end++;
+            if (IsMath(index)) return MathRun(index,Properties[index]);
+            int end=index+1; while (end<Text.Length && end<FormatEnd && Properties[end]==Properties[index] && !IsBreak(end) && !IsImage(end) && !IsMath(end)) end++;
             return new TextCharacters(Text,index,end-index,Properties[index]);
         }
         public override TextSpan<CultureSpecificCharacterBufferRange> GetPrecedingText(int limit) {
@@ -1553,6 +1670,30 @@ internal static partial class MarkdownLivePreview {
         public override void Draw(DrawingContext context, Point origin, bool rightToLeft, bool sideways) {
             if (bitmap==null || width<=0 || height<=0) return;
             context.DrawImage(bitmap,new Rect(origin.X,origin.Y-baseline,width,height));
+        }
+    }
+    // An inline formula inside a table cell: the same MathVisual the live line draws (MathRun), as a
+    // fixed-size object of the cell's TextSource. The visual was rendered at the cell text's size and in
+    // its colour, so the line it sits on grows to its height and the column measures its width.
+    internal sealed class CellMathRun : TextEmbeddedObject {
+        readonly TextRunProperties properties;
+        readonly MathVisual visual;
+        internal CellMathRun(TextRunProperties properties, MathVisual visual) { this.properties=properties; this.visual=visual; }
+        public override int Length { get { return 1; } }
+        public override TextRunProperties Properties { get { return properties; } }
+        public override CharacterBufferReference CharacterBufferReference { get { return new CharacterBufferReference(); } }
+        public override LineBreakCondition BreakBefore { get { return LineBreakCondition.BreakRestrained; } }
+        public override LineBreakCondition BreakAfter { get { return LineBreakCondition.BreakRestrained; } }
+        public override bool HasFixedSize { get { return true; } }
+        public override TextEmbeddedObjectMetrics Format(double remainingParagraphWidth) {
+            return new TextEmbeddedObjectMetrics(visual.Width,visual.Height,visual.Ascent);
+        }
+        public override Rect ComputeBoundingBox(bool rightToLeft, bool sideways) { return new Rect(0,-visual.Ascent,visual.Width,visual.Height); }
+        public override void Draw(DrawingContext context, Point origin, bool rightToLeft, bool sideways) {
+            if (visual.Drawing==null) return;
+            context.PushTransform(new TranslateTransform(origin.X+visual.OffsetX,origin.Y-visual.Ascent));
+            context.DrawDrawing(visual.Drawing);
+            context.Pop();
         }
     }
     internal struct CellSlice { internal int Start, Length; internal double Width, Height, Baseline; }
@@ -1631,11 +1772,13 @@ internal static partial class MarkdownLivePreview {
         // the row never re-wraps onto a second visual line.
         internal readonly double Indent, BaseWidth;
         internal readonly string Source;
+        // LineInfo.MathTouchKey the row was built for: a touched formula is drawn as source.
+        internal readonly string MathKey;
         // Immutable once built, so a redraw of the same cached row reuses it instead of
         // rebuilding the O(line) source/reverse maps on every visual line construction.
         internal TableProjection Projection;
         internal RowLayout(LineInfo info, TableLayout table, Session session, bool raw) {
-            Source=info.Text;RowLayout previous=info.Row;
+            Source=info.Text;MathKey=info.MathTouchKey;RowLayout previous=info.Row;
             Table=table; Version=table.Version; ViewWidth=session.View.ActualWidth;
             Indent=Math.Max(0,info.TableIndent);
             BaseWidth=Math.Max(1,session.RowWidth()-Indent);
@@ -1973,12 +2116,13 @@ internal static partial class MarkdownLivePreview {
             List<CellSlice> slices=row.Slices[cell];
             if (slices==null || slices.Count==0) return text.Map[0];
             // The slice of this cell under the pointer; below the cell's own rows use its last.
+            // Each text line's own bottom edge (document coordinates, like point.Y): the earlier
+            // loop added only the FIRST line's height to the first line's top for every row, so a
+            // press below row 0 never matched and always resolved to the cell's last row.
             int slice=0;
-            double top=visual.GetTextLineVisualYPosition(visual.TextLines[0],VisualYPosition.LineTop);
             for (int r=0;r<visual.TextLines.Count && r<slices.Count;r++) {
-                TextLine line=visual.TextLines[r];
-                if (point.Y<top+line.Height) { slice=r;break; }
                 slice=r;
+                if (point.Y<visual.GetTextLineVisualYPosition(visual.TextLines[r],VisualYPosition.LineBottom)) break;
             }
             CellSlice part=slices[slice];
             // The text line that draws this slice: the slice's first column is the filler, so
@@ -2069,6 +2213,20 @@ internal static partial class MarkdownLivePreview {
             CellText text=Row.Texts!=null && cell>=0 && cell<Row.Texts.Length ? Row.Texts[cell] : null;
             return text!=null && text.HasImage;
         }
+        // Probe-only: the cell draws this many formulas as objects (0 = its source stays text).
+        internal int CellFormulas(int cell) {
+            CellText text=Row.Texts!=null && cell>=0 && cell<Row.Texts.Length ? Row.Texts[cell] : null;
+            return text==null || text.MathVisuals==null ? 0 : text.MathVisuals.Length;
+        }
+        // Probe-only: width and height of the cell's first physical row's line (slice), and the cell's drawn text width.
+        internal double CellSliceHeight(int cell) {
+            List<CellSlice> slices=Row.Slices!=null && cell>=0 && cell<Row.Slices.Length ? Row.Slices[cell] : null;
+            return slices==null || slices.Count==0 ? 0 : slices[0].Height;
+        }
+        internal double CellSliceWidth(int cell) {
+            List<CellSlice> slices=Row.Slices!=null && cell>=0 && cell<Row.Slices.Length ? Row.Slices[cell] : null;
+            return slices==null || slices.Count==0 ? 0 : slices[0].Width;
+        }
         public override TextRun CreateTextRun(int column,ITextRunConstructionContext context) {
             int at=column-VisualColumn, lo=0, hi=projection.Tokens.Count-1;
             while(lo<hi) { int middle=(lo+hi+1)/2; if(projection.Tokens[middle].Start<=at)lo=middle;else hi=middle-1; }
@@ -2082,8 +2240,10 @@ internal static partial class MarkdownLivePreview {
             if(token.Text.IsBreak(index))return new TextEndOfLine(1);
             // The cell's image is one object position; the span behind it is hidden source.
             if(token.Text.IsImage(index))return token.Text.ImageRun(index,token.Text.Properties[index]);
+            // An inline formula is one object position as well; the span behind it is hidden source.
+            if(token.Text.IsMath(index))return token.Text.MathRun(index,token.Text.Properties[index]);
             TextRunProperties properties=token.Text.Properties[index]; int length=1;
-            while(length<count && token.Text.Properties[index+length]==properties && !token.Text.IsBreak(index+length) && !token.Text.IsImage(index+length))length++;
+            while(length<count && token.Text.Properties[index+length]==properties && !token.Text.IsBreak(index+length) && !token.Text.IsImage(index+length) && !token.Text.IsMath(index+length))length++;
             return new TextCharacters(token.Text.Text,index,length,properties);
         }
         public override int GetNextCaretPosition(int column,LogicalDirection direction,CaretPositioningMode mode) {
@@ -2169,6 +2329,7 @@ internal static partial class MarkdownLivePreview {
         bool changeStateKnown;
         readonly MarkerGenerator markers;
         readonly StrutGenerator struts;
+        readonly LazyQuoteGenerator lazyQuotes;
         readonly FillGenerator fill;
         readonly MarkdownTransformer transformer;
         readonly LiveCodeHighlight codeColors;
@@ -2317,10 +2478,12 @@ internal static partial class MarkdownLivePreview {
             lastActiveLine = caretLine;
             struts = new StrutGenerator(this);
             markers = new MarkerGenerator(this);
+            lazyQuotes = new LazyQuoteGenerator(this);
             transformer = new MarkdownTransformer(this);
             renderer = new BlockRenderer(this);
             View.ElementGenerators.Insert(0, struts);
-            View.ElementGenerators.Insert(1, markers);
+            View.ElementGenerators.Insert(1, lazyQuotes);
+            View.ElementGenerators.Insert(2, markers);
             fill = new FillGenerator(this);
             View.ElementGenerators.Add(fill);
             View.LineTransformers.Add(transformer);
@@ -2358,6 +2521,8 @@ internal static partial class MarkdownLivePreview {
             Editor.TextArea.TextEntering += HiddenFenceEntering;
             Editor.TextArea.PreviewMouseLeftButtonDown += FenceRowMouseDown;
             Editor.TextArea.TextEntering += SetextRuleEntering;
+            Editor.TextArea.TextEntering += FenceEnterEntering;
+            Editor.PreviewKeyDown += FenceEnterKeyDown;
             Editor.TextArea.TextEntered += TableGapEntered;
             Editor.TextArea.TextEntered += HiddenCloseSpaceEntered;
             Editor.TextArea.TextEntered += SetextRuleEntered;
@@ -2562,11 +2727,119 @@ internal static partial class MarkdownLivePreview {
         internal bool Raw(DocumentLine line) {
             // Reading mode never reveals markup, but the caret still works normally.
             if (Options.ReadOnly || Editor.IsReadOnly) return false;
+            // A display formula is one unit: all of its lines show source while the caret or a
+            // selection is on any of them, in the no-reveal mode too (there is no other way to edit it).
+            if (MathRender.Seen) {
+                LineInfo mathInfo = Info(line);
+                if (mathInfo.MathCount > 0 || mathInfo.MathRemaining > 0 || mathInfo.MathOne) return MathBlockActive(mathInfo, line) || MathBroken(mathInfo);
+            }
             // The no-reveal mode (Settings.HideMarkers) keeps every line formatted in edit
             // mode too; only the 원문 편집 toggle, which detaches this session, shows source.
-            if (Options.HideMarkers) return false;
+            // The one exception is the caret's own unclosed opening fence: that line is still
+            // being typed ("```python" before Enter), so it is shown as source (EditableFence).
+            if (Options.HideMarkers) return line.LineNumber == caretLine && EditableFence(line);
             int number = line.LineNumber;
             return number == caretLine || (HasSelectionLines(selectionStart, selectionEnd) && number >= selectionStart && number <= selectionEnd);
+        }
+        // First and last line number of the display-math block this line belongs to (a one-line
+        // "$$ x $$" is a block of one line).
+        internal void MathRange(LineInfo info, DocumentLine line, out int first, out int last) {
+            int number = line.LineNumber;
+            first = last = number;
+            if (info.MathCount > 0) last = number + info.MathCount;
+            else if (info.MathRemaining > 0) {
+                last = number + info.MathRemaining - 1;
+                if (info.MathOpener != null && !info.MathOpener.IsDeleted) first = info.MathOpener.LineNumber;
+            }
+        }
+        static bool BlockActive(int first, int last, int caret, int start, int end) {
+            return (caret >= first && caret <= last) || (HasSelectionLines(start, end) && start <= last && end >= first);
+        }
+        // A display formula that does not parse stays source text (the caret does not matter).
+        bool MathBroken(LineInfo info) {
+            if (info.MathCount <= 0 && !info.MathOne && info.MathOpener == null) return true;
+            LineInfo opener = info.MathCount > 0 || info.MathOne ? info : Info(info.MathOpener);
+            return !MathRender.Check(opener.MathLatex);
+        }
+        bool MathBlockActive(LineInfo info, DocumentLine line) {
+            int first, last;
+            MathRange(info, line, out first, out last);
+            return BlockActive(first, last, caretLine, selectionStart, selectionEnd);
+        }
+        // The no-reveal mode keeps the caret's line formatted, so an inline formula shows its source
+        // only while the caret touches it (inside it or at either edge) or a selection overlaps it.
+        // mathTouch is the document offset of that formula's start (-1 = none), mathTouchLine its line.
+        int mathTouch = -1, mathTouchLine;
+        Func<double> mathAvailable;
+        // The width a display formula centres itself in: the view width less the picture margin
+        // (what ImageCache allows a picture).
+        internal Func<double> MathAvailable {
+            get {
+                if (mathAvailable == null) mathAvailable = delegate { return Math.Max(0, View.ActualWidth - 24); };
+                return mathAvailable;
+            }
+        }
+        internal bool MathTouched(DocumentLine line, Replacement formula) {
+            if (formula.Kind != ReplacementKind.Math || formula.Level != 0) return false;
+            int start = line.Offset + formula.Start, end = start + formula.Length;
+            int caret = Editor.TextArea.Caret.Offset;
+            if (caret >= start && caret <= end) return true;
+            if (Editor.TextArea.Selection.IsEmpty) return false;
+            ISegment segment = Editor.TextArea.Selection.SurroundingSegment;
+            return segment.Offset < end && segment.EndOffset > start;
+        }
+        // The touched formulas of a table row (see LineInfo.MathTouchKey). Only a row with a formula pays for it.
+        internal string MathTouchKeyOf(DocumentLine line, LineInfo info) {
+            if (!info.MathInline) return null;
+            System.Text.StringBuilder key = null;
+            foreach (Replacement item in info.Replacements) {
+                if (item.Kind != ReplacementKind.Math || !MathTouched(line, item)) continue;
+                if (key == null) key = new System.Text.StringBuilder(",");
+                key.Append(item.Start.ToString(CultureInfo.InvariantCulture)).Append(',');
+            }
+            return key == null ? null : key.ToString();
+        }
+        // A display-math opener reads the lines below it (its closer, the formula source, a blank line
+        // that ends the block), so an edit can change a block whose opener is above the edited line.
+        // The openers within MathRender.BlockLines lines above the edit (a blank line ends the walk)
+        // lose their block state and their parse, and so does every line between them and the edit.
+        // Returns those lines, or null when there is no candidate: ordinary typing walks at most one
+        // run of non-blank lines and tests only lines that start with '$', '`' or '~'.
+        HashSet<DocumentLine> MathInvalidate(DocumentLine edited) {
+            if (!MathRender.Seen || edited == null) return null;
+            List<DocumentLine> path = null;
+            int farthest = 0;
+            DocumentLine at = edited.PreviousLine;
+            for (int walked = 0; at != null && walked <= MathRender.BlockLines; walked++, at = at.PreviousLine) {
+                if (at.Length == 0) break;
+                if (path == null) path = new List<DocumentLine>();
+                path.Add(at);
+                if (at.Length > 64) continue;
+                int p = 0;
+                while (p < at.Length && p < 4 && Document.GetCharAt(at.Offset + p) == ' ') p++;
+                if (p >= at.Length) break;
+                char first = Document.GetCharAt(at.Offset + p);
+                if (first != '$' && first != '`' && first != '~') continue;
+                string text = ShortText(Document, at);
+                char marker; int markerLength;
+                if (!MathRender.IsDollarLine(text) && !MathRender.IsMathFence(text, out marker, out markerLength)) continue;
+                blocks.Invalidate(at.LineNumber);
+                farthest = path.Count;
+            }
+            if (farthest == 0) return null;
+            var dirty = new HashSet<DocumentLine>();
+            for (int i = 0; i < farthest; i++) { dirty.Add(path[i]); lines.Remove(path[i]); }
+            return dirty;
+        }
+        int MathTouchAt(int caretNumber) {
+            if (!MathRender.Seen) return -1;
+            if (caretNumber < 1 || caretNumber > Document.LineCount) return -1;
+            DocumentLine line = Document.GetLineByNumber(caretNumber);
+            LineInfo info = Info(line);
+            if (!info.MathInline) return -1;
+            foreach (Replacement item in info.Replacements)
+                if (item.Kind == ReplacementKind.Math && MathTouched(line, item)) return line.Offset + item.Start;
+            return -1;
         }
         // A reference definition line is drawn at minimal height in the no-reveal mode while
         // the caret is elsewhere (the basic view never showed it); the caret line keeps the
@@ -2833,6 +3106,53 @@ internal static partial class MarkdownLivePreview {
             foreach (CollapsedLineSection section in referenceSections) if (section.IsCollapsed) section.Uncollapse();
             referenceSections.Clear();
             InvalidateReferenceRun();
+            ClearMathSections();
+        }
+        // Display math: the lines under a rendered block's opener are folded away like a table's
+        // delimiter row (the opener's visual line spans them, see MarkerGenerator.FoldedBelow).
+        // The fold is installed while the opener's visual line is built (StrutGenerator), released
+        // whenever the caret or a selection touches the block, and before any edit that reaches it.
+        readonly Dictionary<DocumentLine, CollapsedLineSection> mathSections = new Dictionary<DocumentLine, CollapsedLineSection>();
+        internal void PrepareMath(DocumentLine opener, bool fold) {
+            CollapsedLineSection section;
+            LineInfo info = Info(opener);
+            int last = opener.LineNumber + info.MathCount;
+            if (mathSections.TryGetValue(opener, out section)) {
+                if (fold && info.MathCount > 0 && section.IsCollapsed && section.Start == opener.NextLine && section.End.LineNumber == last) return;
+                if (section.IsCollapsed) section.Uncollapse();
+                mathSections.Remove(opener);
+            }
+            if (!fold || info.MathCount <= 0 || opener.NextLine == null || last > Document.LineCount) return;
+            mathSections.Add(opener, View.CollapseLines(opener.NextLine, Document.GetLineByNumber(last)));
+        }
+        internal CollapsedLineSection MathBelow(DocumentLine line) {
+            if (mathSections.Count == 0 || line == null || line.NextLine == null) return null;
+            foreach (CollapsedLineSection section in mathSections.Values)
+                if (section.IsCollapsed && section.Start == line.NextLine) return section;
+            return null;
+        }
+        void ClearMathSections() {
+            foreach (CollapsedLineSection section in mathSections.Values) if (section.IsCollapsed) section.Uncollapse();
+            mathSections.Clear();
+        }
+        // Before an edit: every fold the edit touches (or sits next to) is released, so the height
+        // tree never calls a changed line collapsed.
+        void PrepareMathSections(DocumentLine first, DocumentLine last) {
+            if (mathSections.Count == 0) return;
+            int from = first.LineNumber, to = last.LineNumber;
+            List<DocumentLine> release = null;
+            foreach (KeyValuePair<DocumentLine, CollapsedLineSection> item in mathSections) {
+                CollapsedLineSection section = item.Value;
+                if (item.Key.IsDeleted || !section.IsCollapsed || section.Start == null || section.End == null) { if (release == null) release = new List<DocumentLine>(); release.Add(item.Key); continue; }
+                int start = item.Key.LineNumber, end = section.End.LineNumber;
+                if (to >= start - 1 && from <= end + 1) { if (release == null) release = new List<DocumentLine>(); release.Add(item.Key); }
+            }
+            if (release == null) return;
+            foreach (DocumentLine opener in release) {
+                CollapsedLineSection section = mathSections[opener];
+                if (section.IsCollapsed) section.Uncollapse();
+                mathSections.Remove(opener);
+            }
         }
         // A collapse must never be installed while the visual line list is being built: a line
         // that this pass has not reached yet would then be constructed from a collapsed line.
@@ -2955,7 +3275,12 @@ internal static partial class MarkdownLivePreview {
             // only merge that space back in when it is typed exactly where the space left the
             // caret. (The typing that writes the space itself moves the caret before the state is
             // armed, so this never cancels a fresh one.)
-            if (closeSpacePending && (!Editor.TextArea.Selection.IsEmpty || Editor.TextArea.Caret.Offset != closeSpaceCaret)) closeSpacePending = false;
+            if (closeSpacePending && (!Editor.TextArea.Selection.IsEmpty || Editor.TextArea.Caret.Offset != closeSpaceCaret)) {
+                closeSpacePending = false;
+                // The toolbar read the caret before this ran (FormatAt checks the offset itself);
+                // a selection that kept the caret still needs the lit style taken back.
+                if (!Editor.TextArea.Selection.IsEmpty) Editor.NotifyToolsChanged();
+            }
             // The merged word's continuation mark follows the same rule: a caret that leaves the
             // spot it names ends the word's inside-the-pair run.
             if (closeWordCaret >= 0 && (!Editor.TextArea.Selection.IsEmpty || Editor.TextArea.Caret.Offset != closeWordCaret)) closeWordCaret = -1;
@@ -2969,7 +3294,14 @@ internal static partial class MarkdownLivePreview {
             // The direction a later fence-line snap moves towards. SnapHiddenCaret above already
             // ran with the previous value, so Up and Down step over the band on the side they came from.
             lastActiveLine = nextCaret;
-            if (nextCaret == caretLine && nextStart == selectionStart && nextEnd == selectionEnd) return;
+            // An inline formula under the caret shows its source (no-reveal mode): a caret that moves
+            // onto or off a formula on the same line has to rebuild that line.
+            int nextTouch = MathTouchAt(nextCaret);
+            bool touchChanged = nextTouch != mathTouch;
+            int oldTouchLine = mathTouchLine;
+            mathTouch = nextTouch;
+            mathTouchLine = nextTouch < 0 ? 0 : nextCaret;
+            if (nextCaret == caretLine && nextStart == selectionStart && nextEnd == selectionEnd && !touchChanged) return;
             int oldCaretLine = caretLine, oldStart = selectionStart, oldEnd = selectionEnd;
             caretLine = nextCaret;
             selectionStart = nextStart;
@@ -2977,6 +3309,12 @@ internal static partial class MarkdownLivePreview {
             // A caret moved through the API/keyboard can target a currently collapsed delimiter.
             DocumentLine caretDocumentLine=Document.GetLineByNumber(nextCaret);
             if(Raw(caretDocumentLine)&&caretDocumentLine.PreviousLine!=null)PrepareDelimiter(caretDocumentLine.PreviousLine,false);
+            // The same for a caret that lands inside a folded display formula (find, go to, undo).
+            LineInfo caretMath=Info(caretDocumentLine);
+            if((caretMath.MathCount>0||caretMath.MathRemaining>0)&&Raw(caretDocumentLine)){
+                DocumentLine mathOpener=caretMath.MathCount>0?caretDocumentLine:caretMath.MathOpener;
+                if(mathOpener!=null&&!mathOpener.IsDeleted)PrepareMath(mathOpener,false);
+            }
             // Publish a deferred grid only after its active row has been left. Quiet
             // typing is not permission to rewrap the row underneath an IME window.
             if (nextCaret!=oldCaretLine) {
@@ -2995,10 +3333,18 @@ internal static partial class MarkdownLivePreview {
                 int number = line.FirstDocumentLine.LineNumber;
                 bool changed=Active(number,oldCaretLine,oldStart,oldEnd)!=Active(number,nextCaret,nextStart,nextEnd);
                 LineInfo first=Info(line.FirstDocumentLine);
+                if (!changed && touchChanged && (number==oldTouchLine || number==mathTouchLine)) changed=true;
+                if (!changed && (first.MathCount>0 || first.MathRemaining>0 || first.MathOne)) {
+                    // A display formula is raw as a whole: every line of the block flips together.
+                    int blockFirst, blockLast;
+                    MathRange(first,line.FirstDocumentLine,out blockFirst,out blockLast);
+                    changed=BlockActive(blockFirst,blockLast,oldCaretLine,oldStart,oldEnd)!=BlockActive(blockFirst,blockLast,nextCaret,nextStart,nextEnd);
+                }
                 if(first.Header||first.Setext){
                     changed|=Active(number+1,oldCaretLine,oldStart,oldEnd)!=Active(number+1,nextCaret,nextStart,nextEnd);
                     if(changed)PrepareDelimiter(line.FirstDocumentLine,HideDelimiter(line.FirstDocumentLine));
                 }
+                if(changed && first.MathCount>0)PrepareMath(line.FirstDocumentLine,!Raw(line.FirstDocumentLine));
                 if(!changed)continue;
                 if (redraw == null) redraw = new List<VisualLine>();
                 redraw.Add(line);
@@ -3923,7 +4269,9 @@ internal static partial class MarkdownLivePreview {
             // blank band or an arrow key landing there names an offset inside the fence's own
             // source. Typing or Backspace at that offset rewrites the fence and can end the block
             // (a closing fence that stops closing turns the rest of the document into code), so
-            // the caret always moves to the neighbouring line on the side it came from.
+            // the caret always moves to the neighbouring line on the side it came from. An
+            // unclosed opening fence is the line being typed and keeps the caret (EditableFence).
+            if (info.FenceLine && EditableFence(line)) return;
             if (info.FenceLine && !Raw(line)) {
                 int target=FenceCaretTarget(line,lastActiveLine<=line.LineNumber);
                 if (target==caret.Offset) return;
@@ -3957,7 +4305,7 @@ internal static partial class MarkdownLivePreview {
             int number = position.Value.Line;
             if (number < 1 || number > Document.LineCount) return;
             DocumentLine line = Document.GetLineByNumber(number);
-            if (Raw(line) || !Info(line).FenceLine) return;
+            if (Raw(line) || !Info(line).FenceLine || EditableFence(line)) return;
             DocumentLine next = line.NextLine;
             bool opener = next != null && Info(next).Code && !Info(next).FenceLine;
             int target = FenceCaretTarget(line, opener);
@@ -4748,6 +5096,8 @@ internal static partial class MarkdownLivePreview {
             // fence of a block must not go (and a cut must not copy it): the partner would stay
             // behind and the block would no longer be a block. Both fences inside is ordinary text.
             if (!Editor.TextArea.Selection.IsEmpty && SelectionBreaksFence()) { e.Handled = true; return; }
+            // 11-04: Backspace on the only, empty line of a code block takes the block away.
+            if (back && Editor.TextArea.Selection.IsEmpty && EmptyFenceBlockBackspace()) { e.Handled = true; return; }
             // H3, both view modes: a text delete inside a table row never leaves the caret's own
             // cell. DeleteInCell/BackspaceInCell answer the cell ends, the separator pipe and the
             // padding run; this check covers every position they leave to the editor (a marker's
@@ -4857,6 +5207,28 @@ internal static partial class MarkdownLivePreview {
                 }
             }
             return false;
+        }
+        // 11-04: the empty block "```", "", "```" (what Enter after "```" or the code button writes) has
+        // its caret on the blank body line. Backspace there used to join that line into the hidden
+        // opening fence, which left two adjacent fences with no caret stop and swallowed the next
+        // typed text. 11-05 (the block is now written by Enter after "```python"): Backspace in the
+        // empty block takes back what that Enter wrote, the body line and the closing fence, in
+        // one undo step; the caret goes to the end of the opening line ("```python"), which is then
+        // an unclosed fence the basic view shows as source (EditableFence), so a further Backspace
+        // deletes its characters one by one.
+        bool EmptyFenceBlockBackspace() {
+            int offset=Math.Max(0,Math.Min(Editor.CaretOffset,Document.TextLength));
+            DocumentLine line=Document.GetLineByOffset(offset);
+            if (offset!=line.Offset || line.Length!=0) return false;
+            DocumentLine previous=line.PreviousLine, next=line.NextLine;
+            if (previous==null || next==null) return false;
+            LineInfo opener=Info(previous), closer=Info(next);
+            if (!opener.FenceLine || opener.Before.Fence!='\0') return false;
+            if (!closer.FenceLine || closer.Before.Fence=='\0') return false;
+            int start=previous.EndOffset;
+            Document.Remove(start,next.EndOffset-start);
+            Editor.Select(start,0);
+            return true;
         }
         static bool FenceOtherVisible(string text) {
             if (text==null) return false;
@@ -5343,14 +5715,13 @@ internal static partial class MarkdownLivePreview {
             WidenHiddenPairs();
         }
         // The one spot where "before the closing **" and "after it" draw the same: an empty
-        // selection on the edge of a hidden closing run. Input before a bold pair's own closer
-        // (the run's inner edge included) belongs to the pair and keeps its style, so a 20 px
-        // span keeps its size. Since the 11-01 user decision a character typed at or past that
-        // closer is plain: "**굵게**" then "x" writes "**굵게**x", not "**굵게x**". It leaves
-        // only the bold; a tag that encloses the bold still holds it, so its 20 px (and its
-        // colour) stay, exactly as before this rule. The revealed caret line already keeps
-        // every non-blank input in place (R7 below); with markers hidden the other closers
-        // (italic, strike, code, a tag) keep their inside answer.
+        // selection on the edge of a hidden closing run. A non-blank character typed there takes
+        // the style the toolbar shows at that spot (11-05 user decision, replacing the 11-01 rule
+        // that wrote it after a bold closer): "**굵게**" then "x" writes "**굵게x**", and a 20 px
+        // span or colour tag around the bold keeps its size and colour. A SPACE is different: a
+        // space typed at or past an already closed bold closer stays outside and plain
+        // ("**light**" + " and" is "**light** and", 11-01), while a space typed inside the pair
+        // (the run being typed) waits at the closing edge for the next character to take it back.
         void HiddenCloseTypingEntering(object sender, TextCompositionEventArgs e) {
             if (disposed || e.Handled || Options.Busy || !CloseSpaceAllowed()) return;
             if (e.Text == null || e.Text.Length == 0) return;
@@ -5381,34 +5752,38 @@ internal static partial class MarkdownLivePreview {
             if (info.Table && info.Cells != null && AtCellEnd(info, relative)) return;
             int start, end;
             if (HiddenCloseRun(info, relative, out start, out end)) {
-                // R7: on a revealed caret line the closer is real text. A non-blank character
-                // typed right after it stays after it (`**ab**x`); only a space still moves
-                // outside the pair, because a space inside a closer would make it literal.
-                if (!blank && !Options.HideMarkers) return;
-                // 11-01 user decision (option A): a character typed after a bold pair's own
-                // closer is plain. The spot is "at or past the bold closer" in source: the
-                // outer edge of the stacked run first steps in to just past that closer
-                // (`**굵게**x`, not `**굵게x**`), and a caret already there stays where it is,
-                // so the rest of the word follows it in order. In the no-reveal view both edges
-                // draw the same spot, so this is what makes typing after a bold word plain. A
-                // tag or italic that encloses the bold closes after that point and still holds
-                // the character; a caret before the bold closer is still between the text and
-                // its closers and keeps the style (`**a|b**`). Only a bold closer takes this
-                // rule: the other closers keep their inside answer until asked for.
-                int boldEnd = !blank && !continuingWord ? BoldCloserTypingEnd(info, start, end) : -1;
+                // 11-05 user decision: a non-blank character typed anywhere on a closing run's edges
+                // takes the style the toolbar shows there. FormatAt/LiveDrawnSize read the whole
+                // stacked run as the pair's inside (HiddenCloseInside), so typing goes to the same
+                // spot (TypingInsideTarget): `**굵게**|` + X writes `**굵게X**`, with the enclosing
+                // size/colour tag kept, in the no-reveal view and on the revealed caret line alike.
+                // Inline code is the one style the toolbar does not light at the outer edge
+                // (LiveInlineCodeAt): on a revealed line the character stays after its closer.
+                if (!blank) {
+                    // On a revealed line the inner edge is already the spot, and a caret strictly
+                    // inside a marker is the user editing the marker itself.
+                    if (!Options.HideMarkers && (relative <= start || InsideCloserMarker(info, relative))) return;
+                    Editor.TextArea.Caret.Offset = line.Offset + TypingInsideTarget(info, start, end, relative, !Options.HideMarkers);
+                    return;
+                }
                 // Whitespace on a closing edge stays outside the emphasis pair: a space just
                 // inside the closer ("**ab **") is not right-flanking, so the parser draws both
                 // markers as text. It may stay inside an enclosing tag, which takes it.
-                int target;
-                if (blank) target = ClosePairEnd(info, start, end);
-                else if (boldEnd >= 0 && relative >= boldEnd) target = relative == end ? boldEnd : relative;
-                else target = start;
-                // 11-01 option A also covers the space: with the caret at or past a bold closer,
-                // the space and the word after it are plain, so the word-by-word continuation
-                // (which would carry both back inside the closer) is not armed there. A caret
-                // before the bold closer (inside the pair) keeps the continuation.
-                bool plainAfterBold = blank && relative >= BoldCloserTypingEnd(info, start, end) && BoldCloserTypingEnd(info, start, end) >= 0;
-                if (blank && target > start && !plainAfterBold && !Options.ReadOnly && !Editor.IsReadOnly) {
+                int target = ClosePairEnd(info, start, end);
+                // 11-01 user decision (bold), 11-05 extended to italic, strike, bold+italic and the
+                // size/colour tags: a space typed right after a CLOSED run (the caret at or past the
+                // run's own closer) is plain, and so is the word after it, so the word-by-word
+                // continuation (which would carry both back inside the closer) is not armed there;
+                // the toolbar shows the style off after that space. The space stays where the caret
+                // is, so after a closed tag it is outside the tag too. A caret before the closer
+                // (inside the pair, the run being typed) keeps the continuation.
+                // A space typed right after a closing-edge merge (continuingWord: the caret sits on the
+                // merged run's outer edge, where the no-reveal view stops) is still part of the style
+                // being typed, exactly like the raw line where the caret stays inside the pair.
+                int closedAt = ClosedRunTypingEnd(info, start, end);
+                bool plainAfterClosed = !continuingWord && closedAt >= 0 && relative >= closedAt;
+                if (plainAfterClosed) target = relative;
+                if (blank && target > start && !plainAfterClosed && !Options.ReadOnly && !Editor.IsReadOnly) {
                     // The space will land after the emphasis closers; remember that run and the
                     // spot so the next non-space character can take both back inside (see
                     // HiddenCloseSpaceEntered/HiddenCloseSpaceEntering). The 11-01 rule above
@@ -5458,6 +5833,8 @@ internal static partial class MarkdownLivePreview {
             closeSpaceStart = start; closeSpaceEnd = end; closeSpaceCaret = caret;
             closeSpaceMarkers = closeSpaceArmMarkers; closeSpaceSpaces = e.Text;
             closeSpaceArmMarkers = null;
+            // The next character goes back inside the pair: the toolbar shows the style lit now.
+            Editor.NotifyToolsChanged();
         }
         // The next input after that space. More whitespace joins the run the move will take; the
         // first non-space character takes the whole run back inside the pair with itself after it,
@@ -5549,7 +5926,7 @@ internal static partial class MarkdownLivePreview {
         // Shared by normal TextEntering and SourceEditor's redirected/late commit insertion.
         // It reads just the pending marker run on the edited line and never moves another caret.
         bool InsertCloseSpaceCommit(int at, string text) {
-            if (!closeSpacePending) return false;
+            if (!closeSpacePending) return InsertCommitInsideRun(at, text);
             if (!CloseSpaceCommitReady(at, text)) {
                 closeSpacePending = false;
                 return false;
@@ -5568,6 +5945,26 @@ internal static partial class MarkdownLivePreview {
                 closeWordDocument = Document;
                 closeWordVersion = Document.Version;
             }
+            return true;
+        }
+        // 11-05: an IME result that bypasses TextEntering (a click/late commit written at the
+        // composition point) follows the same rule as a typed character: at a closing run's edge,
+        // where the toolbar shows the style lit, the text is written inside the pair. False leaves
+        // the plain insertion at `at` to the caller, which also shifts its caret past the text.
+        bool InsertCommitInsideRun(int at, string text) {
+            if (disposed || !CloseSpaceAllowed() || Options.Busy || Editor.IsReadOnly || Editor.Document != Document) return false;
+            if (String.IsNullOrEmpty(text) || BlankText(text) || text.IndexOf('\r') >= 0 || text.IndexOf('\n') >= 0) return false;
+            if (at < 0 || at > Document.TextLength) return false;
+            DocumentLine line = Document.GetLineByOffset(at);
+            LineInfo info = Info(line);
+            int relative = at - line.Offset;
+            if (info.Table && info.Cells != null && AtCellEnd(info, relative)) return false;
+            int start, end;
+            if (!HiddenCloseRun(info, relative, out start, out end)) return false;
+            if (!Options.HideMarkers && (relative <= start || InsideCloserMarker(info, relative))) return false;
+            int target = TypingInsideTarget(info, start, end, relative, !Options.HideMarkers);
+            if (target >= relative) return false;
+            Document.Insert(line.Offset + target, text);
             return true;
         }
         static bool BlankText(string text) {
@@ -5790,6 +6187,101 @@ internal static partial class MarkdownLivePreview {
             TextDocument document=setextGapDocument;setextGapDocument=null;
             if (document!=null) document.EndUpdate();
         }
+        // 11-04 user (video): "```" typed on an empty line turned the line into a code block, but
+        // the opening fence is a hidden line in the basic view, so the caret guard
+        // (FenceCaretTarget) moved the caret to the end of the line above and the next text or
+        // picture landed there. 11-05 user decision: typing the marker writes nothing extra (the
+        // info string "python" is typed on that line, which stays shown as source: EditableFence),
+        // and Enter at the end of an opening fence with no closing fence below writes the empty
+        // body line and the closing fence (same marker, run and indent) in one update, caret on
+        // the body line, in both views. One undo gives back the "```python" line with the caret at
+        // its end. The window's own Enter rules (lists, tables) run on the TextArea's
+        // PreviewKeyDown; this rule is on the editor itself, which the tunnelling key reaches first.
+        void FenceEnterKeyDown(object sender,KeyEventArgs e) {
+            if (disposed || e.Handled || e.Key!=Key.Enter || Keyboard.Modifiers!=ModifierKeys.None) return;
+            if (!Object.ReferenceEquals(e.OriginalSource,Editor.TextArea)) return;
+            if (FenceEnter()) e.Handled=true;
+        }
+        // The newline text path (an IME's Enter, a newline typed by a probe) takes the same rule;
+        // Shift+Enter stays the plain line break.
+        void FenceEnterEntering(object sender,TextCompositionEventArgs e) {
+            if (disposed || e.Handled) return;
+            if (e.Text!="\n" && e.Text!="\r" && e.Text!="\r\n") return;
+            if ((Keyboard.Modifiers & ModifierKeys.Shift)!=0) return;
+            if (FenceEnter()) e.Handled=true;
+        }
+        bool FenceEnter() {
+            if (Options.Busy || Options.ReadOnly || Editor.IsReadOnly || Editor.ImeBusy) return false;
+            if (Editor.Document!=Document || !Editor.TextArea.Selection.IsEmpty) return false;
+            int offset=Editor.TextArea.Caret.Offset;
+            if (offset<0 || offset>Document.TextLength) return false;
+            DocumentLine line=Document.GetLineByOffset(offset);
+            if (offset!=line.EndOffset || line.Length>ParseLimit) return false;
+            string text=Document.GetText(line.Offset,line.Length);
+            int lead=0;
+            while (lead<text.Length && lead<4 && text[lead]==' ') lead++;
+            if (lead>3 || lead>=text.Length) return false;
+            char marker=text[lead];
+            if (marker!='`' && marker!='~') return false;
+            int end=lead;
+            while (end<text.Length && text[end]==marker) end++;
+            int run=end-lead;
+            if (run<3) return false;
+            // A backtick fence's info string may not hold a backtick (CommonMark): "```a`b" is text.
+            if (marker=='`' && text.IndexOf('`',end)>=0) return false;
+            // Inside a fenced block the line is code or that block's closing fence.
+            LineInfo info=Info(line);
+            if (!info.FenceLine || info.Before.Fence!='\0') return false;
+            if (FenceCloserBelow(line,marker,run)!=0) return false;
+            string newline=LineNewline(line);
+            Editor.EndTypingRun();
+            Document.BeginUpdate();
+            try {
+                Document.Insert(line.EndOffset,newline+newline+text.Substring(0,lead)+new string(marker,run));
+                Editor.Select(offset+newline.Length,0);
+            } finally { Document.EndUpdate(); }
+            Editor.TextArea.Caret.BringCaretToView();
+            return true;
+        }
+        // 1 when a closing fence for this run follows within the bounded scan, 0 when the block
+        // runs open to the document's end, -1 when the scan stopped before the end. Read only on
+        // Enter at an opening fence and for the caret's own fence line (EditableFence, cached per
+        // document version), reading the first characters of each following line.
+        int FenceCloserBelow(DocumentLine line,char marker,int run) {
+            DocumentLine next=line.NextLine;
+            int scanned=0;
+            while (next!=null) {
+                if (++scanned>400) return -1;
+                char fence;int length;bool tailBlank;
+                ReadFence(Document,next,out fence,out length,out tailBlank);
+                if (fence==marker && length>=run && tailBlank) return 1;
+                next=next.NextLine;
+            }
+            return 0;
+        }
+        // An opening fence that no line below closes is the line being typed ("```" and then its
+        // info string, before Enter writes the block). It is not structure yet: the basic view
+        // shows it as source while the caret is on it (Raw) and every hidden-fence caret rule
+        // leaves the caret on it, so typed or pasted text goes on that line, never on the line
+        // above. A scan that stops before the document's end counts as open here (showing one
+        // fence line as source is harmless; hiding the line being typed is the bug).
+        DocumentLine editableFenceLine;
+        object editableFenceVersion;
+        bool editableFenceAnswer;
+        internal bool EditableFence(DocumentLine line) {
+            if (line==null || line.IsDeleted || Options.ReadOnly || Editor.IsReadOnly) return false;
+            object version=Document.Version;
+            if (Object.ReferenceEquals(line,editableFenceLine) && version!=null && Object.ReferenceEquals(version,editableFenceVersion)) return editableFenceAnswer;
+            bool answer=false;
+            LineInfo info=Info(line);
+            if (info.FenceLine && info.Before.Fence=='\0') {
+                char fence;int length;bool tailBlank;
+                ReadFence(Document,line,out fence,out length,out tailBlank);
+                answer=fence!='\0' && FenceCloserBelow(line,fence,length)!=1;
+            }
+            editableFenceLine=line;editableFenceVersion=version;editableFenceAnswer=answer;
+            return answer;
+        }
         // The no-reveal mode draws a fence line as nothing but keeps the height of a text line,
         // so a click in that blank band can name an offset inside the fence's own source.
         // SnapHiddenCaret normally moves the caret out first; this is the last guard for an
@@ -5803,7 +6295,7 @@ internal static partial class MarkdownLivePreview {
             int offset=Math.Max(0,Math.Min(Editor.CaretOffset,Document.TextLength));
             DocumentLine line=Document.GetLineByOffset(offset);
             LineInfo info=Info(line);
-            if (!info.FenceLine || Raw(line)) return;
+            if (!info.FenceLine || Raw(line) || EditableFence(line)) return;
             int target=FenceCaretTarget(line,lastActiveLine<=line.LineNumber);
             if (target==Editor.CaretOffset) { e.Handled=true; return; }
             Editor.TextArea.Caret.Offset=target;
@@ -5853,6 +6345,7 @@ internal static partial class MarkdownLivePreview {
             // A hidden fence line draws as one invisible run, so the marker snap below would
             // leave the caret at its start or end - still on the fence. A paste there rewrites
             // the fence line, so it goes to the neighbouring line instead (task F2).
+            if (info.FenceLine && EditableFence(line)) return offset;
             if (info.FenceLine && !Raw(line)) return FenceCaretTarget(line, lastActiveLine <= line.LineNumber);
             // A paste on the outer edge of a closing run lands inside the pair, so the pasted
             // run keeps the bold or the span size. Typed text is different on a bold pair's own
@@ -6277,10 +6770,8 @@ internal static partial class MarkdownLivePreview {
         // pair's closing markers draw zero width, so every edge of the stacked run names one
         // visual position. Paste (SnapInsertOffset) and the toolbar/size reads (FormatAt,
         // LiveDrawnSize) take the whole spot as the pair's inside, so a paste there keeps the
-        // bold and the size. Typed text is different at or past a bold run's closer since 11-01
-        // (HiddenCloseTypingEntering): it stays there, and the run's outer edge first steps in
-        // to BoldCloserTypingEnd, so it leaves the bold but keeps an enclosing tag
-        // ("<span>**abc**</span>" keeps its size, not its bold).
+        // bold and the size, and a non-blank typed character goes to the same spot
+        // (HiddenCloseTypingEntering/TypingInsideTarget), so the toolbar and typing agree.
         internal static int HiddenCloseInside(LineInfo info, int relative) {
             int start, end;
             return HiddenCloseRun(info, relative, out start, out end) ? start : -1;
@@ -6321,26 +6812,53 @@ internal static partial class MarkdownLivePreview {
             }
             return true;
         }
-        // The offset just past the bold pair's own closer inside the caret's closing run ("**",
-        // or "__", which the parser reads as the same style), or -1 when the run holds none.
-        // A caret at or past that offset types outside the bold (11-01 user decision): on the
-        // run's outer edge the input first steps in to it, so the character leaves the bold but
-        // stays inside every closer that comes after it (a tag, italic or strike that encloses
-        // the bold); a caret already there stays put. A caret before it is inside the pair. A
-        // run with no bold closer keeps the inside-the-pair answer, so italic, strike, code and
-        // tag runs (without a bold pair) are untouched.
-        static int BoldCloserTypingEnd(LineInfo info, int start, int end) {
+        // The offset just past the last style closer of the caret's closing run: the emphasis
+        // closers ("*", "**", "***", "_", "__", "~~") when the run holds any, else the end of its
+        // tag closers (size span, colour font), or -1 when it holds neither (inline code alone
+        // keeps its older answer). A caret at or past that offset has left the styled run: a
+        // SPACE typed there is plain (11-01 bold, 11-05 every inline style, plainAfterClosed in
+        // HiddenCloseTypingEntering); a caret before it is inside the pair, the run being typed.
+        static int ClosedRunTypingEnd(LineInfo info, int start, int end) {
             if (info == null || start < 0 || end <= start || end > info.Text.Length) return -1;
-            int at = -1;
+            int emphasis = -1, tag = -1;
             foreach (Replacement marker in info.Replacements) {
-                if (marker.Kind != ReplacementKind.Hidden || marker.Length != 2 || marker.Prefix) continue;
-                if (marker.Start < start || marker.Start + marker.Length > end) continue;
+                if (marker.Kind != ReplacementKind.Hidden || marker.Length <= 0 || marker.Prefix) continue;
+                int markerEnd = marker.Start + marker.Length;
+                if (marker.Start < start || markerEnd > end) continue;
                 if (!HiddenCloser(info, marker)) continue;
                 char first = info.Text[marker.Start];
-                if ((first != '*' && first != '_') || info.Text[marker.Start + 1] != first) continue;
-                if (marker.Start + marker.Length > at) at = marker.Start + marker.Length;
+                if (first == '`') continue;
+                if (first == '<') { if (markerEnd > tag) tag = markerEnd; }
+                else if (markerEnd > emphasis) emphasis = markerEnd;
+            }
+            return emphasis >= 0 ? emphasis : tag;
+        }
+        // Where a non-blank character typed on the closing run [start, end] goes: the pair's
+        // inside, the same spot FormatAt reads for the toolbar, so the lit buttons and the typed
+        // text can never disagree. Inline code is the exception the toolbar already makes (it is
+        // not lit on the outer edge, LiveInlineCodeAt): on a revealed line (`stepOverCode`) its
+        // closers at the run's inner end are stepped over, so the character stays after the code
+        // as before (R7). With markers hidden it keeps its older inside answer (probes
+        // "basic overlap typing at the drawn end code"); that code mismatch is reported, not changed.
+        static int TypingInsideTarget(LineInfo info, int start, int end, int relative, bool stepOverCode) {
+            int at = start;
+            if (!stepOverCode || relative != end) return at;
+            while (at < end) {
+                Replacement marker = MarkerStarting(info, at);
+                if (marker.Length <= 0 || info.Text[marker.Start] != '`') break;
+                at = marker.Start + marker.Length;
             }
             return at;
+        }
+        // True when `relative` lies strictly inside one closing marker's characters (between the two
+        // stars of "**"): a revealed line's caret there is editing the marker itself.
+        static bool InsideCloserMarker(LineInfo info, int relative) {
+            foreach (Replacement marker in info.Replacements) {
+                if (marker.Kind != ReplacementKind.Hidden || marker.Length <= 1 || marker.Prefix) continue;
+                if (relative <= marker.Start || relative >= marker.Start + marker.Length) continue;
+                if (HiddenCloser(info, marker)) return true;
+            }
+            return false;
         }
         // The contiguous run of stacked hidden openers around `relative`. Typing a space on any
         // edge of it would put the whitespace just inside an opening marker, where the parser
@@ -6602,6 +7120,7 @@ internal static partial class MarkdownLivePreview {
             DocumentLine first = Document.GetLineByOffset(e.Offset);
             DocumentLine last = Document.GetLineByOffset(e.Offset + e.RemovalLength);
             PrepareReferences(first, last);
+            PrepareMathSections(first, last);
             // Only sections touching this edit need release. A newline elsewhere must not
             // walk every table the reader has visited; the height tree tracks shifted lines.
             if(first.PreviousLine!=null)PrepareDelimiter(first.PreviousLine,false);
@@ -6703,6 +7222,7 @@ internal static partial class MarkdownLivePreview {
             blocks.Invalidate(number - 1);
             blocks.Invalidate(number);
             DocumentLine edited=Document.GetLineByNumber(number),previous=edited.PreviousLine;LineInfo preceding;
+            HashSet<DocumentLine> mathDirty=MathInvalidate(edited);
             // Only the two next-line lookaheads (a table header's delimiter row and a setext
             // underline) can change on the preceding line. Without its own pipe or heading the
             // header flag is false either way, and an underline needs "=" / "-" first, so
@@ -6731,6 +7251,7 @@ internal static partial class MarkdownLivePreview {
                     if (line.IsDisposed || line.FirstDocumentLine.IsDeleted) continue;
                     DocumentLine first=line.FirstDocumentLine;
                     bool changed=line.LastDocumentLine.LineNumber>=number && first.LineNumber<=lastNumber;
+                    if (!changed && mathDirty!=null && mathDirty.Contains(first)) changed=true;
                     LineInfo cached;
                     if (!changed && line.LastDocumentLine.LineNumber>=number-1) {
                         if (!lines.TryGetValue(first,out cached)) changed=true;
@@ -6749,6 +7270,7 @@ internal static partial class MarkdownLivePreview {
                             // structural edit above does not redraw the whole viewport.
                             bool underline=SetextUnderlineLevel(cached.Text)>0;
                             changed=before.Fence!=old.Fence || before.FenceLength!=old.FenceLength ||
+                                before.Math!=old.Math || before.MathStart!=old.MathStart ||
                                 before.Table!=old.Table || before.TableStart!=old.TableStart ||
                                 cached.Table && (before.TableColumns!=old.TableColumns || !before.Equals(old)) ||
                                 underline && before.Setext!=old.Setext;
@@ -6780,6 +7302,10 @@ internal static partial class MarkdownLivePreview {
                 // Removing the preceding row unconditionally orphaned its live projection
                 // whenever text was entered on the line immediately after a table.
                 MeasureChangedLines(number, lastNumber);
+                if (mathDirty != null) {
+                    foreach (VisualLine line in visible)
+                        if (!line.IsDisposed && !line.FirstDocumentLine.IsDeleted && mathDirty.Contains(line.FirstDocumentLine)) View.Redraw(line);
+                }
                 // An undo applies a column command's parts top-down, so the last edit can land
                 // on a body row: no header/delimiter measurement republishes the grid there.
                 RepublishEditedTableGrid(number);
@@ -6881,7 +7407,7 @@ internal static partial class MarkdownLivePreview {
             RowLayout cached=info.Row;
             double indent=Math.Max(0,info.TableIndent);
             if (cached!=null && Object.ReferenceEquals(cached.Source,info.Text) && cached.Table==table && cached.Version==table.Version && cached.Raw==raw &&
-                cached.ViewWidth==View.ActualWidth && cached.Indent==indent &&
+                cached.ViewWidth==View.ActualWidth && cached.Indent==indent && String.Equals(cached.MathKey,info.MathTouchKey,StringComparison.Ordinal) &&
                 cached.BaseWidth==Math.Max(1,RowWidth()-indent) && cached.Widths.Length==columns) {
                 if (Object.ReferenceEquals(cached,previousRow)) { previousRow=null;previousRowLine=null; }
                 return cached;
@@ -7382,11 +7908,30 @@ internal static partial class MarkdownLivePreview {
                     text.FormatEnd=breakAt<0 ? text.Text.Length : breakAt;
                 }
             } finally { text.FormatEnd=text.Text.Length; }
+            if (text.HasMath) FitFormulas(text,slices);
             if (key!=null && table.Shapes.Count<512 && table.ShapeCharacters+key.Length<=32768) {
                 if (!table.Shapes.ContainsKey(key)) table.ShapeCharacters+=key.Length;
                 table.Shapes[key]=new CellShape {Width=width,Slices=slices};
             }
             return slices;
+        }
+        // The cell lines are formatted with the paragraph's fixed line height, which does not grow for an
+        // object taller than it. A line that holds a formula takes the formula's ascent and descent, so the
+        // row (its fillers carry these metrics) keeps the cell's vertical padding around a tall formula.
+        static void FitFormulas(CellText text, List<CellSlice> slices) {
+            for (int s=0;s<slices.Count;s++) {
+                CellSlice slice=slices[s];
+                double ascent=slice.Baseline, descent=Math.Max(0,slice.Height-slice.Baseline);
+                for (int p=slice.Start;p<slice.Start+slice.Length && p<text.Text.Length;p++) {
+                    if (!text.IsMath(p)) continue;
+                    MathVisual visual=text.MathVisuals[text.MathSlots[p]];
+                    if (visual.Ascent>ascent) ascent=visual.Ascent;
+                    if (visual.Descent>descent) descent=visual.Descent;
+                }
+                if (ascent+descent<=slice.Height+.01 && ascent<=slice.Baseline+.01) continue;
+                slice.Baseline=ascent; slice.Height=ascent+descent;
+                slices[s]=slice;
+            }
         }
         // Characters of an over-wide formatted line that still end inside the cell width. The
         // text line's character indices are paragraph-absolute (the same space as `start`).
@@ -7419,7 +7964,7 @@ internal static partial class MarkdownLivePreview {
                 } else {
                     string key=plain ? (info.Header ? "H" : "B")+info.Text.Substring(cell.Start,cell.End-cell.Start) : null;
                     if (key==null || !table.Metrics.TryGetValue(key,out metric)) {
-                        var text=new CellText(info,cell,this,false,0);
+                        var text=new CellText(info,cell,this,false,0,null);
                         MinMaxParagraphWidth measured=Formatter.FormatMinMaxParagraphWidth(text,0,new CellParagraph(text.Default,0));
                         metric=new CellMetric { Preferred=Math.Ceiling(measured.MaxWidth+1), Minimum=Math.Ceiling(measured.MinWidth+1) };
                         if (key!=null && table.Metrics.Count<512 && table.MetricCharacters+key.Length<=32768) {
@@ -7440,6 +7985,13 @@ internal static partial class MarkdownLivePreview {
         // instead of a UIElement; the same cache, loader and path resolution do the work.
         internal BitmapSource CellBitmap(string source,out double width,out double height) {
             return images.CellBitmap(source,out width,out height);
+        }
+        // The drawn formula for a table cell's text run (its size and colour), or null when the formula
+        // does not parse: the cell then keeps the source. WpfMath is only touched through MathRender.
+        internal MathVisual CellMath(string latex, TextRunProperties properties) {
+            if (properties==null || !MathRender.Check(latex)) return null;
+            MathVisual visual=MathRender.Get(latex,false,properties.FontRenderingEmSize,properties.ForegroundBrush,Options.Family);
+            return visual.Error || visual.Drawing==null || visual.Width<=0 || visual.Height<=0 ? null : visual;
         }
         internal bool UsesImage(Uri uri) {
             foreach (VisualLine line in visible) {
@@ -7737,6 +8289,10 @@ internal static partial class MarkdownLivePreview {
             // the toolbar reports the format the next character would take.
             int inside = HiddenCloseInside(info, relative);
             if (inside >= 0) relative = inside;
+            // The closing-edge space is pending (rule C): the next character goes back inside the
+            // pair, so the toolbar shows the run's style lit after the space (O(markers)).
+            else if (closeSpacePending && offset == closeSpaceCaret && closeSpaceStart >= line.Offset && closeSpaceStart <= line.Offset + info.Text.Length && PendingCloseSpaceIntact())
+                relative = closeSpaceStart - line.Offset;
             foreach (StyledPart part in info.Styles) {
                 if (relative < part.Start || relative > part.Start + part.Length) continue;
                 bold |= (part.Style & Style.Bold) != 0;
@@ -7801,10 +8357,13 @@ internal static partial class MarkdownLivePreview {
             Editor.TextArea.TextEntering -= HiddenFenceEntering;
             Editor.TextArea.PreviewMouseLeftButtonDown -= FenceRowMouseDown;
             Editor.TextArea.TextEntering -= SetextRuleEntering;
+            Editor.TextArea.TextEntering -= FenceEnterEntering;
+            Editor.PreviewKeyDown -= FenceEnterKeyDown;
             Editor.TextArea.TextEntered -= TableGapEntered;
             Editor.TextArea.TextEntered -= HiddenCloseSpaceEntered;
             Editor.TextArea.TextEntered -= SetextRuleEntered;
             CloseSetextRule();
+            editableFenceLine = null; editableFenceVersion = null;
             closeSpaceArm = closeSpacePending = false;
             closeWordCaret = -1;closeWordDocument = null;closeWordVersion = null;
             CloseTableGap();
@@ -7836,6 +8395,7 @@ internal static partial class MarkdownLivePreview {
             blocks.Rebuilt -= DocumentRebuilt;
             blocks.Dispose();
             View.ElementGenerators.Remove(markers);
+            View.ElementGenerators.Remove(lazyQuotes);
             View.ElementGenerators.Remove(struts);
             View.ElementGenerators.Remove(fill);
             View.LineTransformers.Remove(transformer);
@@ -7853,6 +8413,30 @@ internal static partial class MarkdownLivePreview {
 
     static LineInfo ParseLine(TextDocument document, DocumentLine line, BlockState before, double numberWidth, Session session) {
         var info = new LineInfo { Text=ShortText(document, line), Before=before };
+        // Display math. A line inside a block is formula source: folded to nothing while the
+        // block is rendered, plain source text while the caret or a selection is in it.
+        if (before.Math > 0) {
+            info.MathRemaining = before.Math;
+            info.MathOpener = before.MathStart;
+            info.Hide(0, line.Length);
+            return info;
+        }
+        int mathCount = MathOpen(document, line, before);
+        if (mathCount > 0) {
+            info.MathCount = mathCount;
+            info.MathOpener = line;
+            info.MathLatex = MathBlockSource(document, line, mathCount);
+            info.Replacements.Add(new Replacement { Start=0, Length=line.Length, Kind=ReplacementKind.Math, Level=1, Source=info.MathLatex });
+            return info;
+        }
+        string mathOne;
+        if (before.Fence == '\0' && before.Quote == 0 && line.Length > 4 && line.Length <= ParseLimit && MathRender.OneLineDisplay(info.Text, out mathOne)) {
+            info.MathOne = true;
+            MathRender.Seen = true;
+            info.MathLatex = mathOne;
+            info.Replacements.Add(new Replacement { Start=0, Length=line.Length, Kind=ReplacementKind.Math, Level=1, Source=mathOne });
+            return info;
+        }
         char fence;
         int fenceLength;
         bool tailBlank;
@@ -7882,6 +8466,7 @@ internal static partial class MarkdownLivePreview {
         // nothing to hide; only the muted text and the bar follow the quote state.
         if (!info.Quote && LazyQuoteLine(text, before, document, line)) {
             info.Quote = true; info.LazyQuote = true;
+            info.LazyLevels = Math.Max(1, Math.Min(6, before.Quote));
         }
         int indentStart = content;
         // A rule's own indentation starts at the container's content: the line's leading spaces,
@@ -8354,6 +8939,26 @@ internal static partial class MarkdownLivePreview {
                 i += run;
                 continue;
             }
+            if (c == '$') {
+                // Inline math "$x$" (MathRender.InlineEnd holds the rules). The span is skipped whole, so
+                // emphasis markers inside a formula ("x_i * y_j") never pair with the text around it.
+                // "$$" is never inline. A table row draws it in the cell (CellText / CellMathRun), but a span that
+                // holds a column pipe belongs to no cell, so it stays source; "\|" is the cell's escape for a pipe.
+                if (i + 1 < text.Length && text[i + 1] == '$') { i += 2; continue; }
+                int mathClose = MathRender.InlineEnd(text, i, ref budget);
+                if (mathClose > i + 1 && info.Table && HasCellPipe(text, i + 1, mathClose)) mathClose = -1;
+                if (mathClose > i + 1 && !(linkResume >= 0 && mathClose >= linkResume)) {
+                    string mathSource = text.Substring(i + 1, mathClose - i - 1);
+                    if (info.Table && mathSource.IndexOf("\\|", StringComparison.Ordinal) >= 0) mathSource = mathSource.Replace("\\|", "|");
+                    info.Replacements.Add(new Replacement { Start=i, Length=mathClose + 1 - i, Kind=ReplacementKind.Math, Source=mathSource });
+                    info.MathInline = true;
+                    MathRender.Seen = true;
+                    i = mathClose + 1;
+                    continue;
+                }
+                i++;
+                continue;
+            }
             if (c == '!' && Matches(text, i, "![")) {
                 // The image's "](" must follow its own label: a later "](" (the next link on
                 // the line) is not this picture's target.
@@ -8750,16 +9355,46 @@ internal static partial class MarkdownLivePreview {
             // Raw table rows keep their source pipes; the same layout still supplies the
             // column stops that keep the caret row aligned with formatted neighbours.
             bool raw = session.Raw(line);
+            if (info.Table) info.MathTouchKey = session.MathTouchKeyOf(line, info);
             info.Row = info.Table && !info.Delimiter && info.Cells != null && info.Cells.Count > 0 ? session.LayoutRow(info, raw) : null;
+            // A display formula folds the lines under its opener while it is drawn, and unfolds them when it is source.
+            if (info.MathCount > 0) session.PrepareMath(line, !raw);
             // A line drawn as nothing at all: a table delimiter row, a setext underline, or a
             // reference definition line while the caret is elsewhere (no-reveal mode).
             bool hiddenLine = (info.Delimiter || info.SetextUnderline>0) && !raw;
             if (!hiddenLine && info.RefDefinition) hiddenLine = session.HideReference(info, line);
+            // The lines under a rendered display formula carry no height of their own.
+            if (!hiddenLine && info.MathRemaining > 0 && !raw) hiddenLine = true;
             if (info.Row!=null || hiddenLine) height=0;
             // A list row keeps its fixed 4 px: scaling it with the font let small fonts at tight
             // line spacing pack rows below the gutter label height (settings probe, 8 px / 50%).
             else if (info.List!=null) height+=4;
-            return new StrutElement(height, info.Row, line.Length == 0, session);
+            return new StrutElement(height, info.Row, line.Length == 0, session, LazyQuoteGenerator.Applies(session, line, info));
+        }
+    }
+
+    // A lazily continued quote line has no ">" of its own, so no marker spacer pushes its text
+    // right of the quote bar ("게" sat under the bar). This zero-text element is the indent the
+    // quote's own lines get from their markers: one 0.9 em spacer per quote level. It sits right
+    // after the strut, and the strut names the column after it as the line's start stop, so a
+    // caret at offset 0 draws where the first glyph is. A revealed (raw) line shows its source
+    // as it is and gets nothing.
+    internal sealed class LazyQuoteGenerator : VisualLineElementGenerator {
+        readonly Session session;
+        internal LazyQuoteGenerator(Session session) { this.session = session; }
+        internal static bool Applies(Session session, DocumentLine line, LineInfo info) {
+            return info.LazyQuote && info.LazyLevels > 0 && !info.Code && !info.Table && !info.Delimiter &&
+                info.SetextUnderline == 0 && !info.RefDefinition && info.MathCount == 0 && info.MathRemaining == 0 &&
+                line.Length > 0 && !session.Raw(line);
+        }
+        public override int GetFirstInterestedOffset(int startOffset) {
+            DocumentLine line = CurrentContext.VisualLine.FirstDocumentLine;
+            if (startOffset > line.Offset) return -1;
+            return Applies(session, line, session.Info(line)) ? line.Offset : -1;
+        }
+        public override VisualLineElement ConstructElement(int offset) {
+            LineInfo info = session.Info(CurrentContext.VisualLine.FirstDocumentLine);
+            return new MarkerElement(0, session.Options.FontSize * 0.9 * info.LazyLevels, null, false, false, true);
         }
     }
 
@@ -8823,7 +9458,7 @@ internal static partial class MarkdownLivePreview {
         // " |") is drawn as plain text, and this stop is the only thing that keeps its folded
         // delimiter row inside the visual line instead of letting the walk start a build on it.
         bool FoldedBelow() {
-            return (info.Header && session.HideDelimiter(line)) || FoldedSetext() || session.ReferenceBelow(line) != null;
+            return (info.Header && session.HideDelimiter(line)) || FoldedSetext() || session.ReferenceBelow(line) != null || session.MathBelow(line) != null;
         }
         public override int GetFirstInterestedOffset(int startOffset) {
             if (info.Table && !info.Delimiter && info.Cells!=null && info.Cells.Count>0) {
@@ -8868,6 +9503,9 @@ internal static partial class MarkdownLivePreview {
             if(offset==line.EndOffset) {
                 CollapsedLineSection reference=session.ReferenceBelow(line);
                 if(reference!=null)return new InvisibleElement(reference.End.EndOffset-line.EndOffset,0);
+                // The folded lines under a rendered display formula join its opener line the same way.
+                CollapsedLineSection math=session.MathBelow(line);
+                if(math!=null)return new InvisibleElement(math.End.EndOffset-line.EndOffset,0);
             }
             // A reference definition line with the caret elsewhere: nothing is drawn and the
             // line keeps the zero height its strut reported. The caret line is never here.
@@ -8907,6 +9545,12 @@ internal static partial class MarkdownLivePreview {
                 // a larger one keeps the stock inline object (its top at the row's top).
                 return image==null ? (VisualLineElement)new InlineObjectElement(replacement.Length,picture)
                     : new InlineImageElement(replacement.Length,new ImageHost(image));
+            }
+            if (replacement.Kind == ReplacementKind.Math) {
+                // The source stays text while the caret touches an inline formula (no-reveal mode)
+                // and when it does not parse; otherwise the formula is one object with one caret stop.
+                if (session.MathTouched(line, replacement) || !MathRender.Check(replacement.Source)) return null;
+                return new MathElement(replacement.Length, replacement.Source, replacement.Level == 1, session.Options.Family, session.MathAvailable);
             }
             if (replacement.Kind == ReplacementKind.Glyph) return new FormattedTextElement(replacement.Label, replacement.Length);
             DocumentLine taskLine = line;
@@ -9027,13 +9671,17 @@ internal static partial class MarkdownLivePreview {
         readonly RowLayout row;
         readonly bool empty;
         readonly Session session;
-        internal StrutElement(double height, RowLayout row, bool empty, Session session) : base(1, 0) { this.height = height; this.row = row; this.empty = empty; this.session = session; }
+        readonly bool lazyLead;
+        internal StrutElement(double height, RowLayout row, bool empty, Session session) : this(height, row, empty, session, false) { }
+        internal StrutElement(double height, RowLayout row, bool empty, Session session, bool lazyLead) : base(1, 0) { this.height = height; this.row = row; this.empty = empty; this.session = session; this.lazyLead = lazyLead; }
         internal RowLayout Layout { get { return row; } }
         public override bool IsWhitespace(int visualColumn) { return true; }
         public override bool HandlesLineBorders { get { return row == null; } }
         // Non-empty lines keep only the text's own start stop (column 1); a second stop at
         // column 0 for the same offset made Right/Backspace at the line start a no-op.
+        // A lazy quote line's indent element (LazyQuoteGenerator) sits in column 1, so its text starts one column later.
         public override int GetVisualColumn(int relativeTextOffset) {
+            if (lazyLead && row==null && relativeTextOffset<=RelativeTextOffset) return VisualColumn+VisualLength+1;
             if (row!=null && relativeTextOffset<=RelativeTextOffset) return VisualColumn+row.FirstColumn;
             return row == null && empty && relativeTextOffset <= RelativeTextOffset ? VisualColumn : base.GetVisualColumn(relativeTextOffset);
         }
@@ -9458,11 +10106,15 @@ internal static partial class MarkdownLivePreview {
                         if (++levels >= info.QuoteLevels) break;
                     }
                     // A lazily continued quote line has no ">" of its own, so the marker walk
-                    // above finds nothing. Its bar comes from the quote state, at the first
-                    // level's inset (nested levels would need indentation the line does not have).
+                    // above finds nothing. Its bars come from the quote state, one per level at the
+                    // inset the quote's own lines use; the line's text is indented by the same
+                    // spacers (LazyQuoteGenerator), so it starts right of the last bar.
                     if (levels == 0 && info.LazyQuote) {
-                        double x = session.Options.FontSize * 0.23 - textView.HorizontalOffset;
-                        drawingContext.DrawLine(quote, new Point(x, y), new Point(x, y + line.Height));
+                        int bars = LazyQuoteGenerator.Applies(session, line.FirstDocumentLine, info) ? info.LazyLevels : 1;
+                        for (int bar = 0; bar < bars; bar++) {
+                            double x = session.Options.FontSize * (0.9 * bar + 0.23) - textView.HorizontalOffset;
+                            drawingContext.DrawLine(quote, new Point(x, y), new Point(x, y + line.Height));
+                        }
                     }
                 }
                 StrutElement strut = line.Elements.Count == 0 ? null : line.Elements[0] as StrutElement;

@@ -188,6 +188,8 @@ public partial class MainWindow {
         if(editor==null||editor.Document==null)return;
         offset=Math.Max(0,Math.Min(offset,editor.Document.TextLength));
         editor.Select(offset,0);MarkdownLivePreview.Session.SafeBringCaretToView(editor.TextArea);editor.Focus();
+        // Typewriter mode: the jumped-to heading goes to the middle, not the bottom edge (FocusMode.cs).
+        var surface=FocusSurfaceOf(editor);if(surface!=null)surface.CentreAfterJump();
     }
     // The line's readable heading text, or null when the live view does not draw it as one. The
     // text is the ATX title without its outer markers (a list or quote prefix included) or the

@@ -376,6 +376,8 @@ internal static class Ui {
         if(key=="strike")return GridGlyph("S","Segoe UI",FontStyles.Normal,FontWeights.Normal,19,10,true);
         string[] pair=GridTableData(key);if(pair!=null)return GridCanvas(GridStroke(pair[0],IconLine,null),GridStroke(pair[1],1.75,pair[2]));
         if(key=="listBullet")return GridCanvas(GridStroke("@24:M9.5 6 H20.5 M9.5 12 H20.5 M9.5 18 H20.5",IconLine,null),GridStroke("@24:M4.5 6 H4.51 M4.5 12 H4.51 M4.5 18 H4.51",2.6,null));/* round-capped zero-length strokes = dots */
+        /* 2.2.0: the find bar's regex toggle drew ".*" as type and the user could not read it (a hairline dot, a small high star), so it is the same ".*" drawn big: a heavy dot on the baseline and a six-spoke star at cap height */
+        if(key=="regex")return GridCanvas(GridStroke("@24:M7 19.8 H7.01",3.8,null),GridStroke("@24:M15.99 5.43 V16.18 M11.34 8.11 L20.64 13.49 M11.34 13.49 L20.64 8.11",IconLine,null));
         string data=GridData(key);if(data==null){key="chevron";data=GridData("chevron");}
         var line=GridStroke(data,IconLine,null);if(key=="open")line.SetResourceReference(Shape.FillProperty,"OpenIconFill");if(key=="dark")line.SetResourceReference(Shape.FillProperty,"MoonIconFill");return GridCanvas(line);
     }

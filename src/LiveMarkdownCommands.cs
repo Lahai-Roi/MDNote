@@ -219,7 +219,7 @@ public partial class MainWindow {
                     var imported=new System.Windows.Documents.FlowDocument {FontSize=fontSize,FontFamily=new FontFamily(family)};
                     using(var stream=new MemoryStream(System.Text.Encoding.ASCII.GetBytes(NormalizeRtfUnicode(rtf))))new System.Windows.Documents.TextRange(imported.ContentStart,imported.ContentEnd).Load(stream,System.Windows.DataFormats.Rtf);
                     NormalizePasteDocument(imported);markdown=MarkdownClipboard.NormalizeExternal(MarkdownWriter.Write(imported));
-                }catch(ArgumentException){}catch(System.Windows.Markup.XamlParseException){}catch(IOException){}
+                }catch(ArgumentException){}catch(System.Windows.Markup.XamlParseException){}catch(IOException){}catch(FormatException){/* malformed RTF from another program (FileFormatException) */}
             }
         }
         if(markdown==null&&!plain&&!code)markdown=MarkdownClipboard.NormalizeExternal(value);
@@ -890,7 +890,12 @@ public partial class MainWindow {
     // another window is inserted by AvalonEdit itself, which would split a table row, so a drop on
     // a table row takes the cell paste path instead. Internal drags never carry HTML/RTF here
     // (HTML is cancelled in SettingData, RTF is not added for drags).
+    // The dragged data lives in the source program: a source that hangs or closes mid-drop fails the
+    // OLE read with a COMException, which drops nothing instead of closing MDNote.
     void SourcePreviewDrop(object sender,System.Windows.DragEventArgs e){
+        if(source!=null)source.NoteInactiveImeFocus();/* a drop from Explorer leaves this window in the background (SourceEditor) */try{SourcePreviewDropCore(sender,e);}catch(System.Runtime.InteropServices.ExternalException){e.Effects=System.Windows.DragDropEffects.None;e.Handled=true;}catch(System.Runtime.InteropServices.InvalidComObjectException){e.Effects=System.Windows.DragDropEffects.None;e.Handled=true;}
+    }
+    void SourcePreviewDropCore(object sender,System.Windows.DragEventArgs e){
         if(e.Handled||source==null||!Object.ReferenceEquals(sender,source.TextArea))return;
         // Files from Explorer: an all-image drop is the document's own insert and stops here, so the
         // vendor Drop never sees it; anything else continues to the window's open-as-document path.

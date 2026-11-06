@@ -42,6 +42,7 @@ internal static class TableCaretProbe {
             RunCellPasteSuite(900);
             RunSpaceAtCellEndSuite(900);
             RunDrawnCaretSuite(900);
+            RunCellBreakClickSuite(900);
             RunCaretFrameSuite(900);
             RunTableBoundarySuite(900);
             RunUnicodeCaretSuite(900);
@@ -1591,6 +1592,88 @@ internal static class TableCaretProbe {
                 finally{CloseWindow(window);window=null;}
             }
         }catch(Exception ex){Check("drawn caret suite",false,ex.ToString());}
+        finally{hideMarkers=hide;ProbeDefaults.Live=live;if(window!=null)CloseWindow(window);}
+    }
+    // A mouse press on row k of a cell that holds <br> must put the caret at that character's
+    // source offset (not the cell end), and a press right of a row's text must land at the end
+    // of that row, before its <br>. The point comes from CellGeometry (the drawn text line of
+    // that slice), so the expectation is independent of the hit-test under test. Synthetic text.
+    static int CellTextIndexOfSource(MarkdownLivePreview.RowLayout row,int cell,int sourceRel){
+        var text=row==null||row.Texts==null||cell>=row.Texts.Length?null:row.Texts[cell];
+        if(text==null)return -1;
+        for(int p=0;p<text.Text.Length;p++)if(text.Map[p]==sourceRel&&!text.IsBreak(p))return p;
+        return -1;
+    }
+    static void RunCellBreakClickSuite(int width){
+        bool hide=hideMarkers,live=ProbeDefaults.Live;
+        string[] names={"three rows","doubled br","space run"};
+        string[] bodies={"가가가<br>나나나<br>다다다","가가가<br><br>나나나<br><br>다다다","가가가                    라라라<br>나나나                    마마마<br>사사사                    아아아"};
+        // Per body: the marker whose middle character is pressed, and the marker that ends the row
+        // (the press right of its text expects the offset just after it, before the <br>).
+        string[] pressed={"나나나","나나나","마마마"};
+        MainWindow window=null;
+        try{
+            ProbeDefaults.Live=true;
+            foreach(bool hidden in new[]{true,false})for(int f=0;f<bodies.Length;f++){
+                hideMarkers=hidden;
+                string tag="cell br click "+(hidden?"basic":"live")+" "+names[f];
+                try{
+                    window=new MainWindow{ShowInTaskbar=false,ShowActivated=false,Width=width,Height=760};
+                    window.Show();window.textMode=false;
+                    window.SetText("첫 줄\n\n| 하나 |\n| --- |\n| "+bodies[f]+" |\n");
+                    window.SetMode(true);SafeIdle(tag,"open");window.UpdateLayout();
+                    var session=window.livePreview;
+                    if(session==null){Check(tag+" attached",false,"no live preview");continue;}
+                    var document=window.source.Document;var row=document.GetLineByNumber(5);
+                    string rowText=document.GetText(row);
+                    int middle=rowText.IndexOf(pressed[f],StringComparison.Ordinal)+1;
+                    // Left-edge press on each of the three characters of the pressed row.
+                    foreach(int shift in new[]{0,1,2}){
+                        int sourceRel=middle-1+shift;
+                        PutCaret(window,document.GetLineByNumber(1).Offset);window.UpdateLayout();session.View.EnsureVisualLines();
+                        var info=session.Info(row);
+                        int ti=CellTextIndexOfSource(info.Row,0,sourceRel);
+                        double x0=Double.NaN,top=Double.NaN,bottom=Double.NaN,x1=Double.NaN,t2=Double.NaN,b2=Double.NaN;
+                        bool g0=ti>=0&&session.CellGeometry(row,0,ti,false,out x0,out top,out bottom);
+                        bool g1=g0&&session.CellGeometry(row,0,ti+1,false,out x1,out t2,out b2);
+                        string label=tag+" char "+shift;
+                        if(!g0||!g1){Check(label,false,"no geometry ti="+ti+" g0="+g0+" g1="+g1);continue;}
+                        double x=x1>x0?x0+(x1-x0)*0.3:x0+1;
+                        session.BeginPress();bool handled;
+                        try{handled=session.PlaceTableCaret(new Point(x,(top+bottom)/2),false);}
+                        finally{session.EndPress();}
+                        int caret=window.source.CaretOffset-row.Offset;
+                        LongLineBench.Idle();int settled=window.source.CaretOffset-row.Offset;
+                        Check(label,handled&&caret==sourceRel&&settled==sourceRel,
+                            "handled="+handled+", caret="+caret+", settled="+settled+", expected="+sourceRel+", x="+Fmt(x)+", y="+Fmt((top+bottom)/2));
+                    }
+                    // Press right of the pressed row's text (inside the cell box): the end of THAT
+                    // row, just before its <br> (or the cell end for the last row).
+                    {
+                        int endRel=middle+2;
+                        PutCaret(window,document.GetLineByNumber(1).Offset);window.UpdateLayout();session.View.EnsureVisualLines();
+                        var info=session.Info(row);
+                        int ti=CellTextIndexOfSource(info.Row,0,middle);
+                        double x0=Double.NaN,top=Double.NaN,bottom=Double.NaN;
+                        bool g0=ti>=0&&session.CellGeometry(row,0,ti,false,out x0,out top,out bottom);
+                        VisualLine visual=session.View.GetOrConstructVisualLine(row);
+                        Rect box=session.TableCellBox(visual,0);
+                        string label=tag+" right of row";
+                        if(!g0||box.IsEmpty){Check(label,false,"no geometry ti="+ti+" g0="+g0);}
+                        else{
+                            session.BeginPress();bool handled;
+                            try{handled=session.PlaceTableCaret(new Point(box.Right-2,(top+bottom)/2),false);}
+                            finally{session.EndPress();}
+                            int caret=window.source.CaretOffset-row.Offset;
+                            LongLineBench.Idle();int settled=window.source.CaretOffset-row.Offset;
+                            Check(label,handled&&caret==endRel&&settled==endRel,
+                                "handled="+handled+", caret="+caret+", settled="+settled+", expected="+endRel+", box="+Fmt(box));
+                        }
+                    }
+                }catch(Exception ex){Check(tag,false,ex.ToString());}
+                finally{CloseWindow(window);window=null;}
+            }
+        }catch(Exception ex){Check("cell br click suite",false,ex.ToString());}
         finally{hideMarkers=hide;ProbeDefaults.Live=live;if(window!=null)CloseWindow(window);}
     }
     static string BrushName(Brush brush){return brush==null?"null":brush.ToString();}

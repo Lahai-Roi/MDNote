@@ -13,13 +13,15 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | Recover documents… | | Recover or delete documents that were closed without saving. |
 | Recent files | | Reopen a recently opened document. |
 | ![Save](guide-save.png) Save | Ctrl+S | Save the current document. |
-| Save as… | Ctrl+Shift+S | Save with a new name and encoding. |
+| Save as… | Ctrl+Shift+S | Save with a new name and encoding. Choosing **HTML files (*.html)** creates only a separate .html file and leaves the open document as it is. |
 | Print… | Ctrl+P | Print the document. |
 | Exit | Alt+F4 | Close the current window only. Other open windows remain open. |
 
 - You can also open files by dragging them into the window or double-clicking them in File Explorer.
+- If you save an HTML file made with **Save as…** in the same folder as the document, the pictures still show. Formulas stay as plain text in the HTML.
+- If another program changes or deletes a file you have open, MDNote asks whether to reload it, or tells you the file is gone. When you save over a file that another program changed, it asks before overwriting.
 - Unsaved text is kept until you recover or delete it—MDNote asks whether to recover it on launch, or you can manage it anytime in **Recover documents…** (Recover selected, Delete selected, or Later).
-- In **Save as**, choose an encoding from UTF-8, UTF-8 (BOM), UTF-16 LE, UTF-16 BE, or ANSI (CP949), or keep the current encoding for documents opened in Shift JIS, GBK, Big5, Windows-1252, or UTF-32 LE/BE. If any characters cannot be represented in CP949, MDNote prompts you to use UTF-8.
+- In **Save as**, choose an encoding from UTF-8, UTF-8 (BOM), UTF-16 LE, UTF-16 BE, or ANSI, or keep the current encoding for documents opened in Shift JIS, GBK, Big5, Windows-1252, or UTF-32 LE/BE. ANSI uses the encoding for your Windows language: CP949 for Korean, GBK for Simplified Chinese, Big5 for Traditional Chinese, Shift JIS for Japanese, and Windows-1252 for English. Non-UTF-8 files are also read with this encoding when opened. If any characters cannot be represented in the selected encoding, MDNote prompts you to use UTF-8.
 - If switching between MD and TXT mode makes the mode differ from the file extension, saving suggests the matching extension so you do not overwrite the original file.
 - When closing an unsaved document, choose **Save**, **Discard**, or **Cancel**. When multiple windows are closing at once (such as during Windows shutdown), clicking **Cancel** stops closing the remaining windows.
 
@@ -42,9 +44,11 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 - Documents open straight into the editing screen while **Always open for editing** is on (the default), or in the **Read** screen when it is off. In basic mode's editing screen, symbols like `#` and `**` stay hidden while you edit directly in the formatted view. In **Live mode** (View menu), symbols appear in the editing screen only on the cursor line and any selected lines.
 - Switching to **TXT mode** strips Markdown symbols and leaves only visible text, separating table cells with Tabs. Switching from TXT back to MD does not suddenly turn existing symbols into formatting. If you switched by mistake, press Ctrl+Z to undo.
 - **Paste** preserves bold, italic, strikethrough, links, and custom text colors. In TXT mode, pasting always inserts plain text only.
-- **Insert images**: Paste a copied image with Ctrl+V, paste or drag in an image file, or select Insert image… to display it immediately. When saving, a folder with the same name is created next to the document (e.g., `Memo.md` → `Memo\`), storing only the images remaining in the document and updating their links. Images deleted before saving are excluded, and images already in that folder are not copied again. Using Save As copies the document's images into a folder matching the new name.
+- **Insert images**: Paste a copied image with Ctrl+V, paste or drag in an image file, or select Insert image… to display it immediately. When saving, a folder with the same name is created next to the document (e.g., `Memo.md` → `Memo\`), storing only the images remaining in the document and updating their links. Images deleted before saving are excluded, and images already in that folder are not copied again. Using Save As copies the document's images into a folder matching the new name. Image links written inside code blocks or inline code are left as plain text. If another open document uses the same image, it is copied rather than moved. Unsaved images are kept in `Documents\MDNote\images`, and images unused by any document after 7 days are sent to the Recycle Bin when MDNote starts.
 - You can also drag an image file into the editing window to insert it.
+- If you paste an image while the cursor is inside a code block, it goes on the line right below the block.
 - Press the same shortcut again to close Find or Replace.
+- Turn on the `.*` button (**Use regular expression**) next to the case button to search with patterns. In Replace, `$1` and so on refer to groups. Off by default.
 
 ## 3. View
 
@@ -57,6 +61,8 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | Font and size… | | Set the default font and size. |
 | Default text color… / Reset default text color | | Set or reset the default text color for the whole document. |
 | ![dark](guide-btn-dark.png) Dark mode | | Switch to a dark color theme. |
+| Focus mode | | Choose Paragraph, Line, or Off. Paragraph keeps only the paragraph with the cursor clear, and Line keeps only the line with the cursor clear, while the rest is faded. Off by default. |
+| Typewriter mode | | When on, the line you are typing stays in the middle of the window. Off by default. |
 | Line spacing | | Choose 100%, 125%, 150%, 200%, or Custom. |
 | Markdown Live Preview | | When on, shows only the cursor line and selected lines as source text (with symbols) in the editing screen. When off, uses the basic mode. |
 
@@ -95,6 +101,8 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | --- | --- |
 | Writing Markdown | Open an example document with Markdown syntax and writing tips. |
 | Using MDNote | Open this guide. |
+| Check for updates | Check GitHub for a new version right away. If one is available, you can open the release page. Downloading and installing are done manually. |
+| Check for updates automatically | When on, MDNote checks GitHub once a day at the first launch and shows a one-line notice above the status bar if a new version is out. In the notice, **Details** opens the release info and checking **Skip this version** stops notices for that version. Off by default; you can turn it on during setup. |
 | About MDNote | Check the app version. |
 
 ## 7. Toolbars and Screen
@@ -116,6 +124,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | Location | Key | Behavior |
 | --- | --- | --- |
 | Start of a line | `-`, `*`, `+`, or `1.` followed by a half-width space or Tab | Immediately starts a list. (A full-width space is treated as normal text and does not start a list.) |
+| Start of a line | Type `` ``` `` (optionally with a language name, such as `` ```python ``), then Enter | Creates a code block with its closing line and puts the cursor inside. |
 | Inside a list | Tab / Shift+Tab | Indent or outdent by one level. |
 | Empty list item | Enter | Creates another empty item at the same level. |
 | Start of a list item | Backspace | First press removes the list marker; second press removes the indent. |
@@ -130,6 +139,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 - To stop a task list, press **Backspace** on the newly created empty checkbox line to remove the box.
 - You can click checkboxes to toggle completion in both Read and editing views. Press **Ctrl+S** afterward to save the change to the file.
 - Selecting some cells in a table and deleting or typing keeps the pipe dividers (`|`) and table structure intact, clearing or replacing only the contents of the selected cells. However, selecting the entire table or pressing Ctrl+A and deleting removes the table itself like normal text.
+- `$E=mc^2$` inside a sentence, and `$$ … $$` on its own lines (also a ```` ```math ```` code block), are drawn as formulas. When the cursor is on one, the original text shows so you can edit it. This works inside table cells too. Text like `$5 and $10` stays normal text. There is no button for entering formulas.
 
 The second row of a table (the `---` delimiter row) cannot be edited directly in the editing screen. Use the alignment buttons on the table toolbar (or the Source view) to change column alignment.
 

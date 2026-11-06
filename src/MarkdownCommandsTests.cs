@@ -701,8 +701,11 @@ internal static class MarkdownCommandsProbe {
         // image per source line must not split a table row (bughunt2 insert 9).
         string[] twoRefs = new string[] { "a.png", "b.png" };
         string[] twoAlts = new string[] { "a", "b" };
-        Add(cases, "images inside a fence return null", "```\n‸\n```", null, Images(twoRefs, twoAlts));
-        Add(cases, "images on a fence line return null", "‸```\ntext\n```", null, Images(twoRefs, twoAlts));
+        // 11-05 user decision: a caret in a closed fenced block puts the pictures on new lines right
+        // under the closing fence (one command, one undo step); a block open to the end still declines.
+        Add(cases, "images inside a fence go below the block", "```\n‸\n```", "```\n\n```\n![a](a.png)\n![b](b.png)‸", Images(twoRefs, twoAlts));
+        Add(cases, "images on a fence line go below the block", "‸```\ntext\n```\nnext", "```\ntext\n```\n![a](a.png)\n![b](b.png)‸\nnext", Images(twoRefs, twoAlts));
+        Add(cases, "images in an unclosed fence return null", "```\nte‸xt", null, Images(twoRefs, twoAlts));
         Add(cases, "images inside inline code return null", "`ab‸cd`", null, Images(twoRefs, twoAlts));
         Add(cases, "images on a rule return null", "‸---", null, Images(twoRefs, twoAlts));
         // The delimiter row must match the header's cell count to be table structure (TableLineKind's
@@ -854,7 +857,11 @@ internal static class MarkdownCommandsProbe {
         Add(cases, "bold on part of inline code widens to the run", "`ab«cd»`", "**«`abcd`»**", Inline("**"));
         Add(cases, "link inside inline code returns null", "`ab‸cd`", null, Link("u"));
         Add(cases, "image inside inline code returns null", "`ab‸cd`", null, Image("p.png", "a"));
-        Add(cases, "image inside fence returns null", "```\n‸\n```", null, Image("p.png", "a"));
+        Add(cases, "image inside fence goes below the block", "```\n‸\n```", "```\n\n```\n![a](p.png)‸", Image("p.png", "a"));
+        Add(cases, "image inside python fence goes below the block", "x\n```python\nab‸c\n```\ny", "x\n```python\nabc\n```\n![a](p.png)‸\ny", Image("p.png", "a"));
+        Add(cases, "image on a closing fence goes below the block", "~~~~\nabc\n~~~~‸", "~~~~\nabc\n~~~~\n![a](p.png)‸", Image("p.png", "a"));
+        Add(cases, "image inside fence CRLF goes below the block", "```\r\na‸\r\n```\r\nz", "```\r\na\r\n```\r\n![a](p.png)‸\r\nz", Image("p.png", "a"));
+        Add(cases, "image in an unclosed fence returns null", "```\na‸\nb", null, Image("p.png", "a"));
         Add(cases, "span color at inline code inner edge returns null", "`‸ab`", null, Span("#FF0000"));
         Add(cases, "span color inside inline code wraps the run", "`a‸b`",
             "<span style=\"color:#FF0000\">`a‸b`</span>", Span("#FF0000"));

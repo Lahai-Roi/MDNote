@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Media;
+using Rx=System.Text.RegularExpressions;
 namespace MDNote {
 public partial class MainWindow {
     Menu topMenu; MenuItem darkToggle; Button quickFind,quickReplace,quickDark;
@@ -18,6 +19,9 @@ public partial class MainWindow {
     readonly StackPanel replaceRow=new StackPanel {Orientation=Orientation.Vertical,Visibility=Visibility.Collapsed};
     readonly TextBox replacement=new TextBox {Width=200,Padding=new Thickness(5,3,5,3),Margin=new Thickness(6,3,6,3)};
     readonly CheckBox matchCase=new CheckBox {Content="대소문자 구분",VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(8,0,5,0)};
+    /* The regular-expression option (user decision 2026-11-05): off by default and not saved. Beside the
+       case option, same look and size. */
+    readonly CheckBox matchRegex=new CheckBox {VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(1,0,1,0)};
     readonly TextBlock matchCount=new TextBlock {Text="0 / 0",MinWidth=60,TextAlignment=TextAlignment.Right,VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(8,0,6,0)};
     Button replaceOneButton,replaceAllButton;
     bool searchBusy;
@@ -86,6 +90,7 @@ public partial class MainWindow {
            item 16). The mouse still toggles it; the field the user was typing in keeps the focus. */
         matchCase.Focusable=false;
         matchCase.Style=(Style)Resources["SquareToggle"];matchCase.Content=new TextBlock {Text="Aa",FontFamily=Ui.LabelFamily,FontSize=Ui.LabelSize+4,FontWeight=FontWeights.Normal,Tag=Ui.KeepFontTag,VerticalAlignment=VerticalAlignment.Center};matchCase.ToolTip=T("대소문자 구분");matchCase.Margin=new Thickness(1,0,1,0);matchCase.VerticalAlignment=VerticalAlignment.Center;controls.Children.Add(matchCase);
+        matchRegex.Focusable=false;matchRegex.Style=(Style)Resources["SquareToggle"];matchRegex.Content=Ui.GridIcon("regex");matchRegex.ToolTip=T("정규식");System.Windows.Automation.AutomationProperties.SetName(matchRegex,T("정규식"));controls.Children.Add(matchRegex);
         search.Children.Add(replaceRow);var replaceWrap=new WrapPanel {Orientation=Orientation.Horizontal};replaceRow.Children.Add(replaceWrap);replaceWrap.Children.Add(SearchField(replacement,"바꿀 내용",null));replaceOneButton=SearchButton(replaceWrap,"바꾸기",ReplaceOne);replaceAllButton=SearchButton(replaceWrap,"모두 바꾸기",ReplaceAll);
         /* The two buttons cannot take the keyboard (SetupButton keeps them Focusable=false so the
            fields keep it), so their shortcuts are the way in and the tooltips have to name them
@@ -93,7 +98,7 @@ public partial class MainWindow {
         replaceOneButton.ToolTip=T("현재 항목 바꾸기 (Enter, Alt+R)");replaceAllButton.ToolTip=T("모든 일치 항목 바꾸기 (Alt+A)");
         // A query edit is one field change, not a typing burst, so it refreshes at once (the count and the
         // highlight must follow the letters as before). A document edit is the burst path (SearchDocumentChanged).
-        query.TextChanged+=delegate{QueryCompositionEnded();RefreshSearchNow();};System.Windows.Input.TextCompositionManager.AddPreviewTextInputStartHandler(query,QueryCompositionStarted);System.Windows.Input.TextCompositionManager.AddPreviewTextInputUpdateHandler(query,QueryCompositionUpdated);query.PreviewTextInput+=delegate{QueryCompositionEnded();};query.LostKeyboardFocus+=delegate{QueryCompositionEnded();};matchCase.Checked+=delegate{RefreshSearchNow();};matchCase.Unchecked+=delegate{RefreshSearchNow();};query.KeyDown+=delegate(object sender,System.Windows.Input.KeyEventArgs e){if(e.Key==System.Windows.Input.Key.Enter){FindNext((System.Windows.Input.Keyboard.Modifiers&System.Windows.Input.ModifierKeys.Shift)!=0);e.Handled=true;}};
+        query.TextChanged+=delegate{QueryCompositionEnded();RefreshSearchNow();};System.Windows.Input.TextCompositionManager.AddPreviewTextInputStartHandler(query,QueryCompositionStarted);System.Windows.Input.TextCompositionManager.AddPreviewTextInputUpdateHandler(query,QueryCompositionUpdated);query.PreviewTextInput+=delegate{QueryCompositionEnded();};query.LostKeyboardFocus+=delegate{QueryCompositionEnded();};matchCase.Checked+=delegate{RefreshSearchNow();};matchCase.Unchecked+=delegate{RefreshSearchNow();};matchRegex.Checked+=delegate{RegexOptionChanged();};matchRegex.Unchecked+=delegate{RegexOptionChanged();};query.KeyDown+=delegate(object sender,System.Windows.Input.KeyEventArgs e){if(e.Key==System.Windows.Input.Key.Enter){FindNext((System.Windows.Input.Keyboard.Modifiers&System.Windows.Input.ModifierKeys.Shift)!=0);e.Handled=true;}};
         // The replace field records its own composition so a replace run cannot write a cut-off syllable
         // (item 1); a commit, a caret move out of the field or a closed bar ends it, like the query's.
         replacement.TextChanged+=delegate{ReplaceCompositionEnded();};System.Windows.Input.TextCompositionManager.AddPreviewTextInputStartHandler(replacement,ReplaceCompositionStarted);System.Windows.Input.TextCompositionManager.AddPreviewTextInputUpdateHandler(replacement,ReplaceCompositionUpdated);replacement.PreviewTextInput+=delegate{ReplaceCompositionEnded();};replacement.LostKeyboardFocus+=delegate{ReplaceCompositionEnded();};
@@ -324,6 +329,10 @@ public partial class MainWindow {
         // offset the highlight, the selection and Replace use. Null everywhere else, where the map
         // text is the document text and an index already is a source offset.
         internal int[] SourceOffsets;
+        // A regular-expression search keeps the length of every match beside its start (Starts is the
+        // match list itself, sorted and strictly increasing); a plain search leaves both null and every
+        // match is as long as the query.
+        internal List<int> Starts,Lengths;
         internal int VisibleIndex(int sourceOffset){
             if(SourceOffsets==null)return sourceOffset;
             int low=0,high=SourceOffsets.Length,mid;
@@ -336,10 +345,158 @@ public partial class MainWindow {
     // match back to its source range; every other surface keeps the raw-source search.
     bool LiveVisibleSearch {get{return CodeMode&&LivePreviewAttached&&livePreview.SearchHiddenMarkup;}}
     SearchMap Map(){var map=new SearchMap();if(LargeSearchCurrent())return parallelSearchMap;if(LiveVisibleSearch){int[] offsets;map.Text=livePreview.VisibleText(out offsets);map.SourceOffsets=offsets;}else map.Text=source.Text;return map;}
-    List<int> Matches(SearchMap map){if(Object.ReferenceEquals(map,parallelSearchMap)&&LargeSearchCurrent())return parallelSearchMatches;var matches=new List<int>();string needle=QueryText();if(needle.Length==0)return matches;int at=0;while(at<=map.Text.Length-needle.Length){int found=map.Text.IndexOf(needle,at,Comparison);if(found<0)break;matches.Add(found);at=found+needle.Length;}return matches;}
+    List<int> Matches(SearchMap map){if(Object.ReferenceEquals(map,parallelSearchMap)&&LargeSearchCurrent())return parallelSearchMatches;var matches=new List<int>();string needle=QueryText();if(needle.Length==0)return matches;if(RegexOn)return RegexMatches(map,needle);int at=0;while(at<=map.Text.Length-needle.Length){int found=map.Text.IndexOf(needle,at,Comparison);if(found<0)break;matches.Add(found);at=found+needle.Length;}return matches;}
     int SelectedStart(SearchMap map){return map.SourceOffsets==null?source.SelectionStart:map.VisibleIndex(source.SelectionStart);}
     int SelectedEnd(SearchMap map){int end=source.SelectionStart+source.SelectionLength;return map.SourceOffsets==null?end:map.VisibleIndex(end);}
-    int Current(SearchMap map,List<int> matches){int start=SelectedStart(map),end=SelectedEnd(map);if(end-start!=QueryText().Length)return -1;int found=matches.BinarySearch(start);return found>=0?found:-1;}
+    int Current(SearchMap map,List<int> matches){int start=SelectedStart(map),end=SelectedEnd(map);if(map.Lengths==null){if(end-start!=QueryText().Length)return -1;int plain=matches.BinarySearch(start);return plain>=0?plain:-1;}
+        /* A regex match has its own length, and a zero-length one (^, \b) is "selected" by the bare caret. */
+        int found=matches.BinarySearch(start);if(found<0||found>=map.Lengths.Count)return -1;return map.Lengths[found]==end-start?found:-1;}
+    int MatchLength(SearchMap map,int start){
+        if(map==null||map.Lengths==null||map.Starts==null)return QueryText().Length;
+        int at=map.Starts.BinarySearch(start);
+        return at>=0&&at<map.Lengths.Count?map.Lengths[at]:0;
+    }
+    bool RegexOn {get{return matchRegex.IsChecked==true;}}
+    /* The compiled regex survives until the pattern or the options change: a document edit, a find press
+       or a refresh reads it from here and never builds one (an invalid pattern is remembered the same way,
+       so a refresh does not parse it again). Built and read on the UI thread only; a background scan gets
+       the Regex object itself, which is safe to share. */
+    Rx.Regex searchRegexCache;string searchRegexPattern;Rx.RegexOptions searchRegexOptions;bool searchRegexInvalid,searchRegexTimedOut;
+    Rx.RegexOptions SearchRegexOptionsNow(){return Rx.RegexOptions.Multiline|Rx.RegexOptions.CultureInvariant|(matchCase.IsChecked==true?Rx.RegexOptions.None:Rx.RegexOptions.IgnoreCase);}
+    internal Rx.Regex SearchRegex(string pattern,Rx.RegexOptions options){
+        if(searchRegexPattern!=pattern||searchRegexOptions!=options||(searchRegexCache==null&&!searchRegexInvalid)){
+            searchRegexPattern=pattern;searchRegexOptions=options;searchRegexCache=null;searchRegexInvalid=false;
+            try{searchRegexCache=new Rx.Regex(AdaptPatternForCrLf(pattern),options,TimeSpan.FromSeconds(2));}
+            catch(ArgumentException){searchRegexInvalid=true;}
+        }
+        return searchRegexCache;
+    }
+    /* A CRLF document keeps its CR in the editor text, and .NET's multiline $ stops only before LF and its
+       . takes the CR: "abc$" found nothing and ".*" swallowed the CR (a replace then ate the line break).
+       Outside a character class and an escape, $ becomes (?=\r?$) and . becomes [^\r\n], so a pattern
+       reads the line the way the reader sees it. Everything else is passed through untouched. */
+    internal static string AdaptPatternForCrLf(string pattern){
+        if(pattern.IndexOf('$')<0&&pattern.IndexOf('.')<0)return pattern;
+        var adapted=new StringBuilder(pattern.Length+16);bool inClass=false;
+        for(int i=0;i<pattern.Length;i++){
+            char c=pattern[i];
+            if(c=='\\'){adapted.Append(c);if(i+1<pattern.Length){i++;adapted.Append(pattern[i]);}continue;}
+            if(inClass){if(c==']')inClass=false;adapted.Append(c);continue;}
+            if(c=='['){
+                inClass=true;adapted.Append(c);int j=i+1;
+                if(j<pattern.Length&&pattern[j]=='^'){adapted.Append('^');j++;}
+                if(j<pattern.Length&&pattern[j]==']'){adapted.Append(']');j++;}
+                i=j-1;continue;
+            }
+            if(c=='$'){adapted.Append("(?=\\r?$)");continue;}
+            if(c=='.'){adapted.Append("[^\\r\\n]");continue;}
+            adapted.Append(c);
+        }
+        return adapted.ToString();
+    }
+    // Every match of a scan as a start and a length. A zero-length match (^, \b) is a match too: the
+    // enumeration steps past it by itself, so neither a find nor a replace run can loop on it.
+    static void ScanRegex(Rx.Regex regex,string text,List<int> starts,List<int> lengths,System.Threading.CancellationToken token){
+        for(Rx.Match found=regex.Match(text);found.Success;found=found.NextMatch()){token.ThrowIfCancellationRequested();starts.Add(found.Index);lengths.Add(found.Length);}
+    }
+    // The match list of a regex search. An invalid pattern or a timeout is an empty list, never an exception.
+    List<int> RegexMatches(SearchMap map,string pattern){
+        var starts=new List<int>();var lengths=new List<int>();
+        Rx.Regex regex=SearchRegex(pattern,SearchRegexOptionsNow());searchRegexTimedOut=false;
+        if(regex!=null){
+            try{ScanRegex(regex,map.Text,starts,lengths,System.Threading.CancellationToken.None);}
+            catch(Rx.RegexMatchTimeoutException){starts.Clear();lengths.Clear();searchRegexTimedOut=true;}
+        }
+        map.Starts=starts;map.Lengths=lengths;return starts;
+    }
+    /* The option changed: nothing built for the other kind of search may answer this one. */
+    void RegexOptionChanged(){CancelParallelSearch();SearchCacheReset();RefreshSearchNow();}
+    // The find field says why a regex finds nothing: only an invalid pattern is named.
+    void UpdateRegexTip(){
+        bool invalid=false;
+        if(RegexOn){string pattern=QueryText();if(pattern.Length>0){SearchRegex(pattern,SearchRegexOptionsNow());invalid=searchRegexInvalid;}}
+        object tip=invalid?T("정규식이 올바르지 않습니다"):null;
+        if(!Object.Equals(query.ToolTip,tip))query.ToolTip=tip;
+    }
+    // The length of the i-th match of the list that was built with this map (the query's own for a plain search).
+    static int LenAt(SearchMap map,int index,int plainLength){return map.Lengths==null?plainLength:map.Lengths[index];}
+    /* Replace One: the replacement for the match that starts at `start`, with $1, ${name}, $$ and $0
+       read against that match. Null when the match cannot be reproduced (a timeout, or a pattern that
+       no longer matches there): nothing is written then. A plain search, and a replacement with no
+       "$", is the text as typed. */
+    string RegexValueAt(SearchMap map,int start,string replaceWith){
+        if(map==null||map.Lengths==null||replaceWith.IndexOf('$')<0)return replaceWith;
+        Rx.Regex regex=SearchRegex(QueryText(),SearchRegexOptionsNow());if(regex==null)return null;
+        try{
+            Rx.Match found=regex.Match(map.Text,start);
+            if(!found.Success||found.Index!=start||found.Length!=MatchLength(map,start))return null;
+            return found.Result(replaceWith);
+        }catch(Rx.RegexMatchTimeoutException){return null;}
+    }
+    /* Replace All: the substitution of every match, taken in one more scan of the same text (the scan is
+       deterministic, so it meets the same matches in the same order). Null when every match simply gets
+       the text as typed (a plain search, or no "$" in the replacement); failed when the scan cannot be
+       reproduced, and then nothing is written. */
+    string[] RegexValues(SearchMap map,List<int> matches,string replaceWith,out bool failed){
+        failed=false;
+        if(map.Lengths==null||replaceWith.IndexOf('$')<0)return null;
+        Rx.Regex regex=SearchRegex(QueryText(),SearchRegexOptionsNow());
+        if(regex==null){failed=true;return null;}
+        var values=new string[matches.Count];int index=0;
+        try{
+            for(Rx.Match found=regex.Match(map.Text);found.Success&&index<values.Length;found=found.NextMatch()){
+                if(found.Index!=matches[index]||found.Length!=map.Lengths[index]){failed=true;return null;}
+                values[index++]=found.Result(replaceWith);
+            }
+        }catch(Rx.RegexMatchTimeoutException){failed=true;return null;}
+        if(index!=values.Length){failed=true;return null;}
+        return values;
+    }
+    /* A document past 32K chars is searched off the UI thread from a snapshot, as the plain search does
+       (SourceSearch.cs); the regex scan is one pass over the snapshot text because a match may span any
+       two lines. Same state, same 100 ms start delay, same "searching" count and the same pending
+       find-next direction; only the scan and the per-match lengths differ. */
+    bool RefreshLargeRegexSearch(){
+        if(!LargeSourceSearch){if(parallelSearchCancellation!=null)CancelParallelSearch();return false;}
+        if(QueryText().Length==0){CancelParallelSearch();matchCount.Text="0 / 0";UpdateSearchHighlight(null,-1);replaceOneButton.IsEnabled=replaceAllButton.IsEnabled=false;return true;}
+        if(LargeSearchCurrent()){DisplayLargeRegex();return true;}
+        if(parallelSearchCancellation!=null&&parallelSearchDocument==source.Document&&Object.ReferenceEquals(parallelSearchVersion,source.Document.Version)&&parallelSearchQuery==QueryText()&&parallelSearchComparison==Comparison)return true;
+        int direction=pendingSearchDirection;CancelParallelSearch();pendingSearchDirection=direction;
+        parallelSearchDocument=source.Document;parallelSearchVersion=source.Document.Version;parallelSearchQuery=QueryText();parallelSearchComparison=Comparison;
+        parallelSearchCancellation=new System.Threading.CancellationTokenSource();
+        Rx.Regex regex=SearchRegex(parallelSearchQuery,SearchRegexOptionsNow());
+        ICSharpCode.AvalonEdit.Document.ITextSource snapshot=source.Document.CreateSnapshot();
+        if(regex==null){
+            /* An invalid pattern has nothing to scan: answer at once with an empty list. */
+            var none=new List<int>();parallelSearchMap=new SearchMap {Snapshot=snapshot,Starts=none,Lengths=new List<int>()};parallelSearchMatches=none;
+            DisplayLargeRegex();return true;
+        }
+        StartLargeRegexSearch(parallelSearchCancellation,snapshot,regex);
+        return true;
+    }
+    async void StartLargeRegexSearch(System.Threading.CancellationTokenSource cancellation,ICSharpCode.AvalonEdit.Document.ITextSource snapshot,Rx.Regex regex){
+        System.Threading.CancellationToken token=cancellation.Token;matchCount.Text=T("검색 중…");replaceOneButton.IsEnabled=replaceAllButton.IsEnabled=false;UpdateSearchHighlight(null,-1);
+        try{
+            await System.Threading.Tasks.Task.Delay(100,token);
+            var result=await System.Threading.Tasks.Task.Run(delegate{
+                token.ThrowIfCancellationRequested();
+                var starts=new List<int>();var lengths=new List<int>();
+                try{ScanRegex(regex,snapshot.Text,starts,lengths,token);}
+                catch(Rx.RegexMatchTimeoutException){starts.Clear();lengths.Clear();}
+                return new Tuple<SearchMap,List<int>>(new SearchMap {Snapshot=snapshot,Starts=starts,Lengths=lengths},starts);
+            },token);
+            if(token.IsCancellationRequested||searchWindowClosed||parallelSearchCancellation!=cancellation||searchHost.Visibility!=Visibility.Visible||!CodeMode||parallelSearchDocument!=source.Document||!Object.ReferenceEquals(parallelSearchVersion,source.Document.Version))return;
+            parallelSearchMap=result.Item1;parallelSearchMatches=result.Item2;DisplayLargeRegex();
+            int direction=pendingSearchDirection;pendingSearchDirection=0;if(direction!=0)FindNext(direction<0);
+        }catch(OperationCanceledException){}
+        catch(Exception){if(!token.IsCancellationRequested&&!searchWindowClosed&&parallelSearchCancellation==cancellation)matchCount.Text=T("검색 실패");}
+    }
+    void DisplayLargeRegex(){
+        int current=Current(parallelSearchMap,parallelSearchMatches);matchCount.Text=(current+1)+" / "+parallelSearchMatches.Count;
+        if(current<0)UpdateSearchHighlightAll(parallelSearchMap,parallelSearchMatches);else ShowSearchHighlight(parallelSearchMap,parallelSearchMatches[current]);
+        replaceOneButton.IsEnabled=replaceAllButton.IsEnabled=editing&&parallelSearchMatches.Count>0;
+    }
+    bool DeferLargeRegexNavigation(bool previous){if(!LargeSourceSearch||LargeSearchCurrent())return false;pendingSearchDirection=previous?-1:1;RefreshLargeRegexSearch();return true;}
     // Find-next used to rebuild the whole mapping (Map()) and rescan the whole text (Matches()) on every press, and
     // again from the RefreshSearch() after the selection: three O(document) TextPointer walks per Enter, 170 ms-1.6 s
     // in the basic view (--longline-surfaces-bench). The map and its match list now survive until the query, the case
@@ -410,7 +567,7 @@ public partial class MainWindow {
         int at,length;SourceVisibleRange(map,start,out at,out length);
         /* A range the clamped map cannot place in this document is not a match: selecting it would
            throw out of the find press (TextEditor.Select checks both ends). */
-        if(length<=0||at<0||at>source.Document.TextLength||at+length>source.Document.TextLength)return false;
+        if(length<0||(length==0&&map.Lengths==null)||at<0||at>source.Document.TextLength||at+length>source.Document.TextLength)return false;
         source.Select(at,length);source.ScrollToLine(source.GetLineIndexFromCharacterIndex(at));
         /* ScrollToLine goes to the logical line start, which on a >16K line is the top of the folded prefix; this puts a match that sits inside a fold back into real text, on screen. */LongLineWindow.Reveal(source,at,length);
         // The reveal above runs before the frame's own layout. LongLineWindow re-windows a >16K line
@@ -424,6 +581,8 @@ public partial class MainWindow {
         // only covers lines past its fold threshold. A wrap-off line that is merely wider than the
         // viewport is below that threshold, so reveal it here.
         if(!source.WordWrap)RevealSourceHorizontally(at,length);
+        // Typewriter mode: the found line goes to the middle, as a "#heading" jump does (FocusMode.cs).
+        var focusSurface=FocusSurfaceOf(source);if(focusSurface!=null)focusSurface.CentreAfterJump();
         return true;
     }
     void QueueSearchCaretReveal(){
@@ -477,7 +636,7 @@ public partial class MainWindow {
     void RefreshSearchNow(){RefreshSearchCore("now");}
     bool RefreshSearchCore(string mode){
         if(loading||applyingLoadedFile||searchBusy||searchHost.Visibility!=Visibility.Visible)return false;
-        SyncSearchInvalidation();
+        SyncSearchInvalidation();UpdateRegexTip();
         if(QueryText().Length==0){StopSearchRefreshTimer();searchTextStale=true;CancelParallelSearch();matchCount.Text="0 / 0";UpdateSearchHighlight(null,-1);replaceOneButton.IsEnabled=replaceAllButton.IsEnabled=false;return true;}
         // Owed work waits for the pause; touching the map here would rebuild it on every keystroke. The pause
         // itself and an explicit "now" carry it out.
@@ -485,7 +644,7 @@ public partial class MainWindow {
         /* Both large paths run the scan from a snapshot and apply the result only while the text version
            still matches, so they are started only on the turn that owns the work (the old order started a
            large source search from the cheap path too, so every keystroke cancelled and restarted one). */
-        if(RefreshLargeSourceSearch()){searchTextPending=false;return true;}
+        if(RegexOn?RefreshLargeRegexSearch():RefreshLargeSourceSearch()){searchTextPending=false;return true;}
         searchBusy=true;try{var map=SearchMapCached();var matches=SearchMatchesCached(map);int current=SearchCurrentCached(map,matches);ApplySearchDisplay(map,matches,current);}finally{searchBusy=false;}
         return true;
     }
@@ -508,7 +667,7 @@ public partial class MainWindow {
     // not a source offset, and its source range is longer than the visible one when hidden markers
     // sit inside the match, so the overlay's range is set from the map here.
     void ShowSearchHighlight(SearchMap map,int index){
-        if(index<0||map==null||map.SourceOffsets==null){UpdateSearchHighlight(map,index);return;}
+        if(index<0||map==null||(map.SourceOffsets==null&&map.Lengths==null)){UpdateSearchHighlight(map,index);return;}
         int start,length;SourceVisibleRange(map,index,out start,out length);
         UpdateSearchHighlight(null,-1);
         if(searchHost.Visibility==Visibility.Visible&&sourceHighlight!=null){sourceHighlight.SourceStart=start;sourceHighlight.SourceLength=length;sourceHighlight.Reposition();}
@@ -517,8 +676,16 @@ public partial class MainWindow {
     // one past the last one. Hidden runs between them stay inside the range (that is the highlight
     // and the selection the user sees); Replace asks the live session before it writes there.
     void SourceVisibleRange(SearchMap map,int index,out int start,out int length){
-        start=index;length=QueryText().Length;
+        start=index;length=MatchLength(map,index);
         int[] offsets=map==null?null:map.SourceOffsets;
+        if(offsets!=null&&length==0&&map.Lengths!=null&&index>=0){
+            /* A zero-length regex match is a place, not a range: the source offset of the character it
+               stands before, or the end of the document. */
+            int endOfDocument=source==null||source.Document==null?0:source.Document.TextLength;
+            start=index<offsets.Length?offsets[index]:endOfDocument;
+            if(start>endOfDocument)start=endOfDocument;
+            return;
+        }
         if(offsets==null||index<0||index>=offsets.Length)return;
         int last=Math.Min(offsets.Length-1,index+Math.Max(1,length)-1);
         start=offsets[index];length=offsets[last]+1-start;
@@ -640,12 +807,15 @@ public partial class MainWindow {
     void Find(){FindNext(false);}
     /* b53 #12: a find press works from the newest text. An edit since the last build left the cache cleared
        and the count owed; the press has to rebuild now, or it would search the pre-edit match list. */
-    void FindNext(bool previous){if(DeferLargeSearchNavigation(previous))return;if(QueryText().Length==0){ShowSearch();return;}SyncSearchInvalidation();var map=SearchMapCached();var matches=SearchMatchesCached(map);if(matches.Count==0){matchCount.Text="0 / 0";UpdateSearchHighlight(null,-1);return;}int current=SearchCurrentCached(map,matches),chosen=-1;if(current>=0)chosen=(current+(previous?matches.Count-1:1))%matches.Count;else{int anchor=previous?SelectedStart(map):SelectedEnd(map);int insertion=matches.BinarySearch(anchor);if(previous){chosen=insertion>=0?insertion-1:~insertion-1;if(chosen<0)chosen=matches.Count-1;}else{chosen=insertion>=0?insertion:~insertion;if(chosen>=matches.Count)chosen=0;}}searchBusy=true;try{SelectMatch(map,matches[chosen]);}finally{searchBusy=false;}RefreshSearchNow();}
+    void FindNext(bool previous){if(RegexOn?DeferLargeRegexNavigation(previous):DeferLargeSearchNavigation(previous))return;if(QueryText().Length==0){ShowSearch();return;}SyncSearchInvalidation();var map=SearchMapCached();var matches=SearchMatchesCached(map);if(matches.Count==0){matchCount.Text="0 / 0";UpdateSearchHighlight(null,-1);return;}int current=SearchCurrentCached(map,matches),chosen=-1;if(current>=0)chosen=(current+(previous?matches.Count-1:1))%matches.Count;else{int anchor=previous?SelectedStart(map):SelectedEnd(map);int insertion=matches.BinarySearch(anchor);if(previous){chosen=insertion>=0?insertion-1:~insertion-1;if(chosen<0)chosen=matches.Count-1;}else{chosen=insertion>=0?insertion:~insertion;if(chosen>=matches.Count)chosen=0;}}searchBusy=true;try{SelectMatch(map,matches[chosen]);}finally{searchBusy=false;}RefreshSearchNow();}
     /* Finding 4: a file open or a save's mode conversion owns the document (documentOperationBusy).
        Writing a replacement into it then would race that operation, so both runs do nothing and the
        buttons read as disabled for the same window (RefreshReplaceButtonState, ApplySearchDisplay);
        the field's shortcuts call these same entries, so they are refused too. */
     void ReplaceOne(){if(documentOperationBusy)return;FlushDocumentChanges();if(!editing||QueryText().Length==0)return;SyncReplaceCompositionFromIme();string replaceWith=ReplacementText();var map=Map();var matches=Matches(map);if(matches.Count==0)return;int current=Current(map,matches);if(current<0){Find();map=Map();matches=Matches(map);current=Current(map,matches);if(current<0)return;}
+        /* Regex: $1, ${name}, $$ and $0 are read against this very match; the table-cell rule below then
+           treats the result exactly as typed text. */
+        replaceWith=RegexValueAt(map,matches[current],replaceWith);if(replaceWith==null)return;
         if(map.SourceOffsets!=null){
             /* The live session rewrites the visible match in the source, keeping the formatting of
                its first character (hidden markers the match covered are folded away, not left half
@@ -653,16 +823,16 @@ public partial class MainWindow {
             int at,length;SourceVisibleRange(map,matches[current],out at,out length);
             bool done=false;searchBusy=true;try{done=livePreview!=null&&LivePreviewAttached&&livePreview.ReplaceVisible(at,at+length,ReplacementForMatch(at,at+length,replaceWith));}finally{searchBusy=false;}
             if(!done){ShowStatusNotice(T("이 항목은 구조에 걸려 바꿀 수 없습니다"));return;}
-        }else{searchBusy=true;try{source.SelectedText=ReplacementForMatch(matches[current],matches[current]+QueryText().Length,replaceWith);}finally{searchBusy=false;}}
+        }else{searchBusy=true;try{source.SelectedText=ReplacementForMatch(matches[current],matches[current]+MatchLength(map,matches[current]),replaceWith);}finally{searchBusy=false;}}
         FlushDocumentChanges();Find();RefreshSearchNow();}
-    void ReplaceAll(){if(documentOperationBusy)return;FlushDocumentChanges();int queryLength=QueryText().Length;if(!editing||queryLength==0)return;SyncReplaceCompositionFromIme();string replaceWith=ReplacementText();var map=Map();var matches=Matches(map);if(matches.Count==0)return;int replaced=matches.Count;string skipped=null;/* Notepad keeps the reader's place: the run itself never scrolls or selects. The place is the first visible line, not a pixel number: the run rewrites every line, and the layout pass after it measured the old text (uifix s4: 721 px -> 769 px while the caret stayed put), so the line is put back below, at once and again after that pass. */int caretAtStart=source.CaretIndex;double scrollAtStart=source.VerticalOffset;ReplaceViewAnchor keepView=CaptureReplaceView(caretAtStart);searchBusy=true;try{
+    void ReplaceAll(){if(documentOperationBusy)return;FlushDocumentChanges();int queryLength=QueryText().Length;if(!editing||queryLength==0)return;SyncReplaceCompositionFromIme();string replaceWith=ReplacementText();var map=Map();var matches=Matches(map);if(matches.Count==0)return;bool valuesFailed;string[] values=RegexValues(map,matches,replaceWith,out valuesFailed);if(valuesFailed)return;int replaced=matches.Count;string skipped=null;/* Notepad keeps the reader's place: the run itself never scrolls or selects. The place is the first visible line, not a pixel number: the run rewrites every line, and the layout pass after it measured the old text (uifix s4: 721 px -> 769 px while the caret stayed put), so the line is put back below, at once and again after that pass. */int caretAtStart=source.CaretIndex;double scrollAtStart=source.VerticalOffset;ReplaceViewAnchor keepView=CaptureReplaceView(caretAtStart);searchBusy=true;try{
         if(map.SourceOffsets!=null){
             /* Visible text: every match is rewritten from the back, so each keeps the offsets of
                the ones before it, and one edit group makes the whole run a single undo step. A
                match that holds structure the rewrite cannot handle is left and counted. */
             int left=0;
             source.BeginChange();try{
-                for(int i=matches.Count-1;i>=0;i--){int at2,length2;SourceVisibleRange(map,matches[i],out at2,out length2);string value=ReplacementForMatch(at2,at2+length2,replaceWith);if(livePreview==null||!LivePreviewAttached||!livePreview.ReplaceVisible(at2,at2+length2,value))left++;}
+                for(int i=matches.Count-1;i>=0;i--){int at2,length2;SourceVisibleRange(map,matches[i],out at2,out length2);string value=ReplacementForMatch(at2,at2+length2,values==null?replaceWith:values[i]);if(livePreview==null||!LivePreviewAttached||!livePreview.ReplaceVisible(at2,at2+length2,value))left++;}
             }finally{source.EndChange();}
             replaced=matches.Count-left;if(left>0)skipped=left+T("개는 구조에 걸려 건너뛰었습니다.");
         }else{
@@ -685,11 +855,11 @@ public partial class MainWindow {
                it did for the whole-document Replace. Replacing each match as its own edit made the
                run several small within-line edits, and the history-stress probe then saw a later
                Backspace take an entry away (11-01, A/B build). */
-            int firstAt=matches[0],lastEnd=matches[matches.Count-1]+queryLength;
+            int firstAt=matches[0],lastEnd=matches[matches.Count-1]+LenAt(map,matches.Count-1,queryLength);
             string span=source.Document.GetText(firstAt,lastEnd-firstAt);
             var rewritten=new StringBuilder(span.Length+matches.Count*Math.Max(0,replaceWith.Length-queryLength));
             int copied=firstAt;
-            for(int i=0;i<matches.Count;i++){int at=matches[i];rewritten.Append(span,copied-firstAt,at-copied);string value=ReplacementForMatch(at,at+queryLength,replaceWith);rewritten.Append(value);copied=at+queryLength;if(anchorStart>=0&&at+queryLength<=anchorStart)shift+=LineBreakCount(value)-queryLines;}
+            for(int i=0;i<matches.Count;i++){int at=matches[i],len=LenAt(map,i,queryLength);rewritten.Append(span,copied-firstAt,at-copied);string value=ReplacementForMatch(at,at+len,values==null?replaceWith:values[i]);rewritten.Append(value);copied=at+len;/* a regex match may span lines itself */if(anchorStart>=0&&at+len<=anchorStart)shift+=LineBreakCount(value)-(map.Lengths==null?queryLines:LineBreakCount(span.Substring(at-firstAt,len)));}
             source.BeginChange();try{source.Document.Replace(firstAt,lastEnd-firstAt,rewritten.ToString());}finally{source.EndChange();}
             /* The run ends as a small within-line edit; when the caret comes back to where that edit
                ended, the next Backspace or typed character would fold into the replacement's undo
@@ -702,7 +872,7 @@ public partial class MainWindow {
            same height in the view (the run's own relayout and the caret's return can both move it).
            Each run above is one update group, so one Ctrl+Z takes the whole replacement back
            (UI bug hunt 4 item 1). */
-        int caret=caretAtStart;if(caret<0)caret=0;if(caret>source.Document.TextLength)caret=source.Document.TextLength;source.Select(caret,0);keepView.Caret=caret;keepView.Version=source.Document.Version;/* The line is the place; the pixel offset only answers a run whose line could not be measured. */if(!RestoreReplaceView(keepView))source.ScrollToVerticalOffset(scrollAtStart);
+        int caret=caretAtStart;if(caret<0)caret=0;if(caret>source.Document.TextLength)caret=source.Document.TextLength;source.Select(caret,0);{var focusKeep=FocusSurfaceOf(source);if(focusKeep!=null)focusKeep.KeepViewAfterBulkEdit();}keepView.Caret=caret;keepView.Version=source.Document.Version;/* The line is the place; the pixel offset only answers a run whose line could not be measured. */if(!RestoreReplaceView(keepView))source.ScrollToVerticalOffset(scrollAtStart);
         FlushDocumentChanges();RefreshSearchNow();ShowStatusNotice(replaced+T("개를 바꿨습니다.")+(skipped==null?"":" "+skipped));}
     /* The reader's place across a Replace All. A single synchronous ScrollToVerticalOffset put one
        pixel number back and the layout pass that followed moved the view on its own (uifix s4:
@@ -735,8 +905,11 @@ public partial class MainWindow {
             /* The line top's place on screen, as the reading anchor captures it: the rect already
                carries the 24 px page inset and the scroll, so a line that was scrolled off starts
                negative and the restore needs no arithmetic of its own. */
-            Rect rect=source.GetRectFromCharacterIndex(source.Document.GetLineByNumber(anchor.Line).Offset);
-            if(!rect.IsEmpty)anchor.Top=rect.Top;
+            /* The line's top, measured the way RestoreReplaceView measures it (LineTop plus the inset).
+               The character rect's top is the text's top, a few pixels below the line's in the live
+               view, so a restore that mixed the two ended that much off (uifix s4: -5 px -> -1 px). */
+            double lineTop=view.GetVisualPosition(new ICSharpCode.AvalonEdit.TextViewPosition(anchor.Line,1),ICSharpCode.AvalonEdit.Rendering.VisualYPosition.LineTop).Y;
+            if(!Double.IsNaN(lineTop)&&!Double.IsInfinity(lineTop))anchor.Top=lineTop+source.Padding.Top-source.VerticalOffset;
         }catch(InvalidOperationException){anchor.Line=0;}
         catch(ICSharpCode.AvalonEdit.Rendering.VisualLinesInvalidException){anchor.Line=0;}
         return anchor;
@@ -771,7 +944,11 @@ public partial class MainWindow {
                reader's wheel) in the idle gap, and pulling it back would be the same complaint this
                restore fixes. The first pass after the run is not judged this way: the replace itself
                can leave the view at the top until the line is put back. */
-            if(deferred&&first==number)return;
+            /* "Still the first line" is not "still at the same height": the pass before it can leave
+               the line a few pixels off (uifix s4: top -5 px -> -1 px, same line), because the lines
+               it scrolled past were measured only after it. The line has to be back where it was
+               seen, within a pixel. */
+            if(deferred&&first==number&&Math.Abs((top-editor.VerticalOffset)-wasTop)<=1.0)return;
             if(deferred&&(first<1||first<number-6||first>number+6))return;
             double target=top-wasTop;
             /* The 24 px page inset shrinks while the view scrolls through it (ApplySourceInset), so a

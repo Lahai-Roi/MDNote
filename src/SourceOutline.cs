@@ -326,6 +326,8 @@ namespace MDNote {public partial class MainWindow {
     void SelectOutlineOffset(int offset){
         if(source==null||source.Document==null)return;
         offset=Math.Max(0,Math.Min(offset,source.Document.TextLength));source.Focus();source.Select(offset,0);source.ScrollToLine(source.GetLineIndexFromCharacterIndex(offset));
+        // Typewriter mode: the heading goes to the middle, as a "#heading" jump does (FocusMode.cs).
+        var focusSurface=FocusSurfaceOf(source);if(focusSurface!=null)focusSurface.CentreAfterJump();
     }
     void JumpOutlineItem(TreeViewItem item){
         if(outlineRestoring||item==null||source==null||source.Document==null)return;

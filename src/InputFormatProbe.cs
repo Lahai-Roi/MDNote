@@ -154,8 +154,8 @@ internal static class InputFormatProbeRunner {
     // way a user does it, not from a loaded literal:
     //  1. Enter between "b" and "c" of a nested run closes every pair on the first line and opens
     //     the same pairs on the second, so no marker is drawn as text; one undo restores the line.
-    //  2. Typing at the drawn end of the run lands inside every pair (bold, size, colour) instead
-    //     of after the hidden closers; the inner edge behaves the same way.
+    //  2. Typing at the drawn end of the run lands inside every pair, bold included (11-05 user decision:
+    //     the toolbar shows the style lit there, so the typed text takes it; it replaced the 11-01 rule).
     static void VerifyOverlapFormatting(MainWindow window,Action<string,bool,string> check){
         Call(window,"SetLiveMode",false);Pump();
         string[] names={"bold","italic","strike","code","size","color","bold+size","bold+color","size+color","bold+size+color"};
@@ -262,6 +262,7 @@ internal static class InputFormatProbeRunner {
             editor.Select(closerStart+emphasis,0);Pump();
             Type(window,"f");
             string between=editor.Document.Text;
+            // A caret between the emphasis closer and a tag closer draws on the same spot: inside every pair.
             string betweenExpected=built.Insert(abc+3,"f");
             check("basic overlap typing just past the emphasis closer "+name,between==betweenExpected,
                 "text=["+Flat(between)+"], expected=["+Flat(betweenExpected)+"]");

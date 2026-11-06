@@ -616,9 +616,20 @@ internal static class MarkdownStructuralInput {
     // width, and Shift+Tab removes down to the parent's own indent. Only nearby lines are read
     // (NeighbourScan); a key press, not typing, so the short scan is fine.
     const int NeighbourScan = 64;
-    static string TabIndentUnit(TextDocument document, DocumentLine line, string text, LineSlots slots) {
+    // units: the unit each touched line already got in this key press (by line number). Lines of
+    // one selection move together, so a previous sibling that is itself being moved hands its own
+    // unit on instead of its marker width (otherwise "1. a / 1. b" selected became 2 and 3 spaces).
+    static string TabIndentUnit(TextDocument document, DocumentLine line, string text, LineSlots slots, Dictionary<int, string> units) {
+        string unit = ScanTabIndentUnit(document, line, text, slots, units);
+        units[line.LineNumber] = unit;
+        return unit;
+    }
+    static string ScanTabIndentUnit(TextDocument document, DocumentLine line, string text, LineSlots slots, Dictionary<int, string> units) {
         string unit = IndentUnit(text, slots.IndentEnd);
         if (unit != "  " || slots.QuoteEnd > slots.IndentEnd) return unit;
+        // The nearest indent of an item that stays under an earlier sibling: the level that
+        // sibling's children already use, which this item joins ("1. a / __1. x / 2. b").
+        int childIndent = -1;
         DocumentLine previous = line.PreviousLine;
         for (int i = 0; previous != null && i < NeighbourScan; i++, previous = previous.PreviousLine) {
             string other = LineText(document, previous);
@@ -626,7 +637,16 @@ internal static class MarkdownStructuralInput {
             LineSlots slot = ParseSlots(other);
             if (!slot.HasList || slot.QuoteEnd > slot.IndentEnd) return unit;
             if (slot.IndentEnd < slots.IndentEnd) return unit;
-            if (slot.IndentEnd > slots.IndentEnd) continue;
+            if (slot.IndentEnd > slots.IndentEnd) {
+                if (!units.ContainsKey(previous.LineNumber) && other[0] == ' ' && (childIndent < 0 || slot.IndentEnd < childIndent)) childIndent = slot.IndentEnd;
+                continue;
+            }
+            string moved;
+            if (units.TryGetValue(previous.LineNumber, out moved)) return moved;
+            if (childIndent > 0) {
+                int step = childIndent - slots.IndentEnd;
+                if (step >= 2 && step <= 8) return new string(' ', step);
+            }
             int width = slot.ListEnd - slot.ListStart;
             return width > 2 && width <= 8 ? new string(' ', width) : unit;
         }
@@ -642,6 +662,9 @@ internal static class MarkdownStructuralInput {
             LineSlots slot = ParseSlots(other);
             if (!slot.HasList || slot.QuoteEnd > slot.IndentEnd) return remove;
             if (slot.IndentEnd >= slots.IndentEnd) continue;
+            // A parent indented with a tab cannot be compared by character count with a line
+            // indented with spaces ("\t- a / __- b" are the same level), so the line-start rule stays.
+            if (other.IndexOf('\t', 0, slot.IndentEnd) >= 0) return remove;
             int lift = slots.IndentEnd - slot.IndentEnd;
             for (int k = 0; k < lift; k++) if (text[k] != ' ') return remove;
             return lift;
@@ -686,12 +709,13 @@ internal static class MarkdownStructuralInput {
         }
 
         CommandResult result = new CommandResult();
+        var units = new Dictionary<int, string>();
         for (int i = 0; i < lines.Count; i++) {
             DocumentLine line = lines[i];
             string text = LineText(document, line);
             LineSlots slots = ParseSlots(text);
             if (!shift) {
-                string unit = TabIndentUnit(document, line, text, slots);
+                string unit = TabIndentUnit(document, line, text, slots, units);
                 result.Add(line.Offset + slots.ListStart, 0, unit);
             } else if (slots.QuoteEnd > slots.IndentEnd) {
                 // A quoted item's indentation lives after the quote prefix, not at column 0.
@@ -723,9 +747,10 @@ internal static class MarkdownStructuralInput {
         for (int i = 0; i < touched.Count; i++) skip.Add(touched[i].LineNumber);
         // The prefix each moved line has after the move; a line the key leaves alone is absent.
         var moved = new Dictionary<int, string>();
+        var units = new Dictionary<int, string>();
         for (int i = 0; i < touched.Count; i++) {
             string newPrefix;
-            if (!MovedPrefix(document, touched[i], shift, out newPrefix)) continue;
+            if (!MovedPrefix(document, touched[i], shift, units, out newPrefix)) continue;
             moved[touched[i].LineNumber] = newPrefix;
         }
         if (moved.Count == 0) return;
@@ -780,14 +805,14 @@ internal static class MarkdownStructuralInput {
     }
     // The line's prefix at its new level, false when the key does not move it (a line without a
     // list marker, or a Shift+Tab whose indent unit is not there).
-    static bool MovedPrefix(TextDocument document, DocumentLine line, bool shift, out string newPrefix) {
+    static bool MovedPrefix(TextDocument document, DocumentLine line, bool shift, Dictionary<int, string> units, out string newPrefix) {
         newPrefix = null;
         string text = LineText(document, line);
         LineSlots slots = ParseSlots(text);
         if (!slots.HasList) return false;
         string oldPrefix = text.Substring(0, slots.ListStart);
         if (!shift) {
-            newPrefix = oldPrefix + TabIndentUnit(document, line, text, slots);
+            newPrefix = oldPrefix + TabIndentUnit(document, line, text, slots, units);
         } else if (slots.QuoteEnd > slots.IndentEnd) {
             int remove = QuotedListIndentLength(text, slots);
             if (remove <= 0 || slots.ListStart - remove < slots.QuoteEnd) return false;

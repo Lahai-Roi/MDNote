@@ -15,7 +15,7 @@ namespace MDNote {public partial class MainWindow {
     internal Func<Point> tablePickerPointerPosition;
     void CancelTablePickerClose(){if(tablePickerCloseTimer!=null)tablePickerCloseTimer.Stop();tablePickerOutsideSince=null;}
     static bool TablePickerContains(FrameworkElement element,Point point){if(element==null||!element.IsVisible||element.ActualWidth<=0||element.ActualHeight<=0)return false;try{return new Rect(element.PointToScreen(new Point()),element.PointToScreen(new Point(element.ActualWidth,element.ActualHeight))).Contains(point);}catch(InvalidOperationException){return false;}}
-    void PollTablePicker(DateTime now){var menu=tablePickerMenu;if(menu==null||!menu.IsOpen||!tablePickerHoverOpened){CancelTablePickerClose();return;}var cursor=System.Windows.Forms.Cursor.Position;Point point=tablePickerPointerPosition==null?new Point(cursor.X,cursor.Y):tablePickerPointerPosition();/* closes as soon as the pointer is outside the button, the grid and the gap between them (user, 2026-10-24) */if(TablePickerContains(tableButton,point)||TablePickerContains(menu,point)||TablePickerBridge(tableButton,menu,point)){tablePickerOutsideSince=null;return;}menu.IsOpen=false;}
+    void PollTablePicker(DateTime now){var menu=tablePickerMenu;if(menu==null||!menu.IsOpen||!tablePickerHoverOpened){CancelTablePickerClose();return;}System.Drawing.Point cursor;try{cursor=System.Windows.Forms.Cursor.Position;}catch(System.ComponentModel.Win32Exception){return;}/* GetCursorPos fails while the input desktop is switched (UAC, lock, RDP) */Point point=tablePickerPointerPosition==null?new Point(cursor.X,cursor.Y):tablePickerPointerPosition();/* closes as soon as the pointer is outside the button, the grid and the gap between them (user, 2026-10-24) */if(TablePickerContains(tableButton,point)||TablePickerContains(menu,point)||TablePickerBridge(tableButton,menu,point)){tablePickerOutsideSince=null;return;}menu.IsOpen=false;}
     static bool TablePickerBridge(FrameworkElement button,FrameworkElement menu,Point point){if(button==null||menu==null||!button.IsVisible||!menu.IsVisible)return false;try{Point a=button.PointToScreen(new Point()),b=button.PointToScreen(new Point(button.ActualWidth,button.ActualHeight)),c=menu.PointToScreen(new Point()),d=menu.PointToScreen(new Point(menu.ActualWidth,menu.ActualHeight));double top=Math.Min(b.Y,d.Y),bottom=Math.Max(a.Y,c.Y);if(bottom<top){double swap=top;top=bottom;bottom=swap;}var band=new Rect(new Point(Math.Min(a.X,c.X),top-1),new Point(Math.Max(b.X,d.X),bottom+1));return band.Contains(point);}catch(InvalidOperationException){return false;}}
     void QueueTablePickerClose(){if(!tablePickerHoverOpened)return;if(tablePickerCloseTimer==null){tablePickerCloseTimer=new System.Windows.Threading.DispatcherTimer {Interval=TimeSpan.FromMilliseconds(40)};tablePickerCloseTimer.Tick+=delegate{PollTablePicker(DateTime.UtcNow);};}tablePickerCloseTimer.Start();}
     /* X29: Esc must win over the button's hover-open. Closing a menu hands the mouse back, WPF re-enters
@@ -198,7 +198,10 @@ namespace MDNote {public partial class MainWindow {
             label=(TextBlock)caption.Children[1];listCaptionIcon=iconName;listButton.Content=caption;
         } else label.Text=text;
         caption.Width=icon+slot+extra;
-        listButton.Padding=new Thickness(0,0,Math.Max(0,4-extra),0);/* panel + this padding = icon + slot + 4, the old outer width */
+        /* 2.2.0: the caption now keeps the full 4 px gap to the arrow in every language. Taking `extra` out of this padding
+           left only ~2 px between the painted text and the arrow ("List" touched it); the button grows by `extra`
+           (2-3 px) instead, as the heading slot does, so the width follows the text. */
+        listButton.Padding=new Thickness(0,0,4,0);
         /* b58: the screen-reader name follows the UI language, exactly like the visible label this
            caption is rebuilt with in ApplyLanguage. */
         System.Windows.Automation.AutomationProperties.SetName(caption,T(numberedList?"번호 목록":"글머리 기호 목록"));

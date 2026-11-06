@@ -1,7 +1,13 @@
 ﻿using System;using System.IO;using System.Text;using System.Windows;using System.Windows.Controls;
 namespace MDNote {public partial class MainWindow {
 static bool FormatMismatch(string filename,bool textMode){string extension=Path.GetExtension(filename).ToLowerInvariant();return (extension==".txt"&&!textMode)||((extension==".md"||extension==".markdown")&&textMode);}
-static Encoding StrictEncoding(int index){switch(index){case 1:return new UTF8Encoding(true,true);case 2:return new UnicodeEncoding(false,true,true);case 4:return new UnicodeEncoding(true,true,true);case 3:return Encoding.GetEncoding(949,EncoderFallback.ExceptionFallback,DecoderFallback.ExceptionFallback);default:return new UTF8Encoding(false,true);}}
+// 2.2.0: "ANSI" is the legacy code page of this Windows, as Notepad reads it: CP949 on Korean, GBK
+// on Simplified Chinese, Big5 on Traditional Chinese, Shift-JIS on Japanese, Windows-1252 on English
+// and Western European, 1251 on Russian, and so on (before 2.2.0 it was CP949 everywhere). With the
+// "Beta: UTF-8 worldwide" option the system page is 65001, which the UTF-8 attempt already covered,
+// so the UI language's legacy page is used instead.
+internal static int AnsiCodePage(){int page;try{page=Encoding.Default.CodePage;if(page==65001||page<=0)page=System.Globalization.CultureInfo.CurrentUICulture.TextInfo.ANSICodePage;}catch(Exception){page=1252;}return page==65001||page<=0?1252:page;}
+static Encoding StrictEncoding(int index){switch(index){case 1:return new UTF8Encoding(true,true);case 2:return new UnicodeEncoding(false,true,true);case 4:return new UnicodeEncoding(true,true,true);case 3:return Encoding.GetEncoding(AnsiCodePage(),EncoderFallback.ExceptionFallback,DecoderFallback.ExceptionFallback);default:return new UTF8Encoding(false,true);}}
 // The Save As combo's "keep" entry names the document's own encoding. It is spelled with the same
 // words the Open-with-encoding menu uses, so a Shift-JIS/GBK/Big5/CP1252/UTF-32 document shows a
 // name the user already saw there instead of an index the fixed entries cannot express.

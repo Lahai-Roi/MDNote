@@ -364,11 +364,20 @@ internal static class LivePreviewProbe {
             // One more frame: the reference-definition scan is queued by the parse (never run
             // inside it) and lands here before the shortcut link is read.
             Pump(editor);
-            bool lBasic = false, lLive = false;
+            bool lBasic = false, lLive = false, lazyAligned = true;
+            string lazyDetail = "";
             foreach (bool hide in new[] { true, false }) {
                 settings.HideMarkers = hide;
                 session.Update(settings);
                 Pump(editor);
+                // 11-05: the lazy continuation line starts right of the quote bar, at the same x as
+                // the quote line's own first glyph (it used to start at x 0, under the bar), and a
+                // caret at its offset 0 names that spot.
+                VisualLine quoteVisual = editor.TextArea.TextView.GetVisualLine(8), lazyVisual = editor.TextArea.TextView.GetVisualLine(9);
+                double quoteX = quoteVisual == null ? -1 : CellX(quoteVisual, 2), lazyX = lazyVisual == null ? -2 : CellX(lazyVisual, 0);
+                bool aligned = quoteX > 1 && Math.Abs(quoteX - lazyX) <= 1;
+                lazyAligned &= aligned;
+                lazyDetail += (hide ? " basic" : " live") + ": quote x=" + quoteX.ToString("0.##") + ", lazy x=" + lazyX.ToString("0.##");
                 MarkdownLivePreview.LineInfo common1 = session.Info(editor.Document.GetLineByNumber(1));
                 MarkdownLivePreview.LineInfo common2 = session.Info(editor.Document.GetLineByNumber(2));
                 MarkdownLivePreview.LineInfo common4 = session.Info(editor.Document.GetLineByNumber(4));
@@ -398,6 +407,7 @@ internal static class LivePreviewProbe {
             Pump(editor);
             Check(ref all, report, "l CommonMark blocks and links (basic and live)", lBasic && lLive,
                 "basic=" + lBasic + ", live=" + lLive);
+            Check(ref all, report, "l lazy quote line starts at the quote line's first glyph x (basic and live)", lazyAligned, lazyDetail);
 
             // m. An ATX heading may be indented at most three columns (the basic view's
             // MarkdownPlainText.AtxHeading): four spaces make ordinary paragraph text, and inside
@@ -586,6 +596,14 @@ internal static class LivePreviewProbe {
                 "first=" + anchorDuplicate + "/" + anchorFirst.Offset + " second=" + anchorJump + "/" + anchorSecond.Offset +
                 " setext=" + anchorSetextFound + "/" + anchorSetext.Offset + " list=" + anchorListFound + "/" + anchorList.Offset +
                 " quote=" + anchorQuoteFound + "/" + anchorQuote.Offset + " caret line=" + editor.TextArea.Caret.Line);
+
+            // 11-05: Enter after an opening fence writes the block (NoRevealProbe.FenceEnterCases).
+            bool fenceHide = settings.HideMarkers;
+            settings.HideMarkers = false; session.Update(settings); Pump(editor);
+            NoRevealProbe.FenceEnterCases(ref all, report, editor, session, "live");
+            settings.HideMarkers = true; session.Update(settings); Pump(editor);
+            NoRevealProbe.FenceEnterCases(ref all, report, editor, session, "basic");
+            settings.HideMarkers = fenceHide; session.Update(settings); Pump(editor);
         } catch (Exception ex) {
             exit = 2;
             all = false;
@@ -1383,6 +1401,143 @@ internal static class NoRevealProbe {
         Check(ref all, report, "typing inside a cell writes no newline",
             editor.Document.Text == Below.Replace("| c1 |", "| c1x |") && editor.Document.LineCount == 8,
             "text=[" + Flat(editor.Document.Text) + "] lines=" + editor.Document.LineCount);
+    }
+
+    // The Enter key as a key press: the tunnelling PreviewKeyDown reaches the editor before the
+    // TextArea; a key nobody handled becomes AvalonEdit's own newline text input.
+    static bool FenceProbeEnter(SourceEditor editor) {
+        PresentationSource source = PresentationSource.FromVisual(editor);
+        var args = new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.Enter);
+        args.RoutedEvent = Keyboard.PreviewKeyDownEvent;
+        editor.TextArea.RaiseEvent(args);
+        if (!args.Handled) editor.TextArea.PerformTextInput("\n");
+        Pump(editor);
+        return args.Handled;
+    }
+    static void FenceProbeType(SourceEditor editor, string text) {
+        for (int i = 0; i < text.Length; i++) { editor.TextArea.PerformTextInput(text.Substring(i, 1)); Pump(editor); }
+    }
+    static int FenceProbeCount(string text, string fence) {
+        int count = 0;
+        foreach (string line in text.Replace("\r", "").Split('\n')) if (line.TrimStart(' ').StartsWith(fence, StringComparison.Ordinal)) count++;
+        return count;
+    }
+    // 11-05 user decision: typing "```" (and the info string) writes nothing extra and keeps the
+    // caret on that line in both views; Enter at the end of an unclosed opening fence writes the
+    // empty body line and the closing fence in one update (one undo), Backspace in that empty
+    // block takes them back.
+    // Run from --livepreview-probe (no clipboard there), with both view modes.
+    internal static void FenceEnterCases(ref bool all, StringBuilder report, SourceEditor editor, MarkdownLivePreview.Session session, string mode) {
+        report.Append("\n## fence Enter (").Append(mode).Append(")\n");
+        DocumentHistory history = new DocumentHistory();
+        bool record = true;
+        EventHandler<DocumentChangeEventArgs> recorder = delegate(object sender, DocumentChangeEventArgs change) {
+            if (record) history.RecordDelta(change.Offset, change.RemovedText.Text, change.InsertedText.Text);
+        };
+        editor.ContentDelta += recorder;
+        try {
+            string p = mode + ": ";
+            editor.Text = "hello\n"; Pump(editor);
+            editor.Select(editor.Document.TextLength, 0); Pump(editor);
+            FenceProbeType(editor, "```");
+            DocumentLine fenceLine = editor.Document.GetLineByNumber(2);
+            Check(ref all, report, p + "typed ``` writes nothing extra and keeps the caret on its line",
+                editor.Document.Text == "hello\n```" && editor.CaretOffset == 9 && session.Raw(fenceLine),
+                "text=[" + Flat(editor.Document.Text) + "] caret=" + editor.CaretOffset + " raw=" + session.Raw(fenceLine));
+            FenceProbeType(editor, "python");
+            Check(ref all, report, p + "the info string goes on the fence line",
+                editor.Document.Text == "hello\n```python" && editor.CaretOffset == 15,
+                "text=[" + Flat(editor.Document.Text) + "] caret=" + editor.CaretOffset);
+            bool handled = FenceProbeEnter(editor);
+            Check(ref all, report, p + "Enter after ```python writes the empty block, caret on the body",
+                handled && editor.Document.Text == "hello\n```python\n\n```" && editor.CaretOffset == 16,
+                "handled=" + handled + " text=[" + Flat(editor.Document.Text) + "] caret=" + editor.CaretOffset);
+            FenceProbeType(editor, "abc");
+            Check(ref all, report, p + "text typed next lands inside the block",
+                editor.Document.Text == "hello\n```python\nabc\n```" && editor.CaretOffset == 19,
+                "text=[" + Flat(editor.Document.Text) + "] caret=" + editor.CaretOffset);
+
+            // One undo gives back exactly the opening line, caret at its end.
+            editor.Text = "hello\n```python"; Pump(editor);
+            editor.Select(editor.Document.TextLength, 0); Pump(editor);
+            history.Clear();
+            FenceProbeEnter(editor);
+            record = false;
+            bool undone = history.ApplySource(false, editor);
+            record = true;
+            Pump(editor);
+            Check(ref all, report, p + "one undo restores the ```python line, caret at its end",
+                undone && editor.Document.Text == "hello\n```python" && editor.CaretOffset == 15,
+                "undone=" + undone + " text=[" + Flat(editor.Document.Text) + "] caret=" + editor.CaretOffset);
+
+            editor.Text = "~~~"; Pump(editor);
+            editor.Select(3, 0); Pump(editor);
+            FenceProbeEnter(editor);
+            Check(ref all, report, p + "Enter after ~~~ writes a tilde block",
+                editor.Document.Text == "~~~\n\n~~~" && editor.CaretOffset == 4,
+                "text=[" + Flat(editor.Document.Text) + "] caret=" + editor.CaretOffset);
+
+            editor.Text = "a\r\n  ````js"; Pump(editor);
+            editor.Select(editor.Document.TextLength, 0); Pump(editor);
+            FenceProbeEnter(editor);
+            Check(ref all, report, p + "Enter keeps the indent, run length and CRLF",
+                editor.Document.Text == "a\r\n  ````js\r\n\r\n  ````" && editor.CaretOffset == 13,
+                "text=[" + Flat(editor.Document.Text) + "] caret=" + editor.CaretOffset);
+
+            // The newline text path (an IME's Enter) takes the same rule.
+            editor.Text = "```"; Pump(editor);
+            editor.Select(3, 0); Pump(editor);
+            editor.TextArea.PerformTextInput("\n"); Pump(editor);
+            Check(ref all, report, p + "a newline text input after ``` writes the block",
+                editor.Document.Text == "```\n\n```" && editor.CaretOffset == 4,
+                "text=[" + Flat(editor.Document.Text) + "] caret=" + editor.CaretOffset);
+
+            // A closing fence below: Enter is a plain line break (no second closer).
+            // (The basic view moves a caret off a closed, hidden opening fence, so only the live
+            // view can put the caret there.)
+            editor.Text = "x\n```py\nmid\n```\nend"; Pump(editor);
+            editor.Select(editor.Document.GetLineByNumber(2).EndOffset, 0); Pump(editor);
+            int before = FenceProbeCount(editor.Document.Text, "```");
+            int lines = editor.Document.LineCount;
+            if (mode == "live") {
+                handled = FenceProbeEnter(editor);
+                Check(ref all, report, p + "Enter on an opening fence closed below is a plain newline",
+                    !handled && FenceProbeCount(editor.Document.Text, "```") == before && editor.Document.LineCount == lines + 1,
+                    "handled=" + handled + " text=[" + Flat(editor.Document.Text) + "]");
+            }
+
+            // Inside a code block a "```js" line is code: Enter is a plain newline there.
+            editor.Text = "```\n```js\n```"; Pump(editor);
+            editor.Select(editor.Document.GetLineByNumber(2).EndOffset, 0); Pump(editor);
+            before = FenceProbeCount(editor.Document.Text, "```");
+            handled = FenceProbeEnter(editor);
+            Check(ref all, report, p + "Enter on ``` inside a code block is a plain newline",
+                !handled && FenceProbeCount(editor.Document.Text, "```") == before && editor.Document.LineCount == 4,
+                "handled=" + handled + " text=[" + Flat(editor.Document.Text) + "]");
+
+            // A backtick in the info string is not a fence (CommonMark): no block.
+            editor.Text = "```a`b"; Pump(editor);
+            editor.Select(editor.Document.TextLength, 0); Pump(editor);
+            handled = FenceProbeEnter(editor);
+            Check(ref all, report, p + "Enter after ```a`b writes no block", !handled && editor.Document.Text.Replace("\r", "") == "```a`b\n",
+                "handled=" + handled + " text=[" + Flat(editor.Document.Text) + "]");
+
+            // Backspace on the empty body takes back what Enter wrote, in one step.
+            editor.Text = "hello\n```python"; Pump(editor);
+            editor.Select(editor.Document.TextLength, 0); Pump(editor);
+            FenceProbeEnter(editor);
+            history.Clear();
+            Press(editor, EditingCommands.Backspace);
+            Check(ref all, report, p + "Backspace in the empty block returns to ```python",
+                editor.Document.Text == "hello\n```python" && editor.CaretOffset == 15 && session.Raw(editor.Document.GetLineByNumber(2)),
+                "text=[" + Flat(editor.Document.Text) + "] caret=" + editor.CaretOffset);
+            Press(editor, EditingCommands.Backspace);
+            Check(ref all, report, p + "the next Backspace deletes one info character",
+                editor.Document.Text == "hello\n```pytho" && editor.CaretOffset == 14,
+                "text=[" + Flat(editor.Document.Text) + "] caret=" + editor.CaretOffset);
+        } finally {
+            editor.ContentDelta -= recorder;
+        }
     }
 
     const BindingFlags ProbeMembers = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;

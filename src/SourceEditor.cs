@@ -3,6 +3,14 @@ namespace MDNote {
 // Compatibility surface keeps editor commands independent of the text engine.
 // AvalonEdit lays out only visible lines and maintains its line tree incrementally.
 internal sealed class SourceEditor:TextEditor {
+// 2.2.0: on some Windows 10 machines (appinn #18, Win10 IoT LTSC 21H2) loading AvalonEdit's
+// TextAreaAutomationPeer throws TypeLoadException ("GetSelection has no implementation") the first
+// time the editor takes focus while a UI Automation client listens, which closed the app at start.
+// Keep the app alive there with a plain element peer; everywhere else the full text peer is used.
+// The base call sits in its own non-inlined method: inlined, the peer type would be loaded while this
+// override is JIT-compiled, before its try block exists (web Argon review 2026-11-06).
+sealed class SafeAutomationTextArea:ICSharpCode.AvalonEdit.Editing.TextArea {static bool textPeerBroken;protected override System.Windows.Automation.Peers.AutomationPeer OnCreateAutomationPeer(){if(!textPeerBroken){try{return CreateTextPeer();}catch(Exception){textPeerBroken=true;}}return new System.Windows.Automation.Peers.FrameworkElementAutomationPeer(this);}
+[System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]System.Windows.Automation.Peers.AutomationPeer CreateTextPeer(){return base.OnCreateAutomationPeer();}}
 internal double MeasureMilliseconds;internal int MeasureCalls;protected override Size MeasureOverride(Size available){var watch=System.Diagnostics.Stopwatch.StartNew();try{return base.MeasureOverride(available);}finally{MeasureCalls++;MeasureMilliseconds+=watch.Elapsed.TotalMilliseconds;}}
 internal event EventHandler SelectionChanged;internal event EventHandler<DocumentChangeEventArgs> ContentDelta;TextDocument trackedDocument;void TrackDocument(){if(trackedDocument!=null){trackedDocument.Changed-=DocumentDelta;trackedDocument.Changing-=DocumentChanging;trackedDocument.UpdateStarted-=DocumentUpdateStarted;trackedDocument.UpdateFinished-=DocumentUpdateFinished;}trackedDocument=Document;if(trackedDocument!=null){trackedDocument.UndoStack.SizeLimit=0;trackedDocument.Changed+=DocumentDelta;trackedDocument.Changing+=DocumentChanging;trackedDocument.UpdateStarted+=DocumentUpdateStarted;trackedDocument.UpdateFinished+=DocumentUpdateFinished;}lastSelectionStart=-2;lastSelectionLength=lastCaret=-1;typingCaret=-1;typingBroken=false;typedKeyArmed=false;typing=false;}void DocumentDelta(object sender,DocumentChangeEventArgs args){if(ContentDelta!=null)ContentDelta(this,args);}
 // The app history groups one user action into one undo step. TextDocument.RunUpdate is exactly
@@ -86,7 +94,9 @@ void DragCopying(object sender,System.Windows.DataObjectCopyingEventArgs e){
 // per logical change, not twice for the same state.
 int lastSelectionStart=-2,lastSelectionLength=-1,lastCaret=-1;
 void NotifySelectionChanged(){int start=SelectionStart,length=SelectionLength,caret=CaretIndex;if(start==lastSelectionStart&&length==lastSelectionLength&&caret==lastCaret)return;lastSelectionStart=start;lastSelectionLength=length;lastCaret=caret;if(!typing&&typingCaret>=0&&caret!=typingCaret)typingBroken=true;if(SelectionChanged!=null)SelectionChanged(this,EventArgs.Empty);}
-internal SourceEditor(){DocumentChanged+=delegate{TrackDocument();};TrackDocument();Options.EnableHyperlinks=false;Options.EnableEmailHyperlinks=false;Options.AllowScrollBelowDocument=false;Options.ConvertTabsToSpaces=false;TextArea.SelectionChanged+=delegate{NotifySelectionChanged();};TextArea.Caret.PositionChanged+=delegate{NotifySelectionChanged();ScheduleCompositionFont();CaretPositionChangedForCommit(null,EventArgs.Empty);};TextArea.TextView.VisualLinesChanged+=delegate{ScheduleCompositionFont();};TextArea.TextEntering+=ImeResultEntering;TextArea.TextEntering+=TypingEntering;TextArea.TextEntered+=TypingEntered;TextArea.TextEntering+=CompositionCommitEntering;TextArea.AddHandler(System.Windows.Input.TextCompositionManager.TextInputEvent,new System.Windows.Input.TextCompositionEventHandler(TypingInputEnded),true);System.Windows.Input.CommandManager.AddPreviewExecutedHandler(TextArea,TypingCommandExecuting);TextArea.PreviewLostKeyboardFocus+=ImePreviewLostKeyboardFocus;TextArea.LostKeyboardFocus+=TypingFocusLost;TextArea.LostKeyboardFocus+=delegate{Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,new Action(delegate{RefreshCompositionState("lost focus");}));};System.Windows.DataObject.AddCopyingHandler(TextArea,DragCopying);TextArea.GotKeyboardFocus+=delegate{HookIme();if(imeSource!=null)QueueCompositionFont(imeSource.Handle);ScheduleCompositionFont();};TextArea.PreviewMouseDown+=ImeMouseDown;/* A surface that leaves the tree (tab switch or close) must keep no window-wide mouse handler and no dispatcher timer: both hold this editor, and the window outlives its tabs. The tab is reused, so Loaded re-hooks the IME and re-arms the composition timeout. */Loaded+=delegate{HookIme();if(imeParked!=null)ArmImeTimeout();};Unloaded+=delegate{StopPressWatch();DisarmButtonCaret();if(imeTimer!=null)imeTimer.Stop();UnhookIme();};PresentationSource.AddSourceChangedHandler(this,ImeSourceChanged);if(ImeTrace.Enabled)TraceCompositionEvents();}
+/* The live session's toolbar answer changed without the caret or selection moving (the pending closing-edge space): ask the toolbar to read the caret again. */
+internal void NotifyToolsChanged(){if(SelectionChanged!=null)SelectionChanged(this,EventArgs.Empty);}
+internal SourceEditor():base(new SafeAutomationTextArea()){DocumentChanged+=delegate{TrackDocument();};TrackDocument();Options.EnableHyperlinks=false;Options.EnableEmailHyperlinks=false;Options.AllowScrollBelowDocument=false;Options.ConvertTabsToSpaces=false;TextArea.SelectionChanged+=delegate{NotifySelectionChanged();};TextArea.Caret.PositionChanged+=delegate{NotifySelectionChanged();ScheduleCompositionFont();CaretPositionChangedForCommit(null,EventArgs.Empty);};TextArea.TextView.VisualLinesChanged+=delegate{ScheduleCompositionFont();};TextArea.TextEntering+=ImeResultEntering;TextArea.TextEntering+=TypingEntering;TextArea.TextEntered+=TypingEntered;TextArea.TextEntering+=CompositionCommitEntering;TextArea.AddHandler(System.Windows.Input.TextCompositionManager.TextInputEvent,new System.Windows.Input.TextCompositionEventHandler(TypingInputEnded),true);System.Windows.Input.CommandManager.AddPreviewExecutedHandler(TextArea,TypingCommandExecuting);TextArea.PreviewLostKeyboardFocus+=ImePreviewLostKeyboardFocus;TextArea.LostKeyboardFocus+=TypingFocusLost;TextArea.LostKeyboardFocus+=delegate{Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,new Action(delegate{RefreshCompositionState("lost focus");}));};System.Windows.DataObject.AddCopyingHandler(TextArea,DragCopying);TextArea.GotKeyboardFocus+=delegate{HookIme();if(imeSource!=null)QueueCompositionFont(imeSource.Handle);ScheduleCompositionFont();};TextArea.PreviewMouseDown+=ImeMouseDown;/* A surface that leaves the tree (tab switch or close) must keep no window-wide mouse handler and no dispatcher timer: both hold this editor, and the window outlives its tabs. The tab is reused, so Loaded re-hooks the IME and re-arms the composition timeout. */Loaded+=delegate{HookIme();if(imeParked!=null)ArmImeTimeout();};Unloaded+=delegate{StopPressWatch();DisarmButtonCaret();if(imeTimer!=null)imeTimer.Stop();UnhookIme();};PresentationSource.AddSourceChangedHandler(this,ImeSourceChanged);if(ImeTrace.Enabled)TraceCompositionEvents();}
 // MDNOTE_IME_TRACE: this surface composes in the IMM32 window (WPF's input method is suspended),
 // so WPF raises no TextInputStart/Update and TextInput only when a commit reaches the TextArea.
 // Attach on the focused element itself, again for already-handled events, and log the
@@ -437,8 +447,30 @@ void ImeResultEntering(object sender,System.Windows.Input.TextCompositionEventAr
 // hook on every keyboard focus. Ours is registered once before the first focus, so it stays older
 // than AvalonEdit's hook and runs after it, overwriting the oversized font that hook just set.
 void ImeSourceChanged(object sender,SourceChangedEventArgs e){HookIme();}
-void HookIme(){if(!imeFocusHooked){imeFocusHooked=true;TextArea.GotKeyboardFocus+=delegate{ScheduleImeUi();};TextArea.LostKeyboardFocus+=delegate{SetImeInline(null);ScheduleImeUi();};TextArea.PreviewKeyDown+=ImeHanjaKeyDown;}var window=PresentationSource.FromVisual(TextArea) as System.Windows.Interop.HwndSource;if(Object.ReferenceEquals(window,imeSource))return;if(imeSource!=null){try{imeSource.RemoveHook(ImeProc);}catch(Exception){}}imeSource=window;if(window!=null)window.AddHook(ImeProc);}
-void UnhookIme(){SetImeInline(null);if(imeSource==null)return;try{imeSource.RemoveHook(ImeProc);}catch(Exception){}imeSource=null;}
+// 2.2.0 (user 11-06: after dragging a picture in from a folder only English could be typed): a drop
+// gives the editor keyboard focus while the window is still in the background, so AvalonEdit binds
+// its IME context (and resets the text-services focus) for an inactive window; clicking the window
+// later restores the same focus without a new GotKeyboardFocus, and the IME stayed unbound. Focus
+// taken while inactive is noted and the context is rebuilt once the window is active again.
+bool imeRebindPending;Window imeActivationWindow;
+// Only then: an ordinary trip to another program and back keeps the context untouched, as in 2.1.0 (11-06 user: after switching
+// windows with the caret in the editor, the rebuild left the Korean IME stuck in English until the layout was switched away and back).
+// The drop handlers call NoteInactiveImeFocus themselves, so a drag from Explorer is still rebuilt.
+// A request is kept for one activation within 30 s of the drop; a drop into the active window clears an older one.
+int imeRebindTick;
+internal void NoteInactiveImeFocus(){var window=HookImeActivation();imeRebindPending=window!=null&&!window.IsActive;if(imeRebindPending)imeRebindTick=Environment.TickCount;}
+Window HookImeActivation(){var window=Window.GetWindow(this);if(window==null||Object.ReferenceEquals(window,imeActivationWindow))return window;if(imeActivationWindow!=null){imeActivationWindow.Activated-=ImeWindowActivated;imeActivationWindow.Deactivated-=ImeWindowDeactivated;}imeActivationWindow=window;window.Activated+=ImeWindowActivated;window.Deactivated+=ImeWindowDeactivated;return window;}
+void ImeWindowDeactivated(object sender,EventArgs e){}
+// Activated arrives before WPF restores keyboard focus, so the rebuild waits for the input queue.
+void ImeWindowActivated(object sender,EventArgs e){if(imeRebindPending&&unchecked(Environment.TickCount-imeRebindTick)>30000)imeRebindPending=false;if(imeRebindPending)Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input,new Action(RebindImeAfterActivation));}
+void RebindImeAfterActivation(){if(!imeRebindPending)return;imeRebindPending=false;if(!TextArea.IsKeyboardFocused||!Options.EnableImeSupport||imeActivationWindow==null||!imeActivationWindow.IsActive)return;
+/* Rebuilt through a real focus round trip (TextEditor forwards its own focus back to the TextArea), so AvalonEdit's ImeSupport runs its
+   ordinary OnLostKeyboardFocus/OnGotKeyboardFocus. Toggling Options.EnableImeSupport instead flips InputMethod.SetIsInputMethodSuspended
+   on the focused element, which left the Korean TSF IME locked in English with 한/영 dead (11-06 user, launch path; a review traced it). */
+System.Windows.Input.Keyboard.Focus(this);if(!TextArea.IsKeyboardFocused)TextArea.Focus();}
+void HookIme(){if(!imeFocusHooked){imeFocusHooked=true;/* No NoteInactiveImeFocus here (11-06 user: at launch the editor takes focus before the window is active, and the rebuild that followed left the Korean IME in English); only the drop handlers note it. */
+TextArea.GotKeyboardFocus+=delegate{ScheduleImeUi();};Loaded+=delegate{HookImeActivation();};TextArea.LostKeyboardFocus+=delegate{SetImeInline(null);ScheduleImeUi();};TextArea.PreviewKeyDown+=ImeHanjaKeyDown;}var window=PresentationSource.FromVisual(TextArea) as System.Windows.Interop.HwndSource;if(Object.ReferenceEquals(window,imeSource))return;if(imeSource!=null){try{imeSource.RemoveHook(ImeProc);}catch(Exception){}}imeSource=window;if(window!=null)window.AddHook(ImeProc);}
+void UnhookIme(){SetImeInline(null);if(imeActivationWindow!=null){imeActivationWindow.Activated-=ImeWindowActivated;imeActivationWindow.Deactivated-=ImeWindowDeactivated;imeActivationWindow=null;}imeRebindPending=false;if(Object.ReferenceEquals(imeCompOwner,this)){HideCompositionBoxes(false);imeCompOwner=null;}if(imeSource==null)return;try{imeSource.RemoveHook(ImeProc);}catch(Exception){}imeSource=null;}
 // TextEditor.OnGotKeyboardFocus forwards focus to the TextArea, but Keyboard.Focus only reaches an
 // element that is connected to a presentation source: the template (which hosts the TextArea) is
 // first applied when the editor is measured. A source surface that stayed Collapsed in the basic
@@ -782,7 +814,11 @@ if(msg==0x010D||msg==0x010F)imeLastCompositionTick=Environment.TickCount;
 // A form parked while the Korean layout was active outlives a switch to ja/zh, whose IMEs then open at the screen's top-left: bring it back to the caret first.
 if(msg==0x010D&&TextArea.IsKeyboardFocused&&!KoreanLayout())UnparkImeForm(hwnd);
 // Korean: the form is parked only while a composition runs (see IMN_SETCOMPOSITIONWINDOW below), from its first message on.
+// A new composition: a box judged clamped (imeBoxUnmovable) during the last one may be parked normally again.
+if(msg==0x010D){imeBoxMoved=IntPtr.Zero;imeBoxUnmovable=IntPtr.Zero;}
 if(msg==0x010D&&TextArea.IsKeyboardFocused&&KoreanLayout()){WatchImeBoxes();imeHanjaAtCaret=false;ParkImeForm(hwnd);}
+// ja/zh: the form stays at the caret (the candidate list is placed from it); only the IME's own copy of the string is made invisible (HideCompositionBoxes).
+if(msg==0x010D){bool hideBoxes=TextArea.IsKeyboardFocused&&!KoreanLayout()&&CjkLayout();if(hideBoxes)imeCompOwner=this;if(hideBoxes||Object.ReferenceEquals(imeCompOwner,this))HideCompositionBoxes(hideBoxes);}
 // Typing over a selection: the selected text goes as the composition starts (as in Notepad), not when the first syllable lands.
 if(msg==0x010D&&TextArea.IsKeyboardFocused&&!TextArea.Selection.IsEmpty&&CjkLayout())TextArea.Selection.ReplaceSelectionWithText(String.Empty);
 if(msg==0x010D){imeComposing=true;imeCompositionEnded=false;imeResultDelivered=false;imeCapturedText=null;imeCapturedConsumed=0;ForgetCommitTypingState();BeginImeSession();StartPressWatch();ApplyCompositionFont(hwnd);QueueCompositionFont(hwnd);}
@@ -891,13 +927,15 @@ ImeFont CompositionFont(){double size=FontSize;Typeface face=new Typeface(FontFa
 // as a visual-only zero-document-length element at the caret (underlined, editor font/color,
 // pushes the following text right). The committed result still arrives through WM_IME_CHAR ->
 // TextInput as before, so undo grouping, dirty state and the composition guards are unchanged.
-// ja/zh keep the OS window (clause highlighting and conversion UI stay native).
+// ja/zh are drawn inline too (clause attributes from GCS_COMPATTR); their candidate lists stay native (HideCompositionBoxes).
 ImeInlineGenerator imeInline;bool imeFocusHooked;
 [System.Runtime.InteropServices.DllImport("user32.dll")]static extern IntPtr GetKeyboardLayout(uint thread);
 [System.Runtime.InteropServices.DllImport("user32.dll",EntryPoint="DefWindowProcW")]static extern IntPtr DefWindowProcW(IntPtr hWnd,int msg,IntPtr wParam,IntPtr lParam);
-static bool KoreanLayout(){return (GetKeyboardLayout(0).ToInt64()&0x3FF)==0x12;}
+// Probe seam (ImeClickHangProbe): a test that has no Korean layout on its thread asks for the Korean rules.
+internal static Func<bool> KoreanLayoutOverride;internal static int ProbeParkCalls;
+static bool KoreanLayout(){var forced=KoreanLayoutOverride;if(forced!=null&&forced())return true;return (GetKeyboardLayout(0).ToInt64()&0x3FF)==0x12;}
 // ko (0x12), ja (0x11), zh (0x04): the OS composition window is hidden and the string is drawn inline.
-static bool CjkLayout(){long lang=GetKeyboardLayout(0).ToInt64()&0x3FF;return lang==0x12||lang==0x11||lang==0x04;}
+static bool CjkLayout(){if(KoreanLayout())return true;long lang=GetKeyboardLayout(0).ToInt64()&0x3FF;return lang==0x12||lang==0x11||lang==0x04;}
 byte[] imeAttrs;int imeCursor=-1;bool imeCandidateQueued;
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]struct ImeRect{public int Left;public int Top;public int Right;public int Bottom;}
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]struct ImeCandForm{public int dwIndex;public int dwStyle;public ImeScreenPoint ptCurrentPos;public ImeRect rcArea;}
@@ -908,7 +946,7 @@ byte[] imeAttrs;int imeCursor=-1;bool imeCandidateQueued;
 // The last on-screen form before it was parked: AvalonEdit's caret placement, given back when the composition ends.
 static ImeCompForm imeCaretForm;static bool imeCaretFormSaved;
 // True when the form was somewhere else and has just been moved off-screen (CFS_FORCE_POSITION at -32000); false when it already was, or no context.
-static bool ParkImeForm(IntPtr hwnd){IntPtr context=ImmGetContext(hwnd);if(context==IntPtr.Zero)return false;try{ImeCompForm form;bool read=ImmGetCompositionWindow(context,out form);if(read&&form.dwStyle==0x0020&&form.ptCurrentPos.X==-32000)return false;if(read&&form.ptCurrentPos.X!=-32000){imeCaretForm=form;imeCaretFormSaved=true;}imeParkedWindow=hwnd;form=new ImeCompForm();form.dwStyle=0x0020;form.ptCurrentPos.X=-32000;form.ptCurrentPos.Y=-32000;form.rcArea.Left=-32000;form.rcArea.Top=-32000;form.rcArea.Right=-31999;form.rcArea.Bottom=-31999;ImmSetCompositionWindow(context,ref form);if(ImeTrace.Enabled)ImeTrace.Write("ime form parked");return true;}finally{ImmReleaseContext(hwnd,context);}}
+static bool ParkImeForm(IntPtr hwnd){ProbeParkCalls++;IntPtr context=ImmGetContext(hwnd);if(context==IntPtr.Zero)return false;try{ImeCompForm form;bool read=ImmGetCompositionWindow(context,out form);if(read&&form.dwStyle==0x0020&&form.ptCurrentPos.X==-32000)return false;if(read&&form.ptCurrentPos.X!=-32000){imeCaretForm=form;imeCaretFormSaved=true;}imeParkedWindow=hwnd;form=new ImeCompForm();form.dwStyle=0x0020;form.ptCurrentPos.X=-32000;form.ptCurrentPos.Y=-32000;form.rcArea.Left=-32000;form.rcArea.Top=-32000;form.rcArea.Right=-31999;form.rcArea.Bottom=-31999;ImmSetCompositionWindow(context,ref form);if(ImeTrace.Enabled)ImeTrace.Write("ime form parked");return true;}finally{ImmReleaseContext(hwnd,context);}}
 // The Korean MS-IME also ignores ISC_SHOWUICOMPOSITIONWINDOW and clamps the parked form to the monitor's corner, where its composition box
 // (a CiceroUIWndFrame top-level window of this thread, about one syllable in size) then shows. A small CiceroUIWndFrame exactly at a monitor
 // corner is that box and nothing else (no IME window belongs there), so it is made fully transparent (layered, alpha 0) while it stays there
@@ -943,24 +981,59 @@ static void RestoreParkedForm(){
     finally{ImmReleaseContext(imeParkedWindow,context);}
 }
 static void WatchImeBoxes(){
-    if(imeBoxEvents==null){
-        imeBoxEvents=OnImeBoxEvent;int pid=GetCurrentProcessId(),tid=GetCurrentThreadId();
-        // EVENT_OBJECT_DESTROY..EVENT_OBJECT_SHOW and EVENT_OBJECT_LOCATIONCHANGE, out of context (delivered through this thread's message loop).
-        SetWinEventHook(0x8001,0x8002,IntPtr.Zero,imeBoxEvents,pid,tid,0);SetWinEventHook(0x800B,0x800B,IntPtr.Zero,imeBoxEvents,pid,tid,0);
-    }
+    WatchImeBoxEvents();
     // A box left at the corner by an earlier composition goes transparent before the IME shows it again.
     EnumThreadWindows(GetCurrentThreadId(),delegate(IntPtr window,IntPtr unused){CheckImeBox(window);return true;},IntPtr.Zero);
 }
-static void OnImeBoxEvent(IntPtr hook,int eventType,IntPtr hwnd,int idObject,int idChild,int thread,int time){
+static void WatchImeBoxEvents(){
+    if(imeBoxEvents!=null)return;
+    imeBoxEvents=OnImeBoxEvent;int pid=GetCurrentProcessId(),tid=GetCurrentThreadId();
+    // EVENT_OBJECT_DESTROY..EVENT_OBJECT_SHOW and EVENT_OBJECT_LOCATIONCHANGE, out of context (delivered through this thread's message loop).
+    SetWinEventHook(0x8001,0x8002,IntPtr.Zero,imeBoxEvents,pid,tid,0);SetWinEventHook(0x800B,0x800B,IntPtr.Zero,imeBoxEvents,pid,tid,0);
+}
+// A managed exception escaping a native WinEvent callback ends the process, so the work is guarded here.
+static void OnImeBoxEvent(IntPtr hook,int eventType,IntPtr hwnd,int idObject,int idChild,int thread,int time){try{ImeBoxEvent(eventType,hwnd,idObject,idChild);}catch(Exception){}}
+static void ImeBoxEvent(int eventType,IntPtr hwnd,int idObject,int idChild){
     if(hwnd==IntPtr.Zero||idObject!=0||idChild!=0)return; /* OBJID_WINDOW / CHILDID_SELF only: caret moves arrive as OBJID_CARET */
-    if(eventType==0x8001){imeBoxesHidden.Remove(hwnd);return;}
+    if(eventType==0x8001){imeBoxesHidden.Remove(hwnd);imeCompBoxesHidden.Remove(hwnd);if(hwnd==imeBoxUnmovable)imeBoxUnmovable=IntPtr.Zero;if(hwnd==imeBoxMoved)imeBoxMoved=IntPtr.Zero;return;}
     CheckImeBox(hwnd);
 }
+// The Japanese IME and MS Pinyin ignore ISC_SHOWUICOMPOSITIONWINDOW too: the text framework's IMM bridge (msctfime) draws their string in
+// "MSCTFIME Composition" windows of this thread at the form (the caret, right after our inline run), so the string showed twice. While this
+// editor composes ja/zh those windows are made fully transparent and click-through (layered, alpha 0), and they stay where the IME puts
+// them, so the candidate and prediction lists keep opening from the form. Restored when the editor loses focus or the layout turns Korean.
+// Every editor of the window hooks the same HwndSource, so only the editor that started hiding (imeCompOwner) may restore: an unfocused
+// tab's hook or late ApplyImeUi must not show the box again under the focused editor (web Argon review 2026-11-04).
+static bool imeHideCompBoxes;static SourceEditor imeCompOwner;
+static readonly System.Collections.Generic.Dictionary<IntPtr,int> imeCompBoxesHidden=new System.Collections.Generic.Dictionary<IntPtr,int>();
+static void HideCompositionBoxes(bool hide){
+    if(hide==imeHideCompBoxes&&(!hide||imeBoxEvents!=null))return;
+    imeHideCompBoxes=hide;if(hide)WatchImeBoxEvents();else if(imeCompBoxesHidden.Count==0)return;
+    EnumThreadWindows(GetCurrentThreadId(),delegate(IntPtr window,IntPtr unused){CheckCompositionBox(window,null);return true;},IntPtr.Zero);
+}
+static void CheckCompositionBox(IntPtr hwnd,string cls){
+    if(cls==null){var name=new System.Text.StringBuilder(64);if(GetClassNameW(hwnd,name,name.Capacity)==0)return;cls=name.ToString();}
+    if(cls!="MSCTFIME Composition")return;
+    const int want=0x80000|0x20; /* WS_EX_LAYERED | WS_EX_TRANSPARENT */
+    bool hidden=imeCompBoxesHidden.ContainsKey(hwnd);int ex=GetWindowLongW(hwnd,-20); /* GWL_EXSTYLE */
+    if(imeHideCompBoxes){
+        /* The alpha is set again on every check: the IME may reset it while the style bits stay. */
+        if(!hidden)imeCompBoxesHidden[hwnd]=want&~ex;
+        if((ex&want)!=want)SetWindowLongW(hwnd,-20,ex|want);
+        bool clear=SetLayeredWindowAttributes(hwnd,0,0,2); /* LWA_ALPHA */
+        if(ImeTrace.Enabled)ImeTrace.Write("ime comp box hidden 0x"+hwnd.ToInt64().ToString("X")+" exstyle=0x"+ex.ToString("X")+" alpha="+clear);
+    }else if(hidden){
+        int added=imeCompBoxesHidden[hwnd];imeCompBoxesHidden.Remove(hwnd);SetLayeredWindowAttributes(hwnd,0,255,2);
+        if(added!=0)SetWindowLongW(hwnd,-20,GetWindowLongW(hwnd,-20)&~added);
+        if(ImeTrace.Enabled)ImeTrace.Write("ime comp box restored 0x"+hwnd.ToInt64().ToString("X"));
+    }
+}
+static IntPtr imeBoxMoved,imeBoxUnmovable;static int imeBoxMovedTick;
 static void CheckImeBox(IntPtr hwnd){
     var name=new System.Text.StringBuilder(64);if(GetClassNameW(hwnd,name,name.Capacity)==0)return;
+    string cls=name.ToString();if(cls=="MSCTFIME Composition"){CheckCompositionBox(hwnd,cls);return;}
     ImeRect r;if(!GetWindowRect(hwnd,out r))return;
     int width=r.Right-r.Left,height=r.Bottom-r.Top;bool small=width>0&&height>0&&width<=320&&height<=120;bool hidden=imeBoxesHidden.ContainsKey(hwnd);
-    string cls=name.ToString();
     if((cls!="CiceroUIWndFrame"||!small)&&!hidden)return;
     // Once seen at a corner the box stays transparent wherever the IME moves it next: between compositions the form follows the caret,
     // and the next composition may show the box there before its first message parks the form again. A window grown into a list is given back.
@@ -972,7 +1045,9 @@ static void CheckImeBox(IntPtr hwnd){
         if((ex&want)!=want)SetWindowLongW(hwnd,-20,ex|want);
         bool clear=SetLayeredWindowAttributes(hwnd,0,0,2); /* LWA_ALPHA */
         // A window the IME draws with UpdateLayeredWindow refuses LWA_ALPHA: put it off-screen instead (no clamping for SetWindowPos).
-        if(!clear){SetWindowLongW(hwnd,-20,(ex|want)&~imeBoxesHidden[hwnd]);imeBoxesHidden.Remove(hwnd);if(AtMonitorCorner(hwnd,r))SetWindowPos(hwnd,IntPtr.Zero,-32000,-32000,0,0,0x0015);} /* SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE */
+        // At most one move per box every 500 ms: an IME that clamps the box back to the corner would otherwise answer every move with a location event that moves it again.
+        // A box back at the corner within 500 ms of being moved is clamped there by its IME: it is not moved again (until it is destroyed), so moves and location events cannot ping-pong.
+        if(!clear){SetWindowLongW(hwnd,-20,(ex|want)&~imeBoxesHidden[hwnd]);imeBoxesHidden.Remove(hwnd);if(AtMonitorCorner(hwnd,r)&&hwnd!=imeBoxUnmovable){if(hwnd!=imeBoxMoved||unchecked(Environment.TickCount-imeBoxMovedTick)>500){imeBoxMoved=hwnd;imeBoxMovedTick=Environment.TickCount;SetWindowPos(hwnd,IntPtr.Zero,-32000,-32000,0,0,0x0015);}else imeBoxUnmovable=hwnd;}} /* SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE */
         if(ImeTrace.Enabled&&!hidden)ImeTrace.Write("ime box hidden rect="+r.Left+","+r.Top+","+r.Right+","+r.Bottom+" exstyle=0x"+ex.ToString("X")+" alpha="+clear);
     }else if(hidden&&width>0&&height>0){ /* grown past a box: a list now; a box shrunk to nothing while hidden stays tracked */
         int added=imeBoxesHidden[hwnd];imeBoxesHidden.Remove(hwnd);SetLayeredWindowAttributes(hwnd,0,255,2);
@@ -1024,12 +1099,12 @@ static bool SameAttrs(byte[] a,byte[] b){
     return true;
 }
 void SetImeInline(string text,byte[] attrs,int cursor){
-    if(String.IsNullOrEmpty(text)){if(imeInline==null||imeInline.Text==null)return;imeInline.Text=null;imeInline.Attrs=null;RedrawImeInline();return;}
+    if(String.IsNullOrEmpty(text)){if(imeInline==null||imeInline.Text==null)return;imeInline.Text=null;imeInline.Attrs=null;imeStaleRedrawOffset=-1;imeRefusedOffset=-1;imeCaretSets=0;imeStaleRedraws=0;RedrawImeInline();return;}
     if(imeInline==null)imeInline=new ImeInlineGenerator(this);
     // First in the list: a generator that builds a non-empty element at the caret offset (live preview markers) would otherwise stop the pass before ours.
     var generators=TextArea.TextView.ElementGenerators;if(generators.IndexOf(imeInline)!=0){generators.Remove(imeInline);generators.Insert(0,imeInline);}
-    if(String.Equals(imeInline.Text,text)&&SameAttrs(imeInline.Attrs,attrs)){CaretAfterImeInline();return;}
-    imeInline.Text=text;imeInline.Attrs=attrs;imeInline.Cursor=cursor;RedrawImeInline();CaretAfterImeInline();
+    if(String.Equals(imeInline.Text,text)&&SameAttrs(imeInline.Attrs,attrs)&&imeInline.Cursor==cursor){CaretAfterImeInline();return;}
+    imeStaleRedrawOffset=-1;imeRefusedOffset=-1;imeCaretSets=0;imeStaleRedraws=0;imeInline.Text=text;imeInline.Attrs=attrs;imeInline.Cursor=cursor;RedrawImeInline();CaretAfterImeInline();
     if(!imeCandidateQueued){imeCandidateQueued=true;Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,new Action(PlaceImeCandidate));}
 }
 void SetImeInline(string text){SetImeInline(text,null,-1);}
@@ -1063,7 +1138,23 @@ void PlaceImeCandidate(){
 // Notepad. Only the visual column changes; every caret handler compares offsets, so none of them sees a move.
 // Other caret work (live preview snapping, a rebuilt visual line) puts the caret back on the stop before the string, so the
 // stop is re-taken whenever the caret moves or the lines are rebuilt while a composition is drawn.
-bool imeCaretHooked,imeCaretPlacing;
+bool imeCaretHooked,imeCaretPlacing;int imeStaleRedrawOffset=-1,imeRefusedOffset=-1,imeRefusedColumn=-1;
+// Document offset of the last ImeInlineElement built (ImeInlineGenerator.ConstructElement), -1 when none is drawn. A build at another offset
+// (the caret moved to a line that was not built yet) keeps the previous one in imeOrphanOffset until that line is rebuilt once.
+int imeDrawnOffset=-1;readonly System.Collections.Generic.List<int> imeOrphanOffsets=new System.Collections.Generic.List<int>();
+// Safety net per composition string: caret placements and stale rebuilds this code may start before the string changes again. Any cycle through
+// other caret or layout code (live preview snapping between two offsets) ends here; the worst case is the caret drawn left of the string.
+// Counted per 500 ms window: a runaway cycle runs thousands of times a second and stops at the limit; scrolling or clicking at human speed never reaches it.
+int imeCaretSets,imeStaleRedraws,imeRetryWindowTick;const int ImeRetryLimit=8;
+bool ImeRetryWindowOpen(){if(unchecked(Environment.TickCount-imeRetryWindowTick)>500){imeRetryWindowTick=Environment.TickCount;imeCaretSets=0;imeStaleRedraws=0;}return true;}
+internal void NoteImeDrawn(int offset){if(imeDrawnOffset>=0&&imeDrawnOffset!=offset&&imeOrphanOffsets.Count<16&&!imeOrphanOffsets.Contains(imeDrawnOffset))imeOrphanOffsets.Add(imeDrawnOffset);imeDrawnOffset=offset;}
+void RedrawOrphans(DocumentLine caretLine){for(int i=imeOrphanOffsets.Count-1;i>=0;i--)if(RedrawLeftLine(imeOrphanOffsets[i],caretLine)<0)imeOrphanOffsets.RemoveAt(i);}
+// Rebuilds the line of a recorded offset when it is not the caret's line, and forgets the record (once per record, so typing stays O(edited line)).
+int RedrawLeftLine(int offset,DocumentLine caretLine){
+    var document=Document;if(offset<0||document==null||offset>document.TextLength)return -1;
+    DocumentLine left=document.GetLineByOffset(offset);if(left==caretLine)return offset;
+    TextArea.TextView.Redraw(left);return -1;
+}
 void CaretAfterImeInline(){
     var gen=imeInline;var document=Document;if(gen==null||gen.Text==null||document==null||!TextArea.IsKeyboardFocused||imeCaretPlacing)return;
     imeCaretPlacing=true;try{CaretAfterImeInlineCore(gen,document);}finally{imeCaretPlacing=false;}
@@ -1071,25 +1162,49 @@ void CaretAfterImeInline(){
 void CaretAfterImeInlineCore(ImeInlineGenerator gen,TextDocument document){
     if(!imeCaretHooked){imeCaretHooked=true;
         TextArea.Caret.PositionChanged+=delegate{if(imeInline!=null&&imeInline.Text!=null)CaretAfterImeInline();};
-        TextArea.TextView.VisualLinesChanged+=delegate{if(imeInline!=null&&imeInline.Text!=null)Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Render,new Action(CaretAfterImeInline));};}
+        /* A rebuilt line may now accept a column the old build refused: one new try per rebuild (setting the column itself rebuilds nothing). */
+        /* Normal, queued after the caret's own ShowInternal for this rebuild and before the frame is rendered: at Render the caret was drawn left of the string for a frame. */
+        TextArea.TextView.VisualLinesChanged+=delegate{if(imeInline!=null&&imeInline.Text!=null){imeRefusedOffset=-1;Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Normal,new Action(CaretAfterImeInline));}};}
     try{
         var caret=TextArea.Caret;var line=TextArea.TextView.GetOrConstructVisualLine(document.GetLineByNumber(caret.Line));
-        foreach(var element in line.Elements){if(!(element is ImeInlineElement))continue;int after=element.VisualColumn+element.VisualLength;
-            if(caret.VisualColumn!=after){caret.Position=new TextViewPosition(caret.Line,caret.Column,after);if(ImeTrace.Enabled)ImeTrace.Write("ime caret after vc="+after+" now="+caret.VisualColumn);}break;}
+        /* No element on the caret's line (the caret moved to another line while composing): rebuild once for this offset, which also clears the old line. */
+        /* Building the caret's line just now may have moved the record off the line that still shows the old string. */
+        ImeRetryWindowOpen();
+        if(imeOrphanOffsets.Count>0)RedrawOrphans(document.GetLineByNumber(caret.Line));
+        bool drawnHere=false;foreach(var element in line.Elements)if(element is ImeInlineElement){drawnHere=true;break;}
+        if(!drawnHere&&imeStaleRedrawOffset!=caret.Offset&&imeStaleRedraws<ImeRetryLimit){imeStaleRedrawOffset=caret.Offset;imeStaleRedraws++;RedrawImeInline();}
+        foreach(var element in line.Elements){if(!(element is ImeInlineElement))continue;int after=element.VisualColumn+element.VisualLength;int at=caret.Offset;
+            /* The element sits where the caret was when the line was built. A caret that moved since (a click while composing) leaves it stale: its "after" column then
+               names another offset, Caret.RevalidateVisualColumn resets the caret to its own stop, that reset re-enters this method and sets the column again, and every round
+               re-posts Caret.ShowInternal at Normal priority, so the line rebuild (Render) that would replace the element never runs (freeze, live view, 2.1.0). Nothing is
+               set for a stale element; the line is rebuilt once per caret offset so the string follows the caret. */
+            if(((ImeInlineElement)element).BuiltOffset!=at){if(imeStaleRedrawOffset!=at&&imeStaleRedraws<ImeRetryLimit){imeStaleRedrawOffset=at;imeStaleRedraws++;RedrawImeInline();}if(ImeTrace.Enabled)ImeTrace.Write("ime caret after skipped: stale element vc="+after+" caret="+at);break;}
+            /* A column the caret logic refused once (Revalidate moved the caret off it) is not asked for again for this caret offset. */
+            if(imeRefusedOffset==at&&imeRefusedColumn==after)break;
+            if(caret.VisualColumn!=after&&imeCaretSets<ImeRetryLimit){imeCaretSets++;caret.Position=new TextViewPosition(caret.Line,caret.Column,after);if(caret.VisualColumn!=after){imeRefusedOffset=at;imeRefusedColumn=after;}if(ImeTrace.Enabled)ImeTrace.Write("ime caret after vc="+after+" now="+caret.VisualColumn);}break;}
     }catch(Exception ex){if(ImeTrace.Enabled)ImeTrace.Write("ime caret after failed "+ex.GetType().Name+": "+ex.Message);}
 }
 void RedrawImeInline(){
     var document=Document;if(document==null)return;
+    System.Collections.Generic.List<VisualLine> ended=null;
+    if(imeInline==null||imeInline.Text==null){var view=TextArea.TextView;if(view.VisualLinesValid){ended=new System.Collections.Generic.List<VisualLine>();foreach(var visual in view.VisualLines){foreach(var element in visual.Elements)if(element is ImeInlineElement){ended.Add(visual);break;}}}}
     DocumentLine line=document.GetLineByOffset(Math.Max(0,Math.Min(CaretOffset,document.TextLength)));
     TextArea.TextView.Redraw(line);
+    // The lines the string was drawn on before, when the caret has left them (a click or caret move to another line while composing): rebuilt once, so no copy stays behind.
+    imeDrawnOffset=RedrawLeftLine(imeDrawnOffset,line);RedrawOrphans(line);
+    if(imeInline==null||imeInline.Text==null){imeDrawnOffset=-1;imeOrphanOffsets.Clear();
+        /* Composition over: any built line on screen that still carries a string is rebuilt; once per composition, not per update (collected before the first Redraw above may invalidate the list). */
+        if(ended!=null)foreach(var visual in ended)TextArea.TextView.Redraw(visual);}
 }
 // Hides (Korean layout, editor focused) or restores the IME's own composition window by re-sending
 // WM_IME_SETCONTEXT to the default window procedure with ISC_SHOWUICOMPOSITIONWINDOW cleared or set.
 void ApplyImeUi(){
-    var window=imeSource;if(window==null)return;
     bool hide=TextArea.IsKeyboardFocused&&CjkLayout();
-    DefWindowProcW(window.Handle,0x0281,new IntPtr(1),new IntPtr(unchecked(hide?(int)0x4000000F:(int)0xC000000F)));
+    /* Restored before the source check: an editor that was unhooked (view switch, tab close) must not leave the box hidden. */
+    if((!hide||KoreanLayout())&&(hide||imeCompOwner==null||Object.ReferenceEquals(imeCompOwner,this))){HideCompositionBoxes(false);imeCompOwner=null;}
     if(!hide)SetImeInline(null);
+    var window=imeSource;if(window==null)return;
+    DefWindowProcW(window.Handle,0x0281,new IntPtr(1),new IntPtr(unchecked(hide?(int)0x4000000F:(int)0xC000000F)));
 }
 void ScheduleImeUi(){Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,new Action(ApplyImeUi));}
 internal Brush CaretBrush {get{return TextArea.Caret.CaretBrush;}set{TextArea.Caret.CaretBrush=value;}}
@@ -1129,7 +1244,8 @@ internal sealed class ImeInlineGenerator:VisualLineElementGenerator{
         Width=line.WidthIncludingTrailingWhitespace;
         int target=-1;if(attrs!=null)for(int i=0;i<attrs.Length&&i<text.Length;i++)if(attrs[i]==1||attrs[i]==3){target=i;break;}
         TargetX=target<=0?0:line.GetDistanceFromCharacterHit(new System.Windows.Media.TextFormatting.CharacterHit(target,0));
-        return new ImeInlineElement(line);
+        owner.NoteImeDrawn(offset);
+        return new ImeInlineElement(line,offset);
     }
 }
 // Run properties of the inline composition string: the editor's own font and colour, plus the clause styling.
@@ -1177,7 +1293,9 @@ internal sealed class ImeInlineParagraph:System.Windows.Media.TextFormatting.Tex
     public override double Indent{get{return 0;}}
 }
 internal sealed class ImeInlineElement:FormattedTextElement{
-    internal ImeInlineElement(System.Windows.Media.TextFormatting.TextLine line):base(line,0){}
+    // The document offset the element was built for (the caret offset of that line build).
+    internal readonly int BuiltOffset;
+    internal ImeInlineElement(System.Windows.Media.TextFormatting.TextLine line,int builtOffset):base(line,0){BuiltOffset=builtOffset;}
     // No caret stop inside the provisional text; the caret stays where the document says it is.
     public override int GetNextCaretPosition(int visualColumn,System.Windows.Documents.LogicalDirection direction,CaretPositioningMode mode){return -1;}
 }

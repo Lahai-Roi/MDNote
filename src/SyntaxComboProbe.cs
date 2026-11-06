@@ -512,18 +512,19 @@ internal static class SyntaxComboProbe {
             "text=[" + source.Document.Text + "]");
 
         // 26. A space typed on the pair's closing edge goes outside it; the pair stays valid.
-        // Inside an enclosing tag it stays inside the tag (the tag accepts whitespace).
+        // 11-05 rule B: the caret on the outer edge of a closed run inside a size span is past the
+        // span too, so the space leaves the span (it used to stay inside the tag at 20 px).
         Load(window, "<span style=\"font-size:20px\">**abc**</span>");
         source = Source(window);
         line = source.Document.GetLineByNumber(1);
         source.Select(line.EndOffset, 0);
         Pump();
         TextInput(window, " ");
-        string spaced = "<span style=\"font-size:20px\">**abc** </span>";
-        int spaceAt = spaced.IndexOf(" </span", StringComparison.Ordinal);
-        check("a space typed at the end of bold inside a span stays inside the span",
-            source.Document.Text == spaced && spaceAt > 0 && Math.Abs(DrawnSize(window, spaceAt) - 20) < .01,
-            "text=[" + source.Document.Text + "], drawn=" + N(spaceAt > 0 ? DrawnSize(window, spaceAt) : -1));
+        string spaced = "<span style=\"font-size:20px\">**abc**</span> ";
+        int spaceAt = spaced.Length;
+        check("a space typed at the end of bold inside a span leaves the span",
+            source.Document.Text == spaced && Math.Abs(DrawnSize(window, spaceAt) - 20) > .01,
+            "text=[" + source.Document.Text + "], drawn after the space=" + N(DrawnSize(window, spaceAt)));
         Load(window, "**ab**");
         source = Source(window);
         line = source.Document.GetLineByNumber(1);
@@ -534,8 +535,22 @@ internal static class SyntaxComboProbe {
         check("a space typed at the end of bold stays outside the pair",
             source.Document.Text == "**ab** " && visible == "ab " && MarkupFault(visible) == null,
             "text=[" + source.Document.Text + "], visible=[" + visible + "]");
+        // 11-05 rule B: the space after an already CLOSED bold is plain, and so is the character
+        // after it; the toolbar shows bold off at the caret after that space.
+        bool boldAfterSpace = ToolbarBold(window);
         TextInput(window, "c");
-        check("the character after that space takes the space back inside with it",
+        check("the character after a space typed after closed bold is plain",
+            source.Document.Text == "**ab** c" && Flags(Session(window), source.Document.GetLineByNumber(1), "c") == "----" && !boldAfterSpace,
+            "text=[" + source.Document.Text + "], flags=" + Flags(Session(window), source.Document.GetLineByNumber(1), "c") + ", boldAfterSpace=" + boldAfterSpace);
+        // Rule C: the same keys with the caret inside the pair (the run being typed) take the
+        // space back inside with the next character.
+        Load(window, "**ab**");
+        source = Source(window);
+        source.Select(source.Document.GetLineByNumber(1).EndOffset - 2, 0);
+        Pump();
+        TextInput(window, " ");
+        TextInput(window, "c");
+        check("the character after a space typed inside the pair takes the space back inside with it",
             source.Document.Text == "**ab c**" && Flags(Session(window), source.Document.GetLineByNumber(1), "c") == "B---",
             "text=[" + source.Document.Text + "], flags=" + Flags(Session(window), source.Document.GetLineByNumber(1), "c"));
 
@@ -581,16 +596,40 @@ internal static class SyntaxComboProbe {
     // character takes the whitespace back inside with itself. The whole phrase therefore keeps
     // the style and no marker is ever drawn as text.
     static void ContinueCases(MainWindow window, Action<string,bool,string> check) {
-        Phrase(window, check, "bold", "**bold**", "**bold alpha beta gamma**", "B---", 0);
-        Phrase(window, check, "italic", "*bold*", "*bold alpha beta gamma*", "-I--", 0);
-        Phrase(window, check, "strike", "~~bold~~", "~~bold alpha beta gamma~~", "--S-", 0);
+        // Bold: the run being typed (caret inside the pair, rule C) keeps the phrase styled; the
+        // same keys after an already closed bold (caret on the outer edge, rule B, 11-05) leave
+        // the space and the phrase plain.
+        Phrase(window, check, "bold", "**bold**", "**bold alpha beta gamma**", "B---", 0, 2);
+        Phrase(window, check, "closed bold", "**bold**", "**bold** alpha beta gamma", "----", 0, 0);
+        // 11-05 rule B for every inline style: italic, strike, bold+italic and the size/colour
+        // tags behave like bold (the old italic/strike cases kept the phrase inside the closed run).
+        Phrase(window, check, "italic", "*bold*", "*bold alpha beta gamma*", "-I--", 0, 1);
+        Phrase(window, check, "closed italic", "*bold*", "*bold* alpha beta gamma", "----", 0, 0);
+        Phrase(window, check, "strike", "~~bold~~", "~~bold alpha beta gamma~~", "--S-", 0, 2);
+        Phrase(window, check, "closed strike", "~~bold~~", "~~bold~~ alpha beta gamma", "----", 0, 0);
+        Phrase(window, check, "bold italic", "***bold***", "***bold alpha beta gamma***", "BI--", 0, 3);
+        Phrase(window, check, "closed bold italic", "***bold***", "***bold*** alpha beta gamma", "----", 0, 0);
         Phrase(window, check, "bold in a 20 px span", "<span style=\"font-size:20px\">**bold**</span>",
-            "<span style=\"font-size:20px\">**bold alpha beta gamma**</span>", "B---", 20);
-        // Two spaces typed on the edge are one gap; the next word moves both inside.
+            "<span style=\"font-size:20px\">**bold alpha beta gamma**</span>", "B---", 20, 9);
+        // The caret on the outer edge of a closed bold inside a size span is past the span too, so the
+        // space and the phrase leave both (before 11-05 the phrase stayed inside the span at 20 px).
+        Phrase(window, check, "closed bold in a 20 px span", "<span style=\"font-size:20px\">**bold**</span>",
+            "<span style=\"font-size:20px\">**bold**</span> alpha beta gamma", "----", 0, 0);
+        Phrase(window, check, "a 20 px span", "<span style=\"font-size:20px\">bold</span>",
+            "<span style=\"font-size:20px\">bold alpha beta gamma</span>", "----", 20, 7);
+        Phrase(window, check, "closed 20 px span", "<span style=\"font-size:20px\">bold</span>",
+            "<span style=\"font-size:20px\">bold</span> alpha beta gamma", "----", 0, 0);
+        Phrase(window, check, "colour tag", "<font color=\"blue\">bold</font>",
+            "<font color=\"blue\">bold alpha beta gamma</font>", "----", 0, 7);
+        Phrase(window, check, "closed colour tag", "<font color=\"blue\">bold</font>",
+            "<font color=\"blue\">bold</font> alpha beta gamma", "----", 0, 0);
+        ClosedRunTypingCases(window, check);
+        PendingToolbarCases(window, check);
+        // Two spaces typed inside the pair are one gap; the next word moves both inside.
         Load(window, "**alpha**");
         var source = Source(window);
         var line = source.Document.GetLineByNumber(1);
-        source.Select(line.EndOffset, 0);
+        source.Select(line.EndOffset - 2, 0);
         Pump();
         TextInput(window, " ");
         TextInput(window, " ");
@@ -631,13 +670,15 @@ internal static class SyntaxComboProbe {
     // the source, the drawn style and that one Ctrl+Z leaves a source the view still draws as
     // markup (Redo brings the phrase back): the space's move is one history entry, never a half
     // marker.
-    static void Phrase(MainWindow window, Action<string,bool,string> check, string name, string seed, string expected, string flags, double size) {
+    static void Phrase(MainWindow window, Action<string,bool,string> check, string name, string seed, string expected, string flags, double size, int caretBack) {
         const string phrase = "alpha beta gamma";
         Load(window, seed);
         SourceEditor source = Source(window);
         DocumentLine line = source.Document.GetLineByNumber(1);
         string seedVisible = VisibleLine(Session(window), line);
-        source.Select(line.EndOffset, 0);
+        // caretBack 0: the caret on the closed run's outer edge; more: inside the pair (the run
+        // being typed), that many source characters before the line's end.
+        source.Select(line.EndOffset - caretBack, 0);
         Pump();
         // The space first (it is the character the user types between the words), then the phrase
         // one character per input.
@@ -666,6 +707,115 @@ internal static class SyntaxComboProbe {
         check("one undo and redo around " + name + " keep real markup",
             sane && source.Document.Text == expectedText,
             "undone=[" + undone + "], sane=" + sane + ", redone=[" + source.Document.Text + "]");
+    }
+
+    // ---------------------------------------------------------------- typing follows the toolbar
+    // 11-05 user decision: with the caret on a closed styled run's outer edge the toolbar shows the
+    // style lit (FormatAt reads the pair's inside), and a typed character, an IME commit included,
+    // takes that style: `**굵게**|` + X is `**굵게X**`. A space typed there stays outside and plain
+    // and the toolbar shows bold off after it. Basic (markers hidden) and live (revealed caret line).
+    static void ClosedRunTypingCases(MainWindow window, Action<string,bool,string> check) {
+        string[] seeds = { "**굵게**", "*기울임*", "~~지움~~", "***둘***", "<font color=\"blue\">파랑</font>", "<span style=\"font-size:20px\">크게</span>" };
+        string[] wanted = { "**굵게X**", "*기울임X*", "~~지움X~~", "***둘X***", "<font color=\"blue\">파랑X</font>", "<span style=\"font-size:20px\">크게X</span>" };
+        string[] flags = { "B---", "-I--", "--S-", "BI--", "----", "----" };
+        for (int pass = 0; pass < 2; pass++) {
+            bool basic = pass == 0;
+            string mode = basic ? "basic" : "live";
+            HideMarkers(window, basic);
+            for (int i = 0; i < seeds.Length; i++) {
+                Load(window, seeds[i]);
+                SourceEditor source = Source(window);
+                source.Select(source.Document.GetLineByNumber(1).EndOffset, 0);
+                Pump();
+                bool lit = ToolbarBold(window);
+                TextInput(window, "X");
+                int x = source.Document.Text.IndexOf('X');
+                check(mode + " closed run " + seeds[i] + ": the typed character takes the lit style",
+                    source.Document.Text == wanted[i] && x > 0 && FlagsAt(Session(window), x + 1) == flags[i] && (lit == (i == 0 || i == 3)),
+                    "text=[" + source.Document.Text + "], flags=" + (x > 0 ? FlagsAt(Session(window), x + 1) : "-") + ", boldLit=" + lit);
+                Undo(window);
+                check(mode + " closed run " + seeds[i] + ": one undo takes the character back",
+                    source.Document.Text == seeds[i], "text=[" + source.Document.Text + "]");
+            }
+            // Inline code on the revealed line: the toolbar does not light code on the outer edge,
+            // so the character stays outside it (R7). With markers hidden code keeps its older
+            // inside answer (InputFormatProbe "basic overlap typing at the drawn end code").
+            if (!basic) {
+                Load(window, "`코드`");
+                SourceEditor codeSource = Source(window);
+                codeSource.Select(codeSource.Document.GetLineByNumber(1).EndOffset, 0);
+                Pump();
+                TextInput(window, "X");
+                check(mode + " closed code span: the typed character stays outside the code",
+                    codeSource.Document.Text == "`코드`X", "text=[" + codeSource.Document.Text + "]");
+            }
+            // Rule B: a space after the closed bold is outside and plain, the toolbar shows bold off,
+            // and the character after it is plain too.
+            Load(window, "**굵게**");
+            SourceEditor spaceSource = Source(window);
+            spaceSource.Select(spaceSource.Document.GetLineByNumber(1).EndOffset, 0);
+            Pump();
+            TextInput(window, " ");
+            bool boldOff = !ToolbarBold(window);
+            TextInput(window, "X");
+            check(mode + " closed bold: the space is plain and bold is off after it",
+                spaceSource.Document.Text == "**굵게** X" && boldOff, "text=[" + spaceSource.Document.Text + "], boldOff=" + boldOff);
+            // IME commits: the normal path and the two that bypass TextEntering.
+            foreach (string route in new[] { "normal", "redirected", "late" }) {
+                Load(window, "**굵게**");
+                SourceEditor editor = Source(window);
+                editor.Select(editor.Document.GetLineByNumber(1).EndOffset, 0);
+                Pump();
+                int at = editor.CaretOffset;
+                editor.SimulateImeCommit(1);
+                if (route != "normal") {
+                    typeof(SourceEditor).GetField("imeCommitTarget", Members).SetValue(editor, at);
+                    typeof(SourceEditor).GetField("imeCommitTargetDocument", Members).SetValue(editor, editor.Document);
+                    typeof(SourceEditor).GetField("imeCommitTargetTick", Members).SetValue(editor, Environment.TickCount);
+                }
+                bool accepted = true;
+                if (route == "late") { Keyboard.ClearFocus(); accepted = editor.AcceptLateImeCommit("한"); }
+                else editor.TextArea.PerformTextInput("한");
+                bool released = !editor.ImeBusy;
+                editor.ResetCompositionSimulation();
+                Pump();
+                int h = editor.Document.Text.IndexOf('한');
+                check(mode + " " + route + " IME commit after closed bold takes the bold",
+                    accepted && released && editor.Document.Text == "**굵게한**" && h > 0 && FlagsAt(Session(window), h) == "B---",
+                    "text=[" + editor.Document.Text + "], accepted=" + accepted + ", released=" + released);
+                Undo(window);
+                check(mode + " " + route + " IME commit after closed bold undoes in one step",
+                    editor.Document.Text == "**굵게**", "text=[" + editor.Document.Text + "]");
+            }
+        }
+        HideMarkers(window, true);
+    }
+
+    // 11-05 rule C and the toolbar: while the run is being typed, the space typed at its closing edge is
+    // pending and the next character takes it back inside, so the button of that style must be lit
+    // right after the space (no tool refresh is called here: the pending state itself asks for it),
+    // and off again once the caret leaves.
+    static void PendingToolbarCases(MainWindow window, Action<string,bool,string> check) {
+        string[] seeds = { "**abc**", "*abc*", "~~abc~~", "***abc***" };
+        int[] back = { 2, 1, 2, 3 };
+        string[] buttons = { "boldButton", "italicButton", "strikeButton", "boldButton" };
+        string[] second = { null, null, null, "italicButton" };
+        for (int i = 0; i < seeds.Length; i++) {
+            Load(window, seeds[i]);
+            SourceEditor source = Source(window);
+            source.Select(source.Document.GetLineByNumber(1).EndOffset - back[i], 0);
+            Pump();
+            TextInput(window, " ");
+            bool lit = Object.Equals(Field<Button>(window, buttons[i]).Tag, "Active") &&
+                (second[i] == null || Object.Equals(Field<Button>(window, second[i]).Tag, "Active"));
+            bool spaceOutside = source.Document.Text == seeds[i] + " ";
+            source.Select(0, 0);
+            Pump();
+            bool litAfterMove = Object.Equals(Field<Button>(window, buttons[i]).Tag, "Active");
+            check("pending closing-edge space " + seeds[i] + ": the toolbar shows the style lit, and off after the caret moves away",
+                lit && spaceOutside && !litAfterMove,
+                "text=[" + source.Document.Text + "], lit=" + lit + ", litAfterMove=" + litAfterMove);
+        }
     }
 
     // ---------------------------------------------------------------- overlapping inline styles
@@ -1007,7 +1157,9 @@ internal static class SyntaxComboProbe {
         const string seed="**ab**";
         Load(window,seed);
         SourceEditor editor=Source(window);
-        editor.Select(seed.Length,0);Pump();
+        // 11-05: the pending closing-edge space belongs to the run being typed, so the caret starts
+        // inside the pair (rule C); on the outer edge of a closed bold the space is plain (rule B).
+        editor.Select(seed.Length-2,0);Pump();
         TextInput(window," ");TextInput(window,"c");Backspace(window);
         check("x8 backspace moves the space without exposing bold markers",editor.Document.Text=="**ab** ","text=["+editor.Document.Text+"]");
         string[] undone={"**ab c**","**ab** ",seed};
@@ -1021,7 +1173,7 @@ internal static class SyntaxComboProbe {
             bool late=route=="late";
             foreach(string initial in new[]{seed,"<span style=\"font-size:20px\">**ab**</span>"}) {
                 Load(window,initial);editor=Source(window);
-                editor.Select(initial.Length,0);Pump();TextInput(window," ");
+                editor.Select(initial.IndexOf("ab",StringComparison.Ordinal)+2,0);Pump();TextInput(window," ");
                 string spaced=editor.Document.Text;
                 int at=editor.CaretOffset;
                 editor.SimulateImeCommit(1);
@@ -1080,16 +1232,17 @@ internal static class SyntaxComboProbe {
             Flags(session, second, "굵은스팬") == "B---",
             "raw=" + session.Raw(first) + "/" + session.Raw(second) + ", visible=[" + visible + "], flags=" + Flags(session, second, "굵은스팬"));
 
-        // A typed character on the closing edge lands after the visible markers here: they are
-        // ordinary characters on the revealed line, and the hidden rule must not touch them.
+        // 11-05: the revealed caret line follows the toolbar too. FormatAt shows bold lit with the
+        // caret after the visible closing "**", so a typed character there is written inside the
+        // pair (it used to stay after the visible markers, R7); the markers stay whole.
         Load(window, "**굵게**");
         source = Source(window);
         var line = source.Document.GetLineByNumber(1);
         source.Select(line.EndOffset, 0);
         Pump();
         TextInput(window, "X");
-        check("with markers shown the typed character stays outside the pair",
-            source.Document.Text == "**굵게**X", "text=[" + source.Document.Text + "]");
+        check("with markers shown the typed character at the closing edge takes the lit style",
+            source.Document.Text == "**굵게X**", "text=[" + source.Document.Text + "]");
 
         // The same for Backspace: the visible "*" is the character before the caret.
         Load(window, "**굵게**");
@@ -1469,6 +1622,12 @@ internal static class SyntaxComboProbe {
         source.Select(Math.Max(0, Math.Min(offset, source.Document.TextLength)), 0);
         Pump();
         return (double)Invoke(window, "LiveDrawnSize");
+    }
+    // The Bold button's real lit state at the caret (what the user sees), after a tool refresh.
+    static bool ToolbarBold(MainWindow window) {
+        Invoke(window, "UpdateTools");
+        Pump();
+        return Object.Equals(Field<Button>(window, "boldButton").Tag, "Active");
     }
     static string SizeBox(MainWindow window) {
         Invoke(window, "UpdateTools");

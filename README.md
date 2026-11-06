@@ -21,8 +21,9 @@ A fast, lightweight Markdown and TXT editor for Windows—just like Notepad.
 
 [Download Latest Release (Releases)](https://github.com/Lahai-Roi/MDNote/releases/latest)
 
-- `MDNote-Setup-2.1.0.exe`: Installer. Choose your language on the first screen of the setup.
-- `MDNote-2.1.0-portable.zip`: Portable version (no installation required). Extract the ZIP and run `MDNote.exe`.
+- `MDNote-Setup-2.2.0.exe`: Installer. Choose your language on the first screen of the setup.
+- `MDNote-2.2.0-portable.zip`: Portable version (no installation required). Extract the ZIP and run `MDNote.exe`.
+- **winget**: `winget install LahaiRoi.MDNote` to install, `winget upgrade LahaiRoi.MDNote` to update. (MDNote only notifies you of new versions and does not install them itself, so this is the easiest way to keep it up to date.)
 - Requires Windows 10/11 64-bit and .NET Framework 4.8 (pre-installed on Windows).
 - Because the executable is not digitally signed, Windows may show a warning on first launch. Click **More info → Run anyway**.
 
@@ -35,7 +36,11 @@ A fast, lightweight Markdown and TXT editor for Windows—just like Notepad.
 - **Tabs, Windows, and Outline**: Open multiple documents in tabs or new windows, and jump to sections using the heading list.
 - **Insert images**: Whether added via paste, drag-and-drop, or the image button, images remaining in the document upon saving are collected into an adjacent folder of the same name and linked.
 - **Continue previous session**: When on, closes unsaved documents without prompting and resumes them right where you left off the next time you open MDNote.
-- **Find & Replace, Print, Encodings**: Open and save files in UTF-8, UTF-16, CP949, Shift JIS, GBK, Big5, and more.
+- **Find & Replace, Print, Encodings**: Find with regular expressions if you like. Open and save files in UTF-8, UTF-16, CP949, Shift JIS, GBK, Big5, and more.
+- **Save as HTML**: Choose **HTML files (*.html)** in **Save as…** to create a separate .html file that opens in a browser and can be pasted into blogs or email.
+- **Math formulas**: `$E=mc^2$` in a sentence and `$$ … $$` on their own lines are shown as formulas.
+- **Focus mode & Typewriter mode**: Keep only the current paragraph or line clear, or keep the line you are typing in the middle of the window. Both are off by default.
+- **File change alerts**: If another program changes or deletes an open file, MDNote asks whether to reload it. It also asks before saving over a file that was changed elsewhere.
 - **Dark mode, Font & Line Spacing, F1–F12 Shortcuts**: Customize display settings and function key shortcuts to your liking.
 - **5 Languages**: Supports 한국어, English, 日本語, 简体中文, and 繁體中文. Help guides and sample documents open in the selected language.
 
@@ -59,8 +64,8 @@ Two guides are available under the **Help** menu in the app:
 ## Limitations
 
 - Windows only (Windows 10/11 64-bit).
-- Extended syntax such as math formulas (LaTeX) and flowcharts (Mermaid) are not rendered as graphics and are shown as plain text.
-- There is no feature to export documents to HTML. To save as a PDF, select 'Microsoft Print to PDF' in the Print menu.
+- Flowcharts (Mermaid) are not rendered as graphics and are shown as plain text.
+- To save as a PDF, select 'Microsoft Print to PDF' in the Print menu.
 
 ## FAQ
 
@@ -71,20 +76,20 @@ Yes. Files are saved as standard Markdown (.md) or plain text (.txt), so they op
 Turn on **View → Markdown Live Preview** to see symbols only on the line where the cursor is. To view the entire document with symbols, click the **Source** button at the top right.
 
 **If I keep typing right after bold text, does it stay bold?**
-No. Typing right after the end of bold text switches back to normal text, while typing inside the bold text keeps it bold.
+Yes. Typing right after the end of bold text keeps it bold, just as the Bold button shows. After a space, you type normal text.
 
 **Windows shows a warning when I run it for the first time.**
 This is because the executable is not digitally signed. Click **More info → Run anyway**.
 
 **Can I use it without installing?**
-Yes. Extract `MDNote-2.1.0-portable.zip` and run `MDNote.exe`.
+Yes. Extract `MDNote-2.2.0-portable.zip` and run `MDNote.exe`.
 
 **How do I uninstall it?**
 For the installed version, uninstall it from the Apps list in Windows Settings. If you manually placed any files in the installation folder, only those files will remain. For the portable version, simply delete the extracted folder.
 
 ## Privacy
 
-- MDNote does not connect to the internet. It never sends usage logs or document contents anywhere.
+- By default, MDNote does not connect to the internet. It checks the latest version number on GitHub only when you select **Help → Check for updates**, or once a day if you turn on **Check for updates automatically** (off by default). It never sends usage logs or document contents anywhere.
 - To recover unsaved text, a copy of the content being edited is kept only in your PC's user folder (AppData). It is deleted when you save or close the document.
 - Settings (font, language, shortcuts, etc.) are also saved only on your PC.
 

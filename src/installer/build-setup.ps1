@@ -5,7 +5,7 @@ if(-not $NsisDirectory){$found=Get-Command makensis.exe -ErrorAction SilentlyCon
 if(-not $NsisDirectory){throw 'NSIS 3.13 폴더를 -NsisDirectory로 지정하세요.'}
 $compiler=Join-Path $NsisDirectory 'makensis.exe'
 if(-not(Test-Path -LiteralPath $compiler)){throw 'makensis.exe가 없습니다.'}
-if(-not $OutputFile){$OutputFile=Join-Path (Split-Path $sourceRoot) 'MDNote-Setup-2.1.0.exe'}
+if(-not $OutputFile){$OutputFile=Join-Path (Split-Path $sourceRoot) 'MDNote-Setup-2.2.0.exe'}
 $OutputFile=[IO.Path]::GetFullPath($OutputFile)
 if($OutputFile.StartsWith($sourceRoot+'\',[StringComparison]::OrdinalIgnoreCase)){throw '설치 EXE는 소스 폴더 밖에 저장하세요.'}
 $utf8=New-Object Text.UTF8Encoding($true)
@@ -26,6 +26,8 @@ try {
  $app=Join-Path $packageRoot 'app';New-Item -ItemType Directory -Path (Join-Path $app 'help') -Force | Out-Null
  foreach($name in @('MDNote.exe','LICENSE','THIRD_PARTY_NOTICES.txt')){Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination (Join-Path $app $name)}
  Copy-Item -LiteralPath (Join-Path $sourceRoot 'lib\ICSharpCode.AvalonEdit.dll') -Destination (Join-Path $app 'ICSharpCode.AvalonEdit.dll')
+Copy-Item -LiteralPath (Join-Path $sourceRoot 'lib\WpfMath.dll') -Destination (Join-Path $app 'WpfMath.dll')
+Copy-Item -LiteralPath (Join-Path $sourceRoot 'lib\XamlMath.Shared.dll') -Destination (Join-Path $app 'XamlMath.Shared.dll')
  $help=@('사용법.txt','마크다운 작성 예제.md','example-image.png','example.en.md','example.ja.md','example.zh-CN.md','example.zh-TW.md','MDNote 사용법.md','MDNote-guide.en.md','MDNote-guide.ja.md','MDNote-guide.zh-CN.md','MDNote-guide.zh-TW.md')
  foreach($name in $help){if(-not(Test-Path -LiteralPath (Join-Path $sourceRoot $name))){throw ('Missing help file: '+$name)}}
  $help+=@(Get-ChildItem -LiteralPath $sourceRoot -File -Filter 'guide-*.png' | Where-Object {$_.Name -notlike 'guide-icons-*'} | ForEach-Object {$_.Name})

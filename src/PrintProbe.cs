@@ -288,6 +288,26 @@ internal static class PrintProbe {
         Check("rules","txt-comment-same-line",txtComment=="a  b","text=["+txtComment+"]");
         Check("rules","txt-comment-multiline-literal",txtMultiComment=="a <!-- x\n--> b","text=["+txtMultiComment+"]");
         Check("rules","txt-link-paren-title",txtTitle=="t","text=["+txtTitle+"]");
+        // A quote's lazy continuation line (no ">", directly after a paragraph line of the quote) is drawn
+        // inside the quote: it becomes a paragraph of the quote's Section, so it shares the bar and the
+        // quote text indent. The probe reads that structure, not pixels. A blank line, a heading, a list
+        // item, or a line after a blank ">" line is outside the quote.
+        FlowDocument lazyDoc=Markdown.Parse("> 인용 하나\n> 인용 둘\n게으른 줄",size,"Malgun Gothic",Brushes.Black,false,"");
+        Section lazySection=lazyDoc.Blocks.FirstBlock as Section;
+        Paragraph lazyLast=lazySection==null?null:lazySection.Blocks.LastBlock as Paragraph;
+        Check("quote","print-lazy-line-inside-quote",lazyDoc.Blocks.Count==1&&lazySection!=null&&lazySection.Blocks.Count==3&&lazySection.BorderThickness.Left>0&&ParagraphText(lazyLast)=="게으른 줄",DescribeQuote(lazyDoc));
+        FlowDocument lazyBlank=Markdown.Parse("> 인용\n\n바깥 문단",size,"Malgun Gothic",Brushes.Black,false,"");
+        Section lazyBlankSection=lazyBlank.Blocks.FirstBlock as Section;
+        Check("quote","print-lazy-ends-at-blank",lazyBlankSection!=null&&lazyBlankSection.Blocks.Count==1&&lazyBlank.Blocks.Count==3&&ParagraphText(lazyBlank.Blocks.LastBlock as Paragraph)=="바깥 문단",DescribeQuote(lazyBlank));
+        FlowDocument lazyEmptyQuote=Markdown.Parse("> 인용\n>\n바깥 문단",size,"Malgun Gothic",Brushes.Black,false,"");
+        Section lazyEmptySection=lazyEmptyQuote.Blocks.FirstBlock as Section;
+        Check("quote","print-lazy-not-after-blank-quote-line",lazyEmptySection!=null&&lazyEmptyQuote.Blocks.Count==2&&ParagraphText(lazyEmptyQuote.Blocks.LastBlock as Paragraph)=="바깥 문단",DescribeQuote(lazyEmptyQuote));
+        FlowDocument lazyHeading=Markdown.Parse("> a\n# h",size,"Malgun Gothic",Brushes.Black,false,"");
+        Section lazyHeadingSection=lazyHeading.Blocks.FirstBlock as Section;
+        Check("quote","print-lazy-not-heading",lazyHeadingSection!=null&&lazyHeadingSection.Blocks.Count==1&&lazyHeading.Blocks.Count==2&&ParagraphText(lazyHeading.Blocks.LastBlock as Paragraph)=="h",DescribeQuote(lazyHeading));
+        FlowDocument lazyList=Markdown.Parse("> a\n- b",size,"Malgun Gothic",Brushes.Black,false,"");
+        Section lazyListSection=lazyList.Blocks.FirstBlock as Section;
+        Check("quote","print-lazy-not-list",lazyListSection!=null&&lazyListSection.Blocks.Count==1&&lazyList.Blocks.Count>=2,DescribeQuote(lazyList));
         // bughunt3 rendering items 10 and 11, the list rule the live preview draws read from
         // the FlowDocument this renderer builds. A blank line between items keeps one list
         // (CommonMark), so three "1." items print 1, 2, 3 from one List: the blank paragraph
@@ -329,6 +349,16 @@ internal static class PrintProbe {
         var text=new StringBuilder();
         text.Append("count=").Append(lists.Count);
         foreach(System.Windows.Documents.List list in lists)text.Append(" [").Append(list.MarkerStyle).Append(" start=").Append(list.StartIndex).Append(" items=").Append(list.ListItems.Count).Append(']');
+        return text.ToString();
+    }
+    // Top-level blocks of a parsed document, with the paragraph count inside each quote Section.
+    static string DescribeQuote(FlowDocument document){
+        var text=new StringBuilder("top=").Append(document.Blocks.Count);
+        foreach(Block block in document.Blocks){
+            var section=block as Section;
+            if(section!=null)text.Append(" [quote paragraphs=").Append(section.Blocks.Count).Append(" text=").Append(new TextRange(section.ContentStart,section.ContentEnd).Text.Replace("\r","").Replace("\n","\\n")).Append(']');
+            else text.Append(" [").Append(block.GetType().Name).Append(']');
+        }
         return text.ToString();
     }
     static Paragraph FirstParagraph(FlowDocument document){foreach(Block block in document.Blocks){var paragraph=block as Paragraph;if(paragraph!=null)return paragraph;}return null;}

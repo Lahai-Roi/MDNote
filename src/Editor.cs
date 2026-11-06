@@ -54,11 +54,12 @@ public partial class MainWindow : Window {
         Title="새 문서 — MDNote";Width=1080;Height=800;MinWidth=360;MinHeight=420;
         FontFamily=new FontFamily("Segoe UI, Malgun Gothic");FontSize=12;WindowStartupLocation=WindowStartupLocation.CenterScreen;if(Program.IsSelfTest){ShowInTaskbar=false;ShowActivated=false;WindowStartupLocation=WindowStartupLocation.Manual;Left=-20000;Top=-20000;}
         LoadPreferences();RestoreWindowPlacement();SetupWindowPlacement();Resources.MergedDictionaries.Add(Ui.Styles());Theme();
-        using(var stream=typeof(MainWindow).Assembly.GetManifestResourceStream("MDNote.ico")){if(stream!=null){var decoder=new IconBitmapDecoder(stream,BitmapCreateOptions.PreservePixelFormat,BitmapCacheOption.OnLoad);BitmapFrame largest=null;foreach(var frame in decoder.Frames)if(largest==null||frame.PixelWidth>largest.PixelWidth)largest=frame;Icon=largest;}}
+        // A Windows image without working imaging codecs opens without the window icon rather than not at all.
+        try{using(var stream=typeof(MainWindow).Assembly.GetManifestResourceStream("MDNote.ico")){if(stream!=null){var decoder=new IconBitmapDecoder(stream,BitmapCreateOptions.PreservePixelFormat,BitmapCacheOption.OnLoad);BitmapFrame largest=null;foreach(var frame in decoder.Frames)if(largest==null||frame.PixelWidth>largest.PixelWidth)largest=frame;Icon=largest;}}}catch(Exception){}
         /* An activation is also when this window's icon stroke is re-applied: another window's theme
            pass leaves the icons here alone now (Ui.SetIconTheme), and icons this window built after
            that pass must still come back at this window's own weight. */
-        Content=root;Activated+=delegate{DocumentActivation.ActiveWindow=this;UpdateUndoRedoTools();Ui.ReapplyIconTheme(dark,this);};Closed+=delegate{if(DocumentActivation.ActiveWindow==this)DocumentActivation.ActiveWindow=null;};
+        Content=root;Activated+=delegate{DocumentActivation.ActiveWindow=this;UpdateUndoRedoTools();Ui.ReapplyIconTheme(dark,this);CheckExternalChanges();};Closed+=delegate{if(DocumentActivation.ActiveWindow==this)DocumentActivation.ActiveWindow=null;};
         /* The undo/redo buttons follow the document's history, never keyboard focus: a menu, the
            find field or another window taking focus used to leave them looking disabled until the
            next edit, so every focus change re-reads CanUndo/CanRedo (user, 2026-10-30). */
@@ -90,20 +91,21 @@ public partial class MainWindow : Window {
         menu.PreviewMouseMove+=delegate(object sender,System.Windows.Input.MouseEventArgs args){CommitCompositionForMenu("menu hover");};
         var file=AddMenu(menu,"파일(_F)");var continueItem=continueSessionToggle=new MenuItem {Header="이전 세션 계속하기",IsCheckable=true,IsChecked=continueSession};continueItem.Click+=delegate{SetContinueSession(continueItem.IsChecked);};file.Items.Add(continueItem);file.Items.Add(new Separator());Item(file,"새로 만들기","Ctrl+N",NewFile);Item(file,"열기…","Ctrl+O",delegate{RunAfterCompositionOrNow(OpenDialog);});Item(file,T("저장"),"Ctrl+S",delegate{SaveFromUi(false);});Item(file,"다른 이름으로 저장…","Ctrl+Shift+S",delegate{SaveFromUi(true);});file.Items.Add(new Separator());Item(file,"인쇄…","Ctrl+P",Print);file.Items.Add(new Separator());Item(file,"끝내기","Alt+F4",Close);
         var edit=AddMenu(menu,"편집(_E)");Item(edit,"수정 시작/종료","Ctrl+E",Toggle);edit.Items.Add(new Separator());Item(edit,"실행 취소","Ctrl+Z",Undo);Item(edit,"다시 실행","Ctrl+Y",Redo);edit.Items.Add(new Separator());Item(edit,"모두 선택","Ctrl+A",delegate{source.SelectAll();});Item(edit,"복사","Ctrl+C",delegate{source.Copy();});Item(edit,"잘라내기","Ctrl+X",delegate{if(editing)source.Cut();});Item(edit,"붙여넣기","Ctrl+V",delegate{PasteClipboard(false);});Item(edit,"서식 없이 붙여넣기","Ctrl+Shift+V",delegate{PasteClipboard(true);});Item(edit,"이미지 삽입…","Ctrl+Shift+I",delegate{RunAfterCompositionOrNow(InsertImage);});edit.Items.Add(new Separator());Item(edit,"찾기…","Ctrl+F",delegate{ToggleSearch(false);});Item(edit,"바꾸기…","Ctrl+H",delegate{ToggleSearch(true);});
-        var view=AddMenu(menu,"보기(_V)");var wrap=wrapToggle=new MenuItem {Header="자동 줄바꿈",IsCheckable=true,IsChecked=true};wrap.Click+=delegate{SetWrap(wrap.IsChecked);};view.Items.Add(wrap);view.Items.Add(new Separator());BuildLiveViewItem(view);view.Items.Add(new Separator());Item(view,"글자 확대","Ctrl++",delegate{Zoom(2);});Item(view,"글자 축소","Ctrl+-",delegate{Zoom(-2);});Item(view,"기본 글자 크기","Ctrl+0",delegate{SetBaseFont(family,16);});BuildLineMenu(view);view.Items.Add(new Separator());Item(view,"글꼴 및 크기…","",delegate{RunAfterCompositionOrNow(ChooseFont);});Item(view,"기본 글자색…","",delegate{RunAfterCompositionOrNow(ChooseColor);});Item(view,"기본 글자색 초기화","",delegate{customColor=null;RenderPreservingView();});view.Items.Add(new Separator());darkToggle=new MenuItem {Header="다크 모드",IsCheckable=true,IsChecked=dark};darkToggle.Click+=delegate{SetDark(darkToggle.IsChecked);};view.Items.Add(darkToggle);
-        var help=AddMenu(menu,"도움말(_H)");Item(help,"MD파일 작성방법","",OpenUsage);Item(help,"MDNote 사용법","",OpenAppUsage);help.Items.Add(new Separator());Item(help,"MDNote 정보","",ShowAbout);
+        var view=AddMenu(menu,"보기(_V)");var wrap=wrapToggle=new MenuItem {Header="자동 줄바꿈",IsCheckable=true,IsChecked=true};wrap.Click+=delegate{SetWrap(wrap.IsChecked);};view.Items.Add(wrap);view.Items.Add(new Separator());BuildLiveViewItem(view);view.Items.Add(new Separator());Item(view,"글자 확대","Ctrl++",delegate{Zoom(2);});Item(view,"글자 축소","Ctrl+-",delegate{Zoom(-2);});Item(view,"기본 글자 크기","Ctrl+0",delegate{SetBaseFont(family,16);});BuildLineMenu(view);view.Items.Add(new Separator());Item(view,"글꼴 및 크기…","",delegate{RunAfterCompositionOrNow(ChooseFont);});Item(view,"기본 글자색…","",delegate{RunAfterCompositionOrNow(ChooseColor);});Item(view,"기본 글자색 초기화","",delegate{customColor=null;RenderPreservingView();});view.Items.Add(new Separator());darkToggle=new MenuItem {Header="다크 모드",IsCheckable=true,IsChecked=dark};darkToggle.Click+=delegate{SetDark(darkToggle.IsChecked);};view.Items.Add(darkToggle);BuildFocusMenu(view);
+        var help=AddMenu(menu,"도움말(_H)");Item(help,"MD파일 작성방법","",OpenUsage);Item(help,"MDNote 사용법","",OpenAppUsage);help.Items.Add(new Separator());Item(help,"업데이트 확인","",CheckForUpdates);autoUpdateToggle=new MenuItem {Header="업데이트 자동 확인",IsCheckable=true,IsChecked=autoUpdateCheck};autoUpdateToggle.Click+=delegate{SetAutoUpdateCheck(autoUpdateToggle.IsChecked);};help.Items.Add(autoUpdateToggle);help.Items.Add(new Separator());Item(help,"MDNote 정보","",ShowAbout);
         var searchCommands=new StackPanel {Orientation=Orientation.Horizontal,VerticalAlignment=VerticalAlignment.Center,HorizontalAlignment=HorizontalAlignment.Left};top.Children.Add(searchCommands);
         Ui.BalanceDivider(divider,saveArrow,quickFind,top);Ui.BalanceDivider(toggleDivider,quickReplace,editButton,top);Ui.BalanceDivider(menuDivider,quickDark,(FrameworkElement)menu.Items[0],top);Ui.NormalizeBarIcons(commands);BuildRibbon();BuildTabs(view);BuildRecent(file);BuildOpenEncodingMenu(file);BuildOutline(top);if(outlineButton!=null){outlineButton.Content=null;outlineButton.Content=Ui.GridIcon("menu");Ui.TopSquare(outlineButton);outlineButton.Margin=new Thickness(1,0,1,0);}
         var statusRow=new DockPanel {LastChildFill=true};textBadge=new Border {Child=new TextBlock {Text="TXT",FontSize=10.5,FontWeight=FontWeights.Bold,VerticalAlignment=VerticalAlignment.Center},Padding=new Thickness(6,0,6,0),CornerRadius=new CornerRadius(3),Margin=new Thickness(0,0,10,0),Visibility=Visibility.Collapsed};textBadge.SetResourceReference(Border.BackgroundProperty,"Accent");((TextBlock)textBadge.Child).SetResourceReference(TextBlock.ForegroundProperty,"Paper");DockPanel.SetDock(textBadge,Dock.Left);statusRow.Children.Add(textBadge);statusRow.Children.Add(status);var bar=statusBar=new Border {Child=statusRow,Padding=new Thickness(14,4,14,4),BorderThickness=new Thickness(0,1,0,0)};bar.SetResourceReference(Border.BorderBrushProperty,"Line");DockPanel.SetDock(bar,Dock.Bottom);root.Children.Add(bar);
         BuildSearchBar();BuildTableTools();CompactTableToolbar();
         area.SetResourceReference(Grid.BackgroundProperty,"Canvas");root.Children.Add(new AdornerDecorator {Child=area});
-        SetupSurfaces();surfacesReady=true;SetupInteractionLayout();SetupRecovery(file);
+        SetupSurfaces();surfacesReady=true;SetupInteractionLayout();SetupRecovery(file);SetupAutoUpdateCheck();
         CommandManager.AddPreviewExecutedHandler(this,delegate(object sender,ExecutedRoutedEventArgs args){if(source.IsKeyboardFocusWithin&&(args.Command==ApplicationCommands.Undo||args.Command==ApplicationCommands.Redo)){RestoreEditorHistory(args.Command==ApplicationCommands.Redo);args.Handled=true;}else if(source!=null&&(Object.ReferenceEquals(args.Source,source.TextArea)||source.IsKeyboardFocusWithin)&&(args.Command==EditingCommands.MoveDownByPage||args.Command==EditingCommands.MoveUpByPage)){/* the page handler reveals the caret from the height tree's estimates; verify once after the frame's layout (QueueCaretRowVisible). args.Source is the command's target, so a probe or a menu that executes it without keyboard focus is covered too. */QueueCaretRowVisible();}});CommandManager.AddPreviewCanExecuteHandler(this,delegate(object sender,CanExecuteRoutedEventArgs args){if(source.IsKeyboardFocusWithin&&(args.Command==ApplicationCommands.Undo||args.Command==ApplicationCommands.Redo)){args.CanExecute=editing&&(args.Command==ApplicationCommands.Undo?History.CanUndo:History.CanRedo);args.Handled=true;}});PreviewMouseDown+=PreviewCommitComposition;PreviewKeyDown+=Keys;PreviewKeyDown+=MenuKeyCommitComposition;PreviewMouseWheel+=delegate(object s,MouseWheelEventArgs e){if((Keyboard.Modifiers&ModifierKeys.Control)!=0){Zoom(e.Delta>0?1:-1);e.Handled=true;}};
         SetupCompositionDeactivation();StateChanged+=delegate{if(WindowState!=WindowState.Minimized)lastRestorableState=WindowState;else CommitCompositionBeforeDeactivation();};Deactivated+=delegate{CommitCompositionBeforeDeactivation();};SizeChanged+=delegate{ApplyPageInsets();};Closing+=OnWindowClosing;SetupSaveDialogActivation();SetupMinimizedClosePriority();AllowDrop=true;
-        PreviewDragOver+=delegate(object s,DragEventArgs e){if(e.Data.GetDataPresent(DataFormats.FileDrop)){e.Effects=DragDropEffects.Copy;e.Handled=true;}};
+        /* A drag source that hangs, closes or hands over a malformed HDROP fails these OLE reads (COMException and others): ignore that drag. */PreviewDragOver+=delegate(object s,DragEventArgs e){bool fileDrop;try{fileDrop=e.Data.GetDataPresent(DataFormats.FileDrop);}catch(Exception){fileDrop=false;}if(fileDrop){e.Effects=DragDropEffects.Copy;e.Handled=true;}};
         Drop+=delegate(object s,DragEventArgs e){
-            if(!e.Data.GetDataPresent(DataFormats.FileDrop))return;
-            var files=e.Data.GetData(DataFormats.FileDrop) as string[];if(files==null||files.Length==0)return;
+            if(source!=null)source.NoteInactiveImeFocus();/* see SourcePreviewDrop */
+            string[] files;try{if(!e.Data.GetDataPresent(DataFormats.FileDrop))return;files=e.Data.GetData(DataFormats.FileDrop) as string[];}catch(Exception){return;}
+            if(files==null||files.Length==0)return;
             /* The source consumes image drops on the Markdown body itself (SourcePreviewDrop); a drop
                that reaches the window is the document's insert at the caret (AcceptImageDrop), except
                for the TXT notice. A mixed drop (an image plus a .md/.txt) keeps the open-as-document
@@ -113,7 +115,7 @@ public partial class MainWindow : Window {
             /* Defensive: an all-image drop must never reach LoadFile. A PNG is not text, so the
                text decoder would answer a dropped image with its decode error box. */
             if(MarkdownCommands.AllImageFiles(files))return;
-            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,new Action(delegate{foreach(string dropped in files){/* A mixed drop opens only the documents: decoding a PNG as text shows an error box or a broken tab that could overwrite the picture. */if(MarkdownCommands.IsImageFile(dropped))continue;LoadFile(dropped);}}));
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,new Action(delegate{foreach(string dropped in files){/* A mixed drop opens only the documents: decoding a PNG as text shows an error box or a broken tab that could overwrite the picture. */if(MarkdownCommands.IsImageFile(dropped))continue;LoadFile(dropped);}/* the dropped document may be a new tab with its own editor, focused while this window is still in the background */if(source!=null)source.NoteInactiveImeFocus();}));
         };
         SetupSourceOutline();Theme();SetMode(true);SetupFunctionKeys();BuildTextModeMenu(edit);BuildTextQuickButton();BuildLanguages(menu,help);Ui.ToolbarText(topHost);if(ImeTrace.Enabled){AttachImeMenuTrace(menu,"menu");PreviewTextInput+=delegate(object traceSender,System.Windows.Input.TextCompositionEventArgs traceArgs){ImeTrace.Write("window TextInput text="+SourceEditor.TraceText(traceArgs.Text)+" handled="+traceArgs.Handled+" focus="+FocusName());};}
         // A menu takes keyboard focus before the IME's result arrives; WPF then raises TextInput on
@@ -726,6 +728,7 @@ public partial class MainWindow : Window {
         PastedImageMoveState movedPictures=null;
         try{
             Encoding encoding=documentEncoding;
+            bool exportHtml=false;
             if(choose){
                 EnsureVisibleForeground();
                 /* Save As starts in the document's own folder with the document's own file name (a
@@ -741,11 +744,23 @@ public partial class MainWindow : Window {
                     string picked=picker(name);
                     if(picked==null){LastSaveCancelled=true;return false;}
                     target=picked;
+                    exportHtml=IsHtmlFileName(picked);   // the probe seam has no file type list: a .html/.htm name stands for the HTML type
                 }else{
-                    var selected=NativeSaveDialog.Show(new System.Windows.Interop.WindowInteropHelper(this).Handle,name,PlainText,T("현재 인코딩 유지")+" ("+EncodingCaption(encoding)+")",T("인코딩:"),T("텍스트 (*.txt)"),T("모든 파일"));
+                    var selected=NativeSaveDialog.Show(new System.Windows.Interop.WindowInteropHelper(this).Handle,name,PlainText,T("현재 인코딩 유지")+" ("+EncodingCaption(encoding)+")",T("인코딩:"),T("텍스트 (*.txt)"),T("모든 파일"),T("HTML 파일 (*.html)"));
                     if(selected==null){LastSaveCancelled=true;return false;}
                     target=selected.Path;
-                    if(selected.Encoding!=NativeSaveDialog.KeepEncoding)encoding=StrictEncoding(selected.Encoding);
+                    exportHtml=selected.Html;
+                    if(!exportHtml&&selected.Encoding!=NativeSaveDialog.KeepEncoding)encoding=StrictEncoding(selected.Encoding);
+                }
+                /* 2.2.0: the HTML file type of this dialog is an export, not a save. The document keeps its
+                   path, title, type, encoding, dirty mark, recent list, external-change stamp and recovery
+                   state, and no overwrite question or picture move runs for the .html file; the save
+                   reports "not saved, no box" so a close prompt does not treat it as saved. */
+                if(exportHtml){
+                    target=HtmlExportTarget(target);
+                    await ExportHtmlToAsync(target);
+                    LastSaveCancelled=true;
+                    return false;
                 }
             }
             /* Every save (user, 2026-11-03): the pictures the text links from the shared temp folder
@@ -753,6 +768,8 @@ public partial class MainWindow : Window {
                bytes are written, so the file on disk holds the relative form; a Save As of a saved
                document also copies the pictures it links from the old <docname>\ (PasteSupport.cs
                MovePastedImagesToDocument). Without staged or old-folder pictures it only parses. */
+            // 2.2.0: another program changed this file while MDNote stayed in front (FileChangeWatch.cs).
+            if(!ConfirmOverwriteExternalChange(target)){LastSaveCancelled=true;return false;}
             movedPictures=MovePastedImagesToDocument(target);
             bool saved=await SaveToPathAsyncCore(target,encoding,choose,approved);
             /* Nothing was written: the tab is still untitled and must not be left pointing at
@@ -806,7 +823,7 @@ public partial class MainWindow : Window {
             if(!Program.IsSelfTest){EnsureVisibleForeground();MessageBox.Show(this,T("저장할 수 없습니다.\n")+error.Message,"MDNote");}
         }
     }
-    void ChooseFont(){using(var d=new Forms.FontDialog()){d.Font=new System.Drawing.Font(family,(float)(fontSize*72/96));if(d.ShowDialog()==Forms.DialogResult.OK){SetBaseFont(d.Font.Name,d.Font.SizeInPoints*96/72);}}}
+    void ChooseFont(){using(var d=new Forms.FontDialog()){try{d.Font=new System.Drawing.Font(family,(float)(fontSize*72/96));}catch(ArgumentException){/* GDI+ refuses a family without a Regular face: open the dialog on its default */}if(d.ShowDialog()==Forms.DialogResult.OK){SetBaseFont(d.Font.Name,d.Font.SizeInPoints*96/72);}}}
     void ChooseColor(){using(var d=new Forms.ColorDialog()){if(d.ShowDialog()==Forms.DialogResult.OK){customColor=Color.FromRgb(d.Color.R,d.Color.G,d.Color.B);RenderPreservingView();}}}
     /* A keyboard command that opens a dialog, a popup or another control takes the keyboard away from
        the body, and AvalonEdit cancels the IME composition from its LostKeyboardFocus handler before

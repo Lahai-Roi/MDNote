@@ -254,6 +254,17 @@ public partial class MainWindow {
         {"기본 글자색 초기화",new[]{"Reset default text color","既定の文字色をリセット","重置默认文字颜色","重設預設文字色彩"}},
         {"다크 모드",new[]{"Dark mode","ダークモード","深色模式","深色模式"}},
         {"MDNote 정보",new[]{"About MDNote","MDNoteについて","关于 MDNote","關於 MDNote"}},
+        /* The help menu's manual update check (UpdateCheck.cs): its menu item, title, three outcomes and the one new button. */
+        {"업데이트 확인",new[]{"Check for updates","更新の確認","检查更新","檢查更新"}},
+        {"새 버전이 있습니다: {0}\n현재 버전: {1}",new[]{"A new version, {0}, is available.\nCurrent version: {1}","新しいバージョン {0} があります。\n現在のバージョン: {1}","有新版本 {0}。\n当前版本：{1}","有新版本 {0}。\n目前版本：{1}"}},
+        {"최신 버전입니다. ({0})",new[]{"You are up to date. ({0})","最新バージョンです。({0})","已是最新版本。({0})","已是最新版本。({0})"}},
+        {"업데이트를 확인하지 못했습니다.\n인터넷 연결을 확인한 뒤 다시 시도해 주세요.",new[]{"Could not check for updates.\nCheck your internet connection and try again.","更新を確認できませんでした。\nインターネット接続を確認してから、もう一度お試しください。","无法检查更新。\n请检查网络连接后重试。","無法檢查更新。\n請檢查網路連線後再試一次。"}},
+        {"릴리스 페이지 열기",new[]{"Open release page","リリースページを開く","打开发布页面","開啟發行頁面"}},
+        /* 2.2.0 automatic check: the Help item that switches it, and the new-version dialog's check box. */
+        {"업데이트 자동 확인",new[]{"Check for updates automatically","更新を自動的に確認","自动检查更新","自動檢查更新"}},
+        {"새 버전({0})이 나왔습니다.",new[]{"Version {0} is available.","バージョン {0} が利用可能です。","新版本 {0} 已发布。","新版本 {0} 已發布。"}},
+        {"자세히",new[]{"Details","詳細","详情","詳細資訊"}},
+        {"이 버전은 다시 알리지 않음",new[]{"Skip this version","このバージョンをスキップ","不再提醒此版本","不再提醒此版本"}},
         {"사용법",new[]{"Getting started","使い方","使用方法","使用方法"}},
         {"제목",new[]{"Heading","見出し","标题","標題"}},
         {"• 목록",new[]{"• List","• リスト","• 列表","• 清單"}},
@@ -278,6 +289,25 @@ public partial class MainWindow {
         {"아웃라인",new[]{"Outline","アウトライン","大纲","大綱"}},
         {"확인",new[]{"OK","OK","确定","確定"}},
         {"취소",new[]{"Cancel","キャンセル","取消","取消"}},
+{"HTML로 내보내기…",new[]{"Export as HTML…","HTMLとしてエクスポート…","导出为 HTML…","匯出為 HTML…"}},
+{"집중 모드",new[]{"Focus mode","フォーカスモード","专注模式","專注模式"}},
+{"타자기 모드",new[]{"Typewriter mode","タイプライターモード","打字机模式","打字機模式"}},
+{"집중 모드: 끄기",new[]{"Off","オフ","关闭","關閉"}},
+{"집중 모드: 문단",new[]{"Paragraph","段落","段落","段落"}},
+{"집중 모드: 줄",new[]{"Line","行","行","行"}},
+{"HTML 파일 (*.html)",new[]{"HTML files (*.html)","HTML ファイル (*.html)","HTML 文件 (*.html)","HTML 檔案 (*.html)"}},
+{"HTML 파일을 저장하지 못했습니다.\n",new[]{"Failed to save the HTML file.\n","HTML ファイルを保存できませんでした。\n","无法保存 HTML 文件。\n","無法儲存 HTML 檔案。\n"}},
+{"다른 프로그램에서 이 파일이 바뀌었습니다.\n{0}\n\n다시 불러올까요?",new[]{"This file has been modified by another program.\n{0}\n\nDo you want to reload it?","このファイルは別のプログラムによって変更されました。\n{0}\n\n再読み込みしますか？","此文件已被其他程序修改。\n{0}\n\n要重新加载吗？","此檔案已被其他程式修改。\n{0}\n\n要重新載入嗎？"}},
+{"다시 불러오기",new[]{"Reload","再読み込み","重新加载","重新載入"}},
+{"그대로 두기",new[]{"Keep current","そのままにする","保持不变","維持現狀"}},
+{"다른 프로그램에서 이 파일이 바뀌었습니다.\n{0}\n\nMDNote에서 수정한 내용은 아직 저장하지 않았습니다. 다시 불러오면 수정한 내용이 사라집니다.",new[]{"This file has been modified by another program.\n{0}\n\nYou have unsaved changes in MDNote. Reloading will discard your changes.","このファイルは別のプログラムによって変更されました。\n{0}\n\nMDNoteでの変更はまだ保存されていません。再読み込みすると変更内容が失われます。","此文件已被其他程序修改。\n{0}\n\n您在 MDNote 中的更改尚未保存。重新加载将丢失这些更改。","此檔案已被其他程式修改。\n{0}\n\n您在 MDNote 中的變更尚未儲存。重新載入將會遺失這些變更。"}},
+{"내 변경 내용 유지",new[]{"Keep my changes","変更を保持","保留我的更改","保留我的變更"}},
+{"저장하려는 파일이 다른 프로그램에서 바뀌었습니다.\n{0}\n\n덮어쓸까요?",new[]{"The file you are trying to save has been modified by another program.\n{0}\n\nDo you want to overwrite it?","保存しようとしているファイルは別のプログラムによって変更されました。\n{0}\n\n上書きしますか？","要保存的文件已被其他程序修改。\n{0}\n\n要覆盖吗？","要儲存的檔案已被其他程式修改。\n{0}\n\n要覆寫嗎？"}},
+{"덮어쓰기",new[]{"Overwrite","上書き","覆盖","覆寫"}},
+{"이 파일이 없어졌습니다(지워졌거나 옮겨졌습니다).\n{0}\n\n지금 내용은 그대로 남아 있고, 저장하면 파일을 다시 만듭니다.",new[]{"This file is missing (deleted or moved).\n{0}\n\nThe current content is kept in the editor, and saving will recreate the file.","このファイルが見つかりません（削除または移動されました）。\n{0}\n\n現在の内容はそのまま残っており、保存するとファイルが再作成されます。","此文件已不存在（已被删除或移动）。\n{0}\n\n当前内容仍保留在编辑器中，保存时将重新创建该文件。","此檔案已不存在（已被刪除或移動）。\n{0}\n\n目前內容仍保留在編輯器中，儲存時將重新建立該檔案。"}},
+{"정규식",new[]{"Regular expression","正規表現","正则表达式","正規表示式"}},
+{"정규식 사용",new[]{"Use regular expression","正規表現を使用する","使用正则表达式","使用正規表示式"}},
+{"정규식이 올바르지 않습니다",new[]{"Invalid regular expression","正規表現が正しくありません","无效的正则表达式","無效的正規表示式"}},
         {"버리기",new[]{"Discard","破棄","放弃","捨棄"}},
         {"새 문서",new[]{"Untitled","無題","未命名","未命名"}},
         {"수정중",new[]{"Editing","編集中","编辑中","編輯中"}},
@@ -372,6 +402,7 @@ public partial class MainWindow {
            The custom line-spacing caption ("사용자 지정 (175%)") is rebuilt by UpdateLineMenu after
            the translation pass; its cached original would otherwise put the Korean caption back
            when a narrow window's View menu is translated after that rebuild. */
+        if(TranslateFocusChoice(element))return;
         if(element==status||element==documentTabs||element==source||element==outline||element==listBulletMenuItem||element==listNumberMenuItem||element==customLine)return;var menu=element as MenuItem;var content=element as ContentControl;var textBlock=element as TextBlock;
         string value=menu!=null?menu.Header as string:content!=null?content.Content as string:textBlock!=null?textBlock.Text:null;
         if(value!=null){string original;if(!originalLabels.TryGetValue(element,out original)){original=OriginalKey(value);originalLabels.Remove(element);originalLabels.Add(element,original);}string translated=T(original);if(menu!=null)menu.Header=translated;else if(content!=null)content.Content=translated;else textBlock.Text=translated;}

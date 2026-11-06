@@ -1106,9 +1106,15 @@ internal static class ImeProbeRunner {
             Point update;bool updateRead=CompositionFormPoint(hwnd,out update);
             SendMessage(hwnd,WM_IME_ENDCOMPOSITION,IntPtr.Zero,IntPtr.Zero);Pump();
             if(!formRead||!updateRead){check(names[test]+" composition window target",0,"no IME context to read the form");continue;}
-            check(names[test]+" composition window starts at the caret",Near(start,ours,1)?1:-1,
+            /* Under a Korean layout the form is parked off screen while composing (11-01, SourceEditor.ParkImeForm):
+               the MS Korean IME would otherwise draw its own copy over the inline syllable. The caret placement
+               below is checked for the other layouts; here the parked form is the expected state. */
+            bool koreanLayout=System.Windows.Input.InputLanguageManager.Current.CurrentInputLanguage!=null&&System.Windows.Input.InputLanguageManager.Current.CurrentInputLanguage.TwoLetterISOLanguageName=="ko";
+            bool parked=koreanLayout&&start.X<-10000&&update.X<-10000;
+            if(parked)check(names[test]+" composition form parked under the Korean layout",1,"form="+FormatPoint(start)+", update="+FormatPoint(update));
+            if(!parked)check(names[test]+" composition window starts at the caret",Near(start,ours,1)?1:-1,
                 "form="+FormatPoint(start)+", caret point="+FormatPoint(ours)+", character bounds="+FormatPoint(theirs));
-            check(names[test]+" composition window stays at the caret on updates",Near(update,ours,1)?1:-1,
+            if(!parked)check(names[test]+" composition window stays at the caret on updates",Near(update,ours,1)?1:-1,
                 "form="+FormatPoint(update)+", caret point="+FormatPoint(ours)+", character bounds="+FormatPoint(theirs));
             // A wrapped composition must continue inside the text body, not at the composition
             // window's own left edge (the window's far left, over the line-number gutter): the IME
@@ -1118,7 +1124,7 @@ internal static class ImeProbeRunner {
             const int CfsRect=0x0001;
             Rect area=LiveCompositionGeometry.BodyArea(editor,source);
             bool rect=(startForm.Style&CfsRect)!=0&&FormArea(startForm,area);
-            check(names[test]+" composition form wraps inside the text body",rect?1:-1,
+            if(!parked)check(names[test]+" composition form wraps inside the text body",rect?1:-1,
                 "style=0x"+startForm.Style.ToString("X")+", form=("+startForm.Left+","+startForm.Top+","+startForm.Right+","+startForm.Bottom+"), body=("+N(area.Left)+","+N(area.Top)+","+N(area.Right)+","+N(area.Bottom)+")");
             bool body=area.Left>4&&area.Right>area.Left&&area.Bottom>area.Top&&(int)ours.X>=(int)area.Left&&(int)ours.X<=(int)area.Right&&(int)ours.Y>=(int)area.Top&&(int)ours.Y<=(int)area.Bottom;
             check(names[test]+" composition body area excludes the gutter and holds the caret",body?1:-1,
@@ -1283,5 +1289,229 @@ internal static class ImeProbeRunner {
 }
 public partial class MainWindow {
     internal static int VerifyIme(string outDir){return ImeProbeRunner.Run(outDir);}
+}
+// --ime-click-hang-probe <outDir>: a click while a Korean composition is live must never keep the UI thread inside a
+// self re-posting callback cycle (user report, 2.1.0: freeze with the caret on a paragraph above a table). Every case
+// presses the mouse in the middle of a composition (one lone consonant, or a whole syllable), moves the caret to the
+// start of the paragraph line and then waits for an Input-priority marker (1000 ms) and ApplicationIdle (2000 ms).
+// A runaway cycle is cut by the dispatcher hooks (aborts every newly posted operation of priority Loaded or higher once
+// the operation count passes the limit) and, for a cycle inside one operation, by a watchdog thread that exits.
+internal static class ImeClickHangProbe {
+    const BindingFlags Members=BindingFlags.Instance|BindingFlags.Static|BindingFlags.Public|BindingFlags.NonPublic;
+    const int WM_IME_STARTCOMPOSITION=0x010D,WM_IME_COMPOSITION=0x010F,WM_IME_NOTIFY=0x0282,GCS_COMPSTR=0x0008,LoopLimit=4000;
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd,int msg,IntPtr wParam,IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint thread);
+    [DllImport("imm32.dll")] static extern IntPtr ImmGetContext(IntPtr hWnd);
+    [DllImport("imm32.dll")] static extern bool ImmReleaseContext(IntPtr hWnd,IntPtr hIMC);
+    static readonly object gate=new object();
+    static readonly StringBuilder report=new StringBuilder();
+    static bool all=true,counting,aborting,adjacentFixture;
+    static string outFolder,currentCase;
+    static int opsSinceClick,notifies,caretChanges,visualChanges,abortedOps;
+    static volatile int caseTick;
+    static bool simNotify;static IntPtr simWindow;
+    static readonly System.Collections.Generic.Dictionary<string,int> histogram=new System.Collections.Generic.Dictionary<string,int>();
+    static FieldInfo methodField;
+    static void Check(string name,int state,string detail){
+        lock(gate){
+            if(state<0)all=false;
+            report.Append(state<0?"FAIL ":state>0?"PASS ":"SKIP ").Append(name).Append(": ").Append(detail).Append('\n');
+        }
+    }
+    static void Finish(){
+        lock(gate){
+            string pass=Path.Combine(outFolder,"ime-click-hang-probe-PASS.txt"),fail=Path.Combine(outFolder,"ime-click-hang-probe-FAIL.txt");
+            try{if(File.Exists(pass))File.Delete(pass);if(File.Exists(fail))File.Delete(fail);}catch(IOException){}
+            File.WriteAllText(all?pass:fail,report.ToString(),new UTF8Encoding(false));
+        }
+    }
+    internal static int Run(string outDir){
+        outFolder=Path.GetFullPath(outDir);Directory.CreateDirectory(outFolder);
+        bool oldLive=ProbeDefaults.Live,oldSelfTest=Program.IsSelfTest;
+        // A cycle inside a single operation cannot be cut from the dispatcher: this thread ends the process after 45 s without a case change.
+        var watchdog=new System.Threading.Timer(delegate(object state){
+            if(unchecked(Environment.TickCount-caseTick)>45000){
+                lock(gate){all=false;report.Append("FAIL watchdog: the UI thread did not finish case [").Append(currentCase).Append("] in 45 s, parks=").Append(SourceEditor.ProbeParkCalls).Append(", ops=").Append(opsSinceClick).Append('\n');}
+                Finish();Environment.Exit(3);
+            }
+        },null,1000,1000);
+        try{
+            Program.IsSelfTest=true;
+            if(Application.Current==null)new Application {ShutdownMode=ShutdownMode.OnExplicitShutdown};
+            Application.Current.ShutdownMode=ShutdownMode.OnExplicitShutdown;
+            lock(gate){report.Append("layout=0x").Append(GetKeyboardLayout(0).ToInt64().ToString("X")).Append('\n');}
+            string[] names={"lone consonant","whole syllable"};
+            string[] texts={"ㅈ","자"};
+            for(int mode=0;mode<2;mode++)
+                for(int comp=0;comp<2;comp++)
+                    for(int variant=0;variant<3;variant++)
+                        RunCase((mode==0?"live":"basic")+" / "+names[comp]+" / "+VariantName(variant),mode==0,texts[comp],variant);
+            adjacentFixture=true;
+            for(int variant=0;variant<3;variant++)RunCase("live / table directly below / lone consonant / "+VariantName(variant),true,"ㅈ",variant);
+            adjacentFixture=false;
+        }catch(Exception ex){Check("exception",-1,ex.ToString().Replace('\r',' ').Replace('\n',' '));}
+        finally{
+            watchdog.Dispose();
+            ProbeDefaults.Live=oldLive;Program.IsSelfTest=oldSelfTest;SourceEditor.KoreanLayoutOverride=null;
+        }
+        Finish();
+        return all?0:1;
+    }
+    static string VariantName(int variant){return variant==0?"click":variant==1?"click + late composition update":"click + IME notifies on every form write";}
+    static string Fixture(out int paragraphLine){
+        var text=new StringBuilder();
+        text.Append("# 제목 줄\n\n");
+        paragraphLine=3;
+        text.Append("가나다라마바사아자차카타파하 오늘은 바람이 시원하게 불어서 산책하기 좋은 날입니다 그래서 천천히 걸으며 생각을 정리하고 있었는데 문득 어제 읽은 책의 한 구절이 떠올라 잠시 걸음을 멈추고 하늘을 올려다보았습니다 구름이 천천히 흘러가고 있었습니다\n\n");
+        text.Append("| 열1 | 열2 | 열3 |\n| --- | --- | --- |\n| 가 | 나 | 다 |\n| 라 | 마 | 바 |\n| 사 | 아 | 자 |\n\n");
+        for(int i=1;i<=100;i++){
+            text.Append("문단 ").Append(i).Append("번 내용입니다 가나다라마바사 아자차카타파하\n\n");
+            if(i%5==0)text.Append("| 이름 | 값 | 설명 |\n| --- | --- | --- |\n| 항목").Append(i).Append(" | ").Append(i).Append(" | 설명 줄 |\n| 다음 | ").Append(i+1).Append(" | 끝 |\n\n");
+        }
+        string result=text.ToString();
+        return adjacentFixture?result.Replace("있었습니다\n\n| 열1","있었습니다\n| 열1"):result;
+    }
+    static void OnStarted(object sender,DispatcherHookEventArgs e){
+        if(!counting)return;
+        opsSinceClick++;
+        string key=Describe(e.Operation);
+        int n;histogram.TryGetValue(key,out n);histogram[key]=n+1;
+        if(opsSinceClick>LoopLimit&&!aborting)aborting=true;
+    }
+    static void OnPosted(object sender,DispatcherHookEventArgs e){
+        if(!aborting||!counting)return;
+        if(e.Operation.Priority>=DispatcherPriority.Loaded){if(e.Operation.Abort())abortedOps++;}
+    }
+    static void OnCompleted(object sender,DispatcherHookEventArgs e){
+        if(!counting||!simNotify||aborting)return;
+        // A real IME answers every form write with IMN_SETCOMPOSITIONWINDOW from inside the call; Caret.ShowInternal is what writes it.
+        if(Describe(e.Operation).EndsWith("ShowInternal",StringComparison.Ordinal)&&simWindow!=IntPtr.Zero){notifies++;SendMessage(simWindow,WM_IME_NOTIFY,new IntPtr(0x000B),IntPtr.Zero);}
+    }
+    // Diagnostics of the first caret moves of a case: unvalidated caret position and the managed call chain that moved it.
+    static readonly StringBuilder samples=new StringBuilder();
+    static void Sample(SourceEditor editor){
+        try{
+            var caret=editor.TextArea.Caret;
+            var property=typeof(ICSharpCode.AvalonEdit.Editing.Caret).GetProperty("NonValidatedPosition",Members);
+            var position=(ICSharpCode.AvalonEdit.TextViewPosition)property.GetValue(caret,null);
+            var trace=new System.Diagnostics.StackTrace(1,false);var chain=new StringBuilder();
+            for(int i=0;i<trace.FrameCount&&i<16;i++){var method=trace.GetFrame(i).GetMethod();if(i>0)chain.Append(" < ");chain.Append(method.DeclaringType==null?"":method.DeclaringType.Name).Append('.').Append(method.Name);}
+            samples.Append("  caret#").Append(caretChanges).Append(" line=").Append(position.Line).Append(" col=").Append(position.Column).Append(" vc=").Append(position.VisualColumn).Append(" :: ").Append(chain).Append('\n');
+        }catch(Exception ex){samples.Append("  sample failed ").Append(ex.Message).Append('\n');}
+    }
+    static string Describe(DispatcherOperation operation){
+        try{
+            if(methodField==null)methodField=typeof(DispatcherOperation).GetField("_method",Members);
+            Delegate method=methodField==null?null:methodField.GetValue(operation) as Delegate;
+            if(method==null)return (int)operation.Priority+":?";
+            var info=method.Method;
+            return (int)operation.Priority+":"+(info.DeclaringType==null?"":info.DeclaringType.FullName)+"."+info.Name;
+        }catch(Exception){return (int)operation.Priority+":??";}
+    }
+    static void Pump(){Dispatcher.CurrentDispatcher.Invoke(DispatcherPriority.ApplicationIdle,new Action(delegate{}));}
+    static bool PumpBounded(int milliseconds){
+        var frame=new DispatcherFrame();bool idle=false;
+        Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle,new Action(delegate{idle=true;frame.Continue=false;}));
+        var timer=new DispatcherTimer(DispatcherPriority.Normal);timer.Interval=TimeSpan.FromMilliseconds(milliseconds);
+        timer.Tick+=delegate{timer.Stop();frame.Continue=false;};timer.Start();
+        Dispatcher.CurrentDispatcher.Invoke(DispatcherPriority.Normal,new Action(delegate{}));
+        Dispatcher.PushFrame(frame);timer.Stop();return idle;
+    }
+    static object Invoke(object target,string name,params object[] args){
+        var method=target.GetType().GetMethod(name,Members);if(method==null)throw new MissingMemberException("probe: no method "+name);
+        return method.Invoke(target,args);
+    }
+    static T Field<T>(object target,string name){var field=target.GetType().GetField(name,Members);if(field==null)throw new MissingMemberException("probe: no field "+name);return (T)field.GetValue(target);}
+    static void RunCase(string name,bool live,string composition,int variant){
+        MainWindow window=null;string file=Path.Combine(outFolder,"ime-click-hang.md");
+        currentCase=name;caseTick=Environment.TickCount;counting=false;aborting=false;abortedOps=0;simNotify=false;simWindow=IntPtr.Zero;
+        var dispatcher=Dispatcher.CurrentDispatcher;
+        DispatcherHooks hooks=dispatcher.Hooks;
+        bool hooked=false;
+        try{
+            ProbeDefaults.Live=true;
+            int paragraphLine;
+            File.WriteAllText(file,Fixture(out paragraphLine),new UTF8Encoding(false));
+            window=new MainWindow {ShowInTaskbar=false,ShowActivated=false,Width=900,Height=700};
+            window.Show();window.Left=-20000;window.Top=-20000;
+            Invoke(window,"LoadFileCore",file);window.SetMode(true);Pump();
+            if(!live){var preview=Field<System.Windows.Controls.CheckBox>(window,"preview");preview.IsChecked=true;Pump();}
+            var editor=Field<SourceEditor>(window,"source");
+            bool attached=(bool)window.GetType().GetProperty("LivePreviewAttached",Members).GetValue(window,null);
+            if(attached!=live){Check(name,-1,"setup: live preview attached="+attached+", wanted="+live);return;}
+            for(int attempt=0;attempt<12&&!editor.TextArea.IsKeyboardFocused;attempt++){
+                window.Activate();if(attempt==4)SetForegroundWindow(new WindowInteropHelper(window).Handle);
+                editor.TextArea.Focus();System.Windows.Input.Keyboard.Focus(editor.TextArea);Pump();
+            }
+            var source=PresentationSource.FromVisual(editor.TextArea) as HwndSource;
+            if(!editor.TextArea.IsKeyboardFocused||source==null){Check(name,0,"keyboard focus unavailable in this run");return;}
+            IntPtr hwnd=source.Handle;
+            SourceEditor.KoreanLayoutOverride=delegate{return true;};
+            var document=editor.Document;
+            var line=document.GetLineByNumber(paragraphLine);
+            string paragraph=document.GetText(line.Offset,line.Length);
+            if(paragraph.IndexOf("가나다라마바사아자차카타파하",StringComparison.Ordinal)!=0){Check(name,-1,"setup: paragraph line "+paragraphLine+" is ["+paragraph+"]");return;}
+            editor.Select(line.EndOffset,0);editor.TextArea.Caret.BringCaretToView();PumpBounded(2000);
+            MethodInfo note=typeof(SourceEditor).GetMethod("NoteImeComposition",Members);
+            MethodInfo inline=typeof(SourceEditor).GetMethod("SetImeInline",Members,null,new Type[]{typeof(string)},null);
+            if(note==null||inline==null){Check(name,-1,"seam missing: NoteImeComposition/SetImeInline");return;}
+            // The composition: the real START message through the window hooks, the interim string through the inline seam (no real IME string exists here).
+            SendMessage(hwnd,WM_IME_STARTCOMPOSITION,IntPtr.Zero,IntPtr.Zero);
+            note.Invoke(editor,new object[]{(long)GCS_COMPSTR,null,composition.Length});
+            inline.Invoke(editor,new object[]{composition});
+            PumpBounded(1000);
+            lock(histogram){histogram.Clear();}
+            samples.Clear();opsSinceClick=0;notifies=0;caretChanges=0;visualChanges=0;SourceEditor.ProbeParkCalls=0;
+            EventHandler caretHandler=delegate{caretChanges++;if(caretChanges<=12)Sample(editor);};EventHandler visualHandler=delegate{visualChanges++;};
+            editor.TextArea.Caret.PositionChanged+=caretHandler;editor.TextArea.TextView.VisualLinesChanged+=visualHandler;
+            hooks.OperationStarted+=OnStarted;hooks.OperationPosted+=OnPosted;hooks.OperationCompleted+=OnCompleted;hooked=true;
+            simNotify=variant==2;simWindow=hwnd;
+            counting=true;
+            var watch=System.Diagnostics.Stopwatch.StartNew();
+            long inputAt=-1,idleAt=-1;
+            // The click: the window's preview press asks for the commit (the composition stays live: no END arrives in this case, as in the dump), then AvalonEdit moves the caret.
+            var down=new System.Windows.Input.MouseButtonEventArgs(System.Windows.Input.Mouse.PrimaryDevice,Environment.TickCount,System.Windows.Input.MouseButton.Left);
+            down.RoutedEvent=UIElement.PreviewMouseDownEvent;down.Source=editor.TextArea.TextView;
+            editor.TextArea.TextView.RaiseEvent(down);
+            editor.Select(line.Offset,0);
+            if(variant==1){
+                SendMessage(hwnd,WM_IME_COMPOSITION,IntPtr.Zero,new IntPtr(GCS_COMPSTR));
+                note.Invoke(editor,new object[]{(long)GCS_COMPSTR,null,composition.Length});
+                inline.Invoke(editor,new object[]{composition});
+            }
+            if(variant==2)SendMessage(hwnd,WM_IME_NOTIFY,new IntPtr(0x000B),IntPtr.Zero);
+            dispatcher.BeginInvoke(DispatcherPriority.Input,new Action(delegate{inputAt=watch.ElapsedMilliseconds;}));
+            var frame=new DispatcherFrame();
+            dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle,new Action(delegate{idleAt=watch.ElapsedMilliseconds;frame.Continue=false;}));
+            var timer=new DispatcherTimer(DispatcherPriority.Normal);timer.Interval=TimeSpan.FromMilliseconds(6000);
+            timer.Tick+=delegate{timer.Stop();frame.Continue=false;};timer.Start();
+            Dispatcher.PushFrame(frame);timer.Stop();
+            counting=false;
+            string top;
+            lock(histogram){
+                var items=new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string,int>>(histogram);
+                items.Sort(delegate(System.Collections.Generic.KeyValuePair<string,int> a,System.Collections.Generic.KeyValuePair<string,int> b){return b.Value.CompareTo(a.Value);});
+                var text=new StringBuilder();
+                for(int i=0;i<items.Count&&i<8;i++){if(i>0)text.Append("; ");text.Append(items[i].Key).Append(" x").Append(items[i].Value);}
+                top=text.ToString();
+            }
+            bool ok=inputAt>=0&&inputAt<=1000&&idleAt>=0&&idleAt<=2000&&!aborting;
+            Check(name,ok?1:-1,"input marker="+inputAt+" ms, idle marker="+idleAt+" ms, ops="+opsSinceClick+(aborting?" (RUNAWAY: aborted "+abortedOps+" posted operations)":"")
+                +", ParkImeForm calls="+SourceEditor.ProbeParkCalls+", caret changes="+caretChanges+", visual line rebuilds="+visualChanges+", simulated notifies="+notifies+", composing="+editor.CompositionState()+", top: "+top);
+            if(!ok&&samples.Length>0)Check(name+" caret samples",0,"\n"+samples.ToString());
+            editor.TextArea.Caret.PositionChanged-=caretHandler;editor.TextArea.TextView.VisualLinesChanged-=visualHandler;
+        }catch(Exception ex){Check(name,-1,"exception "+ex.ToString().Replace('\r',' ').Replace('\n',' '));}
+        finally{
+            counting=false;aborting=false;simNotify=false;
+            if(hooked){hooks.OperationStarted-=OnStarted;hooks.OperationPosted-=OnPosted;hooks.OperationCompleted-=OnCompleted;}
+            SourceEditor.KoreanLayoutOverride=null;
+            if(window!=null){
+                try{window.GetType().GetField("saved",Members).SetValue(window,window.GetType().GetProperty("text",Members).GetValue(window,null));window.Close();}
+                catch(Exception ex){Check(name+" close",-1,ex.Message.Replace('\r',' ').Replace('\n',' '));}
+            }
+            try{if(File.Exists(file))File.Delete(file);}catch(IOException){}
+        }
+    }
 }
 }

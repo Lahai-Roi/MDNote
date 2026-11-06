@@ -32,6 +32,12 @@ public static partial class Markdown {
         string[] lines=text.Replace("\r\n","\n").Replace('\r','\n').Split('\n');
         for(int i=0;i<lines.Length;i++) {
             if(i%500==0)Stage("parse-lines",i);int start=i;string line=lines[i];
+            int mathLast;string mathSource;
+            if(TryDisplayMath(lines,i,out mathLast,out mathSource)&&MathRender.Check(mathSource)){
+                double mathAscent,mathDescent;
+                FrameworkElement mathPicture=MathRender.CreatePicture(mathSource,true,size,MathInk(dark),family,out mathAscent,out mathDescent);
+                if(mathPicture!=null){mathPicture.HorizontalAlignment=HorizontalAlignment.Center;Add(doc,new BlockUIContainer(mathPicture){Margin=new Thickness(0,8,0,12)},lines,start,mathLast,"math");i=mathLast;continue;}
+            }
             Match fence=Regex.Match(line,@"^\s{0,3}(`{3,}|~{3,})(.*)$");
             if(fence.Success && !(fence.Groups[1].Value[0]=='`'&&fence.Groups[2].Value.Contains("`"))) {
                 char marker=fence.Groups[1].Value[0];int count=fence.Groups[1].Value.Length;var code=new StringBuilder();bool firstCodeLine=true;
@@ -58,7 +64,7 @@ public static partial class Markdown {
             if(i+1<lines.Length&&!Regex.IsMatch(line,@"^[ \t]*(?:[-+*]|\d+[.)])[ \t]")&&Regex.IsMatch(lines[i+1],@"^[ \t]{0,3}(=+|-{2,})[ \t]*$")){var p=Para(line,size,dark,file,imageLabel);int level=lines[i+1].Trim()[0]=='='?1:2;p.FontSize=size*(level==1?2:1.6);p.FontWeight=FontWeights.Bold;p.LineHeight=Double.NaN;i++;Add(doc,p,lines,start,i,"h:"+level);continue;}
             if(Regex.IsMatch(line,@"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")){Add(doc,new BlockUIContainer(new System.Windows.Controls.Border {Height=1,Background=dark?Brush(110,118,130):Brush(220,222,226),Margin=new Thickness(0,10,0,10)}),lines,start,i,"rule");continue;}
             var quote=Regex.Match(line,@"^[ \t]*>[ \t]?(.*)$");
-            if(quote.Success){var body=new StringBuilder(quote.Groups[1].Value);while(i+1<lines.Length){var next=Regex.Match(lines[i+1],@"^[ \t]*>[ \t]?(.*)$");if(!next.Success)break;i++;body.Append('\n').Append(next.Groups[1].Value);}var section=QuoteSection(body.ToString(),size,family,foreground,dark,file,imageLabel);Add(doc,section,lines,start,i,"quote");continue;}
+            if(quote.Success){var body=new StringBuilder(quote.Groups[1].Value);var lazy=new HtmlExporter.LazyQuote();lazy.Line(quote.Groups[1].Value);while(i+1<lines.Length){var next=Regex.Match(lines[i+1],@"^[ \t]*>[ \t]?(.*)$");if(next.Success){i++;body.Append('\n').Append(next.Groups[1].Value);lazy.Line(next.Groups[1].Value);}else if(lazy.Continues(lines,i+1)){i++;body.Append('\n').Append(lines[i].TrimStart(' ','\t'));}else break;}var section=QuoteSection(body.ToString(),size,family,foreground,dark,file,imageLabel);Add(doc,section,lines,start,i,"quote");continue;}
             var list=Regex.Match(line,@"^([ \t]*)(?:([-+*])|(\d+)[.)])[ \t]+(.*)$");
             if(list.Success){string body=list.Groups[4].Value;string prefix=list.Groups[1].Value+(list.Groups[3].Success?list.Groups[3].Value+". ":"- ");string bullet=list.Groups[3].Success?prefix:"•  ";var check=Regex.Match(body,@"^\[([ xX])\][ \t]*(.*)$");bool task=check.Success;if(check.Success){bullet=check.Groups[1].Value==" "?"☐  ":"☑  ";prefix+="["+(check.Groups[1].Value==" "?" ":"x")+"] ";body=check.Groups[2].Value;}int itemHeadingLevel;string itemHeadingBody;if(MarkdownPlainText.AtxHeading(body,out itemHeadingLevel,out itemHeadingBody)){var itemParagraph=Para(itemHeadingBody,size,dark,file,imageLabel);itemParagraph.FontSize=size*HeadingScale(itemHeadingLevel);itemParagraph.FontWeight=FontWeights.Bold;itemParagraph.LineHeight=Double.NaN;itemParagraph.Margin=new Thickness(0,itemHeadingLevel==1?8:18,0,10);if(task)InsertFirst(itemParagraph,TaskBox(itemParagraph,check.Groups[1].Value!=" "));Add(doc,itemParagraph,lines,start,i,"list:"+prefix);continue;}var itemQuote=Regex.Match(body,@"^>[ \t]?(.*)$");if(itemQuote.Success){var itemSection=QuoteSection(itemQuote.Groups[1].Value,size,family,foreground,dark,file,imageLabel);if(task){var itemFirst=itemSection.Blocks.FirstBlock as Paragraph;if(itemFirst!=null)InsertFirst(itemFirst,TaskBox(itemFirst,check.Groups[1].Value!=" "));}Add(doc,itemSection,lines,start,i,"listquote:"+prefix);continue;}var p=Para(body,size,dark,file,imageLabel);Inline marker;if(check.Success)marker=TaskBox(p,check.Groups[1].Value!=" ");else marker=new Run(bullet){Tag="marker"};InsertFirst(p,marker);p.Margin=new Thickness(12+Math.Min(100,list.Groups[1].Length*5),2,0,4);Add(doc,p,lines,start,i,"list:"+prefix);continue;}
             Add(doc,Para(line,size,dark,file,imageLabel),lines,start,i,"");
@@ -167,6 +173,39 @@ public static partial class Markdown {
         for(int i=0;i<value.Length;i++){char c=value[i];if(c>=0xE000&&c<=0xE01F){if(code)result.Append('\\');result.Append(EscapablePunctuation[c-0xE000]);}else result.Append(c);}
         return result.ToString();
     }
+    // Math pictures for the print / plain renderer: vector drawings from MathRender (the same engine and
+    // syntax rules as the live preview). The ink colour follows the document's dark flag.
+    static Brush MathInk(bool dark){return dark?Brush(235,235,235):Brush(32,33,36);}
+    static bool AddMathPicture(InlineCollection dest,string value,int at,int open,int close,double size,bool dark){
+        string source=RestoreCodeEscapes(value.Substring(open+1,close-open-1));
+        if(!MathRender.Check(source))return false;
+        double ascent,descent;
+        FrameworkElement picture=MathRender.CreatePicture(source,false,size,MathInk(dark),referenceContext==null?"Malgun Gothic":referenceContext.Family,out ascent,out descent);
+        if(picture==null)return false;
+        if(open>at)dest.Add(new Run(RestoreEscapes(MarkdownPlainText.DecodeEntities(value.Substring(at,open-at)))));
+        picture.Margin=new Thickness(0,0,0,-descent);
+        dest.Add(new InlineUIContainer(picture){BaselineAlignment=BaselineAlignment.Baseline,Tag="math"});
+        return true;
+    }
+    // A display formula starting at lines[i]: one line "$$ x $$", a "$$" ... "$$" block or a ```math fence
+    // (no blank line inside, the closer within MathRender.BlockLines lines). last = its final line.
+    static bool TryDisplayMath(string[] lines,int i,out int last,out string source){
+        last=i;source=null;string line=lines[i];
+        if(MathRender.OneLineDisplay(line,out source))return true;
+        char marker='\0';int markerLength=0;bool dollar=MathRender.IsDollarLine(line);
+        if(!dollar&&!MathRender.IsMathFence(line,out marker,out markerLength))return false;
+        var body=new StringBuilder();
+        for(int k=1;k<=MathRender.BlockLines;k++){
+            int at=i+k;if(at>=lines.Length)return false;
+            string text=lines[at];
+            if(String.IsNullOrWhiteSpace(text))return false;
+            bool closer=dollar?MathRender.IsDollarLine(text):Regex.IsMatch(text,@"^ {0,3}"+Regex.Escape(new string(marker,markerLength))+Regex.Escape(marker.ToString())+@"*[ \t]*$");
+            if(closer){last=at;source=body.ToString();return true;}
+            if(body.Length>0)body.Append(' ');
+            body.Append(text.Trim());
+        }
+        return false;
+    }
     static void Inline(InlineCollection dest,string value,double size,bool dark,string file,string imageLabel,int depth){
         if(depth>12){dest.Add(new Run(RestoreEscapes(value)));return;}
         // A backslash at a line's end is a hard line break: the character is markup and hides, the
@@ -181,6 +220,14 @@ public static partial class Markdown {
         while(p<value.Length){
             while(index<matches.Count&&matches[index].Index<p)index++; // a match inside a link, image or span is read again by the recursion
             bool image;int labelStart,labelEnd,addressStart,addressEnd,end;
+            // Inline math "$x$" (the live preview's rules, MathRender.InlineEnd): a vector picture on the
+            // text baseline. The span is skipped whole, so "_" and "*" inside a formula are never emphasis.
+            // "$$" is never inline, and a formula that does not parse stays as typed.
+            if(value[p]=='$'){
+                if(p+1<value.Length&&value[p+1]=='$'){p+=2;continue;}
+                int mathBudget=value.Length*4+16,mathClose=MathRender.InlineEnd(value,p,ref mathBudget);
+                if(mathClose>p+1&&AddMathPicture(dest,value,at,p,mathClose,size,dark)){at=mathClose+1;p=at;continue;}
+            }
             if(LinkAt(value,p,out image,out labelStart,out labelEnd,out addressStart,out addressEnd,out end)){
                 if(p>at)dest.Add(new Run(RestoreEscapes(MarkdownPlainText.DecodeEntities(value.Substring(at,p-at)))));
                 string address,title;TargetParts(value,addressStart,addressEnd,out address,out title);
@@ -452,11 +499,19 @@ public static class Program {
         if(args.Length==2&&args[0]=="--large-doc-abuse-probe"){IsSelfTest=true;return LargeDocAbuseProbe.Run(args[1]);}
         if(args.Length==2&&args[0]=="--print-probe"){IsSelfTest=true;return PrintProbe.Run(args[1]);}
         if(args.Length==2&&args[0]=="--drop-probe"){IsSelfTest=true;return DropProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--image-save-probe"){IsSelfTest=true;return ImageSaveProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--filechange-probe"){IsSelfTest=true;return FileChangeProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--htmlexport-probe"){IsSelfTest=true;return HtmlExportProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--update-probe"){IsSelfTest=true;return UpdateCheckProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--focusmode-probe"){IsSelfTest=true;return FocusModeProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--search-regex-probe"){IsSelfTest=true;return SearchRegexProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--math-probe"){IsSelfTest=true;return MathProbe.Run(args[1]);}
         if(args.Length==2&&args[0]=="--md2txt-probe"){IsSelfTest=true;return MainWindow.VerifyMarkdownPlainText(args[1]);}
         if(args.Length==2&&args[0]=="--commands-probe"){IsSelfTest=true;return MainWindow.VerifyMarkdownCommands(args[1]);}
         if(args.Length==2&&args[0]=="--structural-probe"){IsSelfTest=true;return MainWindow.VerifyStructuralInput(args[1]);}
         if(args.Length==2&&args[0]=="--longline-window-probe"){IsSelfTest=true;return MainWindow.VerifyLongLineWindow(args[1]);}
         if(args.Length==2&&args[0]=="--ime-probe"){IsSelfTest=true;return MainWindow.VerifyIme(args[1]);}
+        if(args.Length==2&&args[0]=="--ime-click-hang-probe"){IsSelfTest=true;return ImeClickHangProbe.Run(args[1]);}
         if(args.Length==2&&args[0]=="--inputformat-probe"){IsSelfTest=true;return MainWindow.VerifyInputFormat(args[1]);}
         if(args.Length==3&&args[0]=="--file-bench"){IsSelfTest=true;return MainWindow.RunFileBench(args[1],args[2]);}
         if(args.Length>=2&&args[0]=="--file-bench-interact"){IsSelfTest=true;return MainWindow.RunInteractionBench(args.Length>2?args[1]:"--generated-4m",args[args.Length-1]);}

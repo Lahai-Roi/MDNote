@@ -11,7 +11,7 @@
 !ifndef OUTPUT
  !error "OUTPUT is required"
 !endif
-!define VERSION "2.1.0"
+!define VERSION "2.2.0"
 !ifdef TEST_BUILD
  !define APP_NAME "MDNote (설치 검사)"
  !define APP_KEY "MDNoteInstallerSmokeTest"
@@ -39,7 +39,7 @@ SetOverwrite on
 ShowInstDetails show
 ShowUninstDetails show
 ManifestDPIAware true
-VIProductVersion "2.1.0.0"
+VIProductVersion "2.2.0.0"
 VIAddVersionKey /LANG=1042 "ProductName" "$(MDNoteText16)"
 VIAddVersionKey /LANG=1042 "FileDescription" "${APP_NAME} 설치 프로그램"
 VIAddVersionKey /LANG=1042 "FileVersion" "${VERSION}"
@@ -67,6 +67,10 @@ VIAddVersionKey /LANG=1042 "LegalCopyright" "MDNote"
 !define MUI_FINISHPAGE_SHOWREADME
 !define MUI_FINISHPAGE_SHOWREADME_FUNCTION CreateStartMenuShortcuts
 !define MUI_FINISHPAGE_SHOWREADME_TEXT "$(MDNoteText6)"
+; Third check box on the finish page (below the two MUI ones, MUI's own layout: 90u and 110u): the app's
+; automatic update check, unchecked by default. The choice is stored as HKLM Software\MDNote AutoUpdateCheck.
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW FinishPageShow
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE FinishPageLeave
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 UninstPage custom un.SettingsPage un.SettingsLeave
@@ -82,6 +86,22 @@ UninstPage custom un.SettingsPage un.SettingsLeave
 
 Var RemoveSettings
 Var SettingsCheckbox
+Var AutoUpdateCheckbox
+
+Function FinishPageShow
+ ${NSD_CreateCheckbox} 120u 130u 195u 10u "$(MDNoteText23)"
+ Pop $AutoUpdateCheckbox
+ SetCtlColors $AutoUpdateCheckbox "000000" "FFFFFF"
+ ; Unchecked unless the user ticks it.
+FunctionEnd
+Function FinishPageLeave
+ ${NSD_GetState} $AutoUpdateCheckbox $0
+ ${If} $0 == ${BST_CHECKED}
+  WriteRegDWORD ${REG_ROOT} "Software\${APP_KEY}" "AutoUpdateCheck" 1
+ ${Else}
+  WriteRegDWORD ${REG_ROOT} "Software\${APP_KEY}" "AutoUpdateCheck" 0
+ ${EndIf}
+FunctionEnd
 
 Function .onInit
  ; Preselect the Windows display language when it is one of the five; any other language starts on
@@ -268,6 +288,15 @@ Section "MDNote" Main
    ${Break}
  ${EndSwitch}
  WriteRegStr ${REG_ROOT} "Software\${APP_KEY}" "DefaultLanguage" $0
+ ; The finish page's "업데이트 자동 확인" box writes the real choice; a silent install has no such page: a first
+ ; silent install starts unchecked, a silent upgrade (winget) keeps the choice made at the earlier install.
+ ${If} ${Silent}
+  ClearErrors
+  ReadRegDWORD $0 ${REG_ROOT} "Software\${APP_KEY}" "AutoUpdateCheck"
+  ${If} ${Errors}
+   WriteRegDWORD ${REG_ROOT} "Software\${APP_KEY}" "AutoUpdateCheck" 0
+  ${EndIf}
+ ${EndIf}
 SectionEnd
 
 Function CreateDesktopShortcut
@@ -340,6 +369,7 @@ Section "Uninstall"
  DeleteRegKey ${REG_ROOT} "${REG_APP}"
  DeleteRegKey ${REG_ROOT} "Software\${APP_KEY}\Capabilities"
  DeleteRegValue ${REG_ROOT} "Software\${APP_KEY}" "DefaultLanguage"
+ DeleteRegValue ${REG_ROOT} "Software\${APP_KEY}" "AutoUpdateCheck"
  DeleteRegKey /ifempty ${REG_ROOT} "Software\${APP_KEY}"
  DeleteRegKey ${REG_ROOT} "Software\Classes\${APP_ID}"
  DeleteRegValue ${REG_ROOT} "Software\Classes\.md\OpenWithProgids" "${APP_ID}"

@@ -1158,6 +1158,19 @@ internal static class UiFixProbe {
             Click(bold);Pump(120);
             TypeText(source,"a");TypeText(source," ");TypeText(source,"b");TypeText(source," ");TypeText(source,"c");
             Check(ref all,report,"g2 basic closing-edge space is taken back by the next character",source.Text=="x**a b c**","text=["+OneLine(source.Text)+"]");
+            // (b2) Same with text after the caret, and with the italic toggle.
+            ApplyHideMarkers(window,true);
+            window.SetText("x tail");window.SetMode(true);Pump(250);
+            ClearTyping(window);source.Select(1,0);Pump(100);
+            Click(bold);Pump(120);
+            TypeText(source,"a");TypeText(source," ");TypeText(source,"b");TypeText(source," ");TypeText(source,"c");
+            Check(ref all,report,"g2b basic closing-edge space with text after the caret",source.Text=="x**a b c** tail","text=["+OneLine(source.Text)+"]");
+            ApplyHideMarkers(window,true);
+            window.SetText("x");window.SetMode(true);Pump(250);
+            ClearTyping(window);source.Select(1,0);Pump(100);
+            Call(window,"ToggleFormat","italic");Pump(120);
+            TypeText(source,"a");TypeText(source," ");TypeText(source,"b");TypeText(source," ");TypeText(source,"c");
+            Check(ref all,report,"g2c basic italic closing-edge space is taken back by the next character",source.Text=="x*a b c*","text=["+OneLine(source.Text)+"]");
             // (c) Live: B on, a, Space, b
             ApplyHideMarkers(window,false);
             window.SetText("");window.SetMode(true);Pump(250);
@@ -1213,12 +1226,13 @@ internal static class UiFixProbe {
             var listTool=(Button)FieldOf(window,"listButton");var taskTool=(Button)FieldOf(window,"taskButton");
             var quoteTool=(Button)FieldOf(window,"quoteButton");var headingTool=(Button)FieldOf(window,"headingButton");
             var ruleTool=(Button)FieldOf(window,"ruleButton");var blockTool=(Button)FieldOf(window,"blockButton");
+            // 11-01 user (HANDOFF): the code block button is off inside a table too, like the other five.
             Check(ref all,report,"g6 block buttons read disabled inside a table cell",
-                !listTool.IsEnabled&&!taskTool.IsEnabled&&!quoteTool.IsEnabled&&!headingTool.IsEnabled&&!ruleTool.IsEnabled&&blockTool.IsEnabled,
+                !listTool.IsEnabled&&!taskTool.IsEnabled&&!quoteTool.IsEnabled&&!headingTool.IsEnabled&&!ruleTool.IsEnabled&&!blockTool.IsEnabled,
                 "list="+listTool.IsEnabled+" task="+taskTool.IsEnabled+" quote="+quoteTool.IsEnabled+" heading="+headingTool.IsEnabled+" rule="+ruleTool.IsEnabled+" code="+blockTool.IsEnabled);
             source.Select(source.Document.TextLength,0);Call(window,"UpdateTools");Pump(120);
-            Check(ref all,report,"g6 block buttons return outside the table",listTool.IsEnabled&&taskTool.IsEnabled&&quoteTool.IsEnabled&&headingTool.IsEnabled&&ruleTool.IsEnabled,
-                "list="+listTool.IsEnabled+" quote="+quoteTool.IsEnabled);
+            Check(ref all,report,"g6 block buttons return outside the table",listTool.IsEnabled&&taskTool.IsEnabled&&quoteTool.IsEnabled&&headingTool.IsEnabled&&ruleTool.IsEnabled&&blockTool.IsEnabled,
+                "list="+listTool.IsEnabled+" quote="+quoteTool.IsEnabled+" code="+blockTool.IsEnabled);
             // (f) 코드 with no selection in a cell arms inline code instead of writing an empty
             // pair; the first typed character writes "`x`" inside the cell, never a fence.
             foreach(bool header in new[]{true,false}){
@@ -1363,7 +1377,7 @@ internal static class UiFixProbe {
                     first.IsSubmenuOpen=true;Pump(900);window.UpdateLayout();Pump(300);
                     bounds=SubmenuBounds(window,first);
                 }
-                Check(ref all,report,"f5 » submenu unfolds inside the window",bounds.Contains("inside=True"),bounds);
+                Check(ref all,report,"f5 » submenu unfolds to the right of its entry, to the other side only at the screen edge",bounds.Contains(" ok=True"),bounds);
                 if(first!=null)first.IsSubmenuOpen=false;
                 /* f1b: the invariant behind the crash. A width exists where the menu divider is still painted
                    while the first menu item already lives in the » list; this layout at 450 px keeps the file
@@ -2340,8 +2354,18 @@ internal static class UiFixProbe {
         try{
             Point left=child.PointToScreen(new Point(0,0)),right=child.PointToScreen(new Point(child.ActualWidth,0));
             Point windowLeft=window.PointToScreen(new Point(0,0)),windowRight=window.PointToScreen(new Point(window.ActualWidth,0));
-            bool inside=left.X>=windowLeft.X-1&&right.X<=windowRight.X+1;
-            return "submenu="+left.X.ToString("0")+".."+right.X.ToString("0")+" window="+windowLeft.X.ToString("0")+".."+windowRight.X.ToString("0")+" inside="+inside;
+            /* User rule (HANDOFF, 11-01): a submenu of the » list unfolds to the right of its entry, even past the
+               window's edge; only the screen edge sends it to the other side. So the check is against the entry
+               and the screen, not the window. The template overlaps the entry by 4 px, 8 px of slack covers it. */
+            Rect entry=ScreenRect(item);
+            if(entry.IsEmpty)return "submenu entry is not realised";
+            Rect screen=new Rect(SystemParameters.VirtualScreenLeft,SystemParameters.VirtualScreenTop,SystemParameters.VirtualScreenWidth,SystemParameters.VirtualScreenHeight);
+            bool onRightSide=left.X>=entry.Right-8;
+            bool flippedLeft=right.X<=entry.Left+8;
+            bool onScreen=left.X>=screen.Left-1&&right.X<=screen.Right+1;
+            bool roomOnRight=entry.Right-8+(right.X-left.X)<=screen.Right+1;
+            bool ok=onScreen&&(onRightSide||(flippedLeft&&!roomOnRight));
+            return "submenu="+left.X.ToString("0")+".."+right.X.ToString("0")+" entry="+entry.Left.ToString("0")+".."+entry.Right.ToString("0")+" screen="+screen.Left.ToString("0")+".."+screen.Right.ToString("0")+" window="+windowLeft.X.ToString("0")+".."+windowRight.X.ToString("0")+" right="+onRightSide+" flipped="+flippedLeft+" room="+roomOnRight+" ok="+ok;
         }catch(Exception failure){return "submenu measure error "+failure.GetType().Name;}
     }
     /* Screen rectangles for the overflow placement checks: the window, an element on it, and the popup a

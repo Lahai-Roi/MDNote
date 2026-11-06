@@ -934,6 +934,37 @@ internal static class MarkdownCommands {
         return false;
     }
 
+    // The insert point for a picture whose caret is in a fenced block (its fences included): the
+    // end of the block's closing fence line, with `prefix` the line break that starts the
+    // picture's own line there. -1 when the caret's block has no closing fence within the
+    // bounded scan (a block left open to the document's end) or the caret is in no block at all.
+    // The scans are the ones RemoveCodeBlock uses, bounded at 400 lines each way.
+    static int BelowCodeBlock(TextDocument document, int caret, out string prefix) {
+        prefix = string.Empty;
+        if (caret < 0 || caret > document.TextLength) return -1;
+        DocumentLine line = document.GetLineByOffset(caret);
+        DocumentLine opener;
+        FenceMark open = new FenceMark();
+        if (IsFenceLine(document, line) && !OpenFenceBefore(document, line, out open)) {
+            opener = line;
+            TryFenceMark(LineText(document, line), out open);
+        } else if (!OpenFenceBefore(document, line, out open, out opener)) return -1;
+        if (opener == null) return -1;
+        DocumentLine current = opener.NextLine;
+        int scanned = 0;
+        while (current != null && scanned < 400) {
+            FenceMark mark;
+            if (TryFenceMark(LineText(document, current), out mark)
+                && mark.Character == open.Character && mark.Length >= open.Length && mark.TailBlank) {
+                prefix = NewlineFor(document, current);
+                return current.EndOffset;
+            }
+            current = current.NextLine;
+            scanned++;
+        }
+        return -1;
+    }
+
     #region InlineSegments
     // One editable run of an inline command: a text line's body, or one table cell's text. The
     // range never includes a line's structural markup (prefix, table pipe, delimiter row, setext
@@ -2274,13 +2305,21 @@ internal static class MarkdownCommands {
     internal static CommandResult InsertImage(TextDocument document, int caretOffset, string path, string alt) {
         if (!Validate(document, caretOffset, 0)) return null;
         // An image token written inside a fence or an inline code run is literal text, not a
-        // picture, so the command declines exactly where the code guards decline.
-        if (TouchesCode(document, caretOffset, 0)) return null;
-        if (CaretInsideInlineCode(document, caretOffset)) return null;
-        if (!CaretInEditableText(document, caretOffset)) return null;
+        // picture. 11-05 user decision: a caret in a closed fenced block puts the picture on a new
+        // line right under the block's closing fence instead (BelowCodeBlock); an inline code run
+        // and a block left open to the document's end still decline.
+        string prefix = string.Empty;
+        if (TouchesCode(document, caretOffset, 0)) {
+            int below = BelowCodeBlock(document, caretOffset, out prefix);
+            if (below < 0) return null;
+            caretOffset = below;
+        } else {
+            if (CaretInsideInlineCode(document, caretOffset)) return null;
+            if (!CaretInEditableText(document, caretOffset)) return null;
+        }
         string target = path ?? string.Empty;
         if (target.IndexOf(' ') >= 0) target = "<" + target + ">";
-        string text = "![" + ImageAlt(alt) + "](" + target + ")";
+        string text = prefix + "![" + ImageAlt(alt) + "](" + target + ")";
         CommandResult result = new CommandResult();
         result.Add(caretOffset, 0, text);
         result.SelectionStart = caretOffset + text.Length;
@@ -2373,16 +2412,23 @@ internal static class MarkdownCommands {
         // The image button's three guards apply to a drop as well: a token written inside a fence
         // or an inline code run is literal text, and structure (a delimiter row, a rule) never
         // takes one.
-        if (TouchesCode(document, caretOffset, 0)) return null;
-        if (CaretInsideInlineCode(document, caretOffset)) return null;
-        if (!CaretInEditableText(document, caretOffset)) return null;
+        // A caret in a closed fenced block takes the pictures right under the block (InsertImage).
+        string prefix = string.Empty;
+        if (TouchesCode(document, caretOffset, 0)) {
+            int below = BelowCodeBlock(document, caretOffset, out prefix);
+            if (below < 0) return null;
+            caretOffset = below;
+        } else {
+            if (CaretInsideInlineCode(document, caretOffset)) return null;
+            if (!CaretInEditableText(document, caretOffset)) return null;
+        }
         DocumentLine line = document.GetLineByOffset(caretOffset);
         // One image per source line is right in a paragraph, but a table row is one line: a second
         // image written as a new source line would split the row in two. The row takes the whole
         // drop instead, since a single image drop into a cell already writes it at the caret there.
         bool row = references.Count > 1 && TableLineKind(document, line) == 1;
         string newline = NewlineFor(document, line);
-        var text = new StringBuilder();
+        var text = new StringBuilder(prefix);
         for (int i = 0; i < references.Count; i++) {
             if (i > 0) text.Append(row ? " " : newline);
             text.Append(ImageMarkdown(references[i], alts[i]));
