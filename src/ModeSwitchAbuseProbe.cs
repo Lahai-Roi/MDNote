@@ -1415,11 +1415,25 @@ internal static class ModeSwitchAbuseProbe {
             DocumentHistory history = HistoryOf(window);
             int undoSteps = 0, stalls = 0;
             string previous = beforeUndo;
+            // Diagnosis aid (walk B1): one line per step with the stack top the step consumed, the
+            // stacks' state after it, and whether a MismatchException / ResetMismatchedHistory fired.
+            var undoTrace = new List<string>();
+            var redoTrace = new List<string>();
+            int mismatch0 = DocumentHistory.MismatchCount, reset0 = DocumentHistory.ResetCount;
             while (history.CanUndo && undoSteps < UndoCap) {
+                string top = history.DiagTop(false);
+                int mismatchBefore = DocumentHistory.MismatchCount, resetBefore = DocumentHistory.ResetCount;
+                int depthBefore = history.UndoDepth;
                 Invoke(window, "Undo");
                 undoSteps++;
                 string now = DocText(window);
-                if (String.Equals(now, previous, StringComparison.Ordinal)) {
+                // A text-mode toggle entry leaves the text alone, so several in a row are normal. Only a step that left the
+                // stack as it was too is a stall (seed 4 basic step 143 broke out after four mode entries with one entry left).
+                bool popped = history.UndoDepth < depthBefore;
+                undoTrace.Add("u" + undoSteps + "[" + top + " | " + (history.CanUndo ? "U" : "-") + (history.CanRedo ? "R" : "-")
+                    + (String.Equals(now, previous, StringComparison.Ordinal) ? " same" : " moved")
+                    + " mm+" + (DocumentHistory.MismatchCount - mismatchBefore) + " reset+" + (DocumentHistory.ResetCount - resetBefore) + "]");
+                if (String.Equals(now, previous, StringComparison.Ordinal) && !popped) {
                     stalls++;
                     if (stalls >= 4) break;
                 } else stalls = 0;
@@ -1431,10 +1445,17 @@ internal static class ModeSwitchAbuseProbe {
             stalls = 0;
             string redoPrevious = undone;
             while (redoSteps < undoSteps && redoSteps < UndoCap) {
+                string top = history.DiagTop(true);
+                int mismatchBefore = DocumentHistory.MismatchCount, resetBefore = DocumentHistory.ResetCount;
+                int redoDepthBefore = history.RedoDepth;
                 Invoke(window, "Redo");
                 redoSteps++;
                 string now = DocText(window);
-                if (String.Equals(now, redoPrevious, StringComparison.Ordinal)) {
+                bool redone1 = history.RedoDepth < redoDepthBefore;
+                redoTrace.Add("r" + redoSteps + "[" + top + " | " + (history.CanUndo ? "U" : "-") + (history.CanRedo ? "R" : "-")
+                    + (String.Equals(now, redoPrevious, StringComparison.Ordinal) ? " same" : " moved")
+                    + " mm+" + (DocumentHistory.MismatchCount - mismatchBefore) + " reset+" + (DocumentHistory.ResetCount - resetBefore) + "]");
+                if (String.Equals(now, redoPrevious, StringComparison.Ordinal) && !redone1) {
                     stalls++;
                     if (stalls >= 4) break;
                 } else stalls = 0;
@@ -1446,13 +1467,22 @@ internal static class ModeSwitchAbuseProbe {
             if (startSame && redoSteps == undoSteps && String.Equals(redone, beforeUndo, StringComparison.Ordinal)) return true;
             string detail = "undo " + undoSteps + " steps to segment start: " + (startSame ? "same" : Diff(segmentStart, undone)) +
                 "; redo " + redoSteps + "/" + undoSteps + " to before-undo: " + (String.Equals(redone, beforeUndo, StringComparison.Ordinal) ? "same" : Diff(beforeUndo, redone));
-            return FailUndo("undo:segment", detail);
+            string trace = "mismatches=" + (DocumentHistory.MismatchCount - mismatch0) + " resets=" + (DocumentHistory.ResetCount - reset0)
+                + " lastMismatch=" + (DocumentHistory.LastMismatch ?? "-") + " final=" + (history.CanUndo ? "U" : "-") + (history.CanRedo ? "R" : "-")
+                + " undo-trace(last 24 of " + undoTrace.Count + "): " + String.Join(" ", undoTrace.GetRange(Math.Max(0, undoTrace.Count - 24), Math.Min(24, undoTrace.Count)).ToArray())
+                + " redo-trace(first 12 of " + redoTrace.Count + "): " + String.Join(" ", redoTrace.GetRange(0, Math.Min(12, redoTrace.Count)).ToArray());
+            return FailUndo("undo:segment", detail, trace);
         } catch (Exception ex) {
             return FailUndo("undo:segment", ex.GetType().Name + ": " + OneLine(ex.Message));
         }
     }
 
     static bool FailUndo(string invariant, string detail) {
+        return FailUndo(invariant, detail, null);
+    }
+
+    // trace: the per-step history diagnosis (walk B1), appended to the report detail uncut.
+    static bool FailUndo(string invariant, string detail, string trace) {
         Bump(failCounts, invariant);
         failureEvents++;
         all = false;
@@ -1466,7 +1496,7 @@ internal static class ModeSwitchAbuseProbe {
         failure.Invariant = invariant;
         failure.Expected = "undo returns the segment start text exactly; redo restores the pre-undo text";
         failure.Actual = OneLine(detail);
-        failure.Detail = OneLine(detail);
+        failure.Detail = OneLine(detail) + (trace == null ? "" : " || history: " + trace.Replace("\r\n", "\\n").Replace("\r", "\\n").Replace("\n", "\\n"));
         failure.Steps = StepListText();
         failure.Before = "(segment start text)";
         failure.After = "(undo oracle at segment end)";

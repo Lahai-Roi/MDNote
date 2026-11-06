@@ -61,6 +61,7 @@ public partial class MainWindow {
     // Called first by TranslateTree: true when the element is one of the three choices.
     bool TranslateFocusChoice(DependencyObject element){
         var item=element as MenuItem;if(item==null)return false;
+        if(TranslateHeadingStyleChoice(element))return true;/* 제목 단계 표시's three styles (ReadingLayout.cs) */
         var choice=item.Tag as FocusChoice;if(choice==null)return false;
         item.Header=FocusChoiceText(choice.Level);return true;
     }

@@ -1017,6 +1017,11 @@ public partial class MainWindow {
     internal static void VerifyTxtLongLineHost(string directory, StringBuilder report, ref int failures) {
         string file=Path.Combine(directory,"longline-window-txt.txt");
         MainWindow window=null;
+        // alwaysEditing defaults to false under Program.IsSelfTest (LoadPreferences returns early), so
+        // a loaded file opens read-only and PerformTextInput inserts nothing. A user opens it with the
+        // saved 11-01 "항상 수정 기능 활성화" on (Preferences.cs:104), so the probe sets the same static
+        // before the load (as MainWindowBench does) and restores it afterwards.
+        bool previousEditing=alwaysEditing;
         try {
             string body=LongLineWindowProbe.Generate(LongLineWindowProbe.LongChars);
             string seeded=body.Substring(0,LongLineWindowProbe.TokenAt)+LongLineWindowProbe.Token
@@ -1026,6 +1031,7 @@ public partial class MainWindow {
             window=new MainWindow { ShowInTaskbar=false, ShowActivated=false, Width=1000, Height=800 };
             window.Show();
             window.Left=-20000;
+            alwaysEditing=true;
             window.LoadFileCore(file);
             PumpLongLineWindow(window);
             LongLineWindow.Session attached=window.longLines as LongLineWindow.Session;
@@ -1145,6 +1151,7 @@ public partial class MainWindow {
             failures++;
             report.AppendLine("FAIL exception txt host " + ex.ToString());
         } finally {
+            alwaysEditing=previousEditing;
             if(window!=null){
                 try { window.text=window.source.Document.Text; window.saved=window.text; } catch (Exception) { }
                 try { window.Close(); } catch (Exception) { }

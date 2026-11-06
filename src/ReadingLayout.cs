@@ -21,7 +21,40 @@ public partial class MainWindow {
     void BuildLiveViewItem(MenuItem view){
         liveModeMenu=new MenuItem {Header="Markdown 라이브 미리보기",IsCheckable=true,IsChecked=!hideMarkers,ToolTip="커서가 있는 줄만 원문으로 보여 줍니다."};
         liveModeMenu.Click+=delegate{SetLiveMode(liveModeMenu.IsChecked);};
-        view.Items.Add(liveModeMenu);view.SubmenuOpened+=delegate{UpdateLiveModeMenu();};
+        view.Items.Add(liveModeMenu);
+        BuildHeadingMarksMenu(view);
+        view.SubmenuOpened+=delegate{UpdateLiveModeMenu();UpdateHeadingMarksMenu();};
+    }
+    /* user 2026-11-06: 보기 > 제목 단계 표시 sits right under the live item, in the same group, and is built
+       like the 집중 모드 row (FocusMode.cs BuildFocusMenu): the row itself toggles (on with the last style,
+       or off) and its submenu picks 슬래시 막대 / # 기호 / 끄기. The parent shows the check mark while a style
+       is on. The three choices carry a HeadingStyleChoice tag and are translated by TranslateFocusChoice
+       ("끄기" is also other labels' key territory), so TranslateTree skips them. */
+    MenuItem headingMarksMenu;
+    readonly MenuItem[] headingMarkChoices=new MenuItem[3];
+    sealed class HeadingStyleChoice {internal readonly int Style;internal HeadingStyleChoice(int style){Style=style;}}
+    static readonly string[] HeadingStyleNames={"슬래시 막대","# 기호","끄기"};
+    static readonly string[] HeadingStyleKeys={"슬래시 막대","# 기호","집중 모드: 끄기"};
+    void BuildHeadingMarksMenu(MenuItem view){
+        headingMarksMenu=new MenuItem {Header="제목 단계 표시",IsChecked=headingMarkStyle!=2};
+        for(int style=0;style<3;style++){
+            int chosen=style;var item=new MenuItem {Header=HeadingStyleNames[style],IsCheckable=true,IsChecked=headingMarkStyle==style,Tag=new HeadingStyleChoice(style)};
+            item.Click+=delegate{SetHeadingMarkStyle(chosen);};
+            headingMarkChoices[style]=item;headingMarksMenu.Items.Add(item);
+        }
+        headingMarksMenu.PreviewMouseLeftButtonUp+=delegate(object sender,System.Windows.Input.MouseButtonEventArgs e){
+            if(!Object.ReferenceEquals(ClickedMenuItem(e.OriginalSource as DependencyObject),headingMarksMenu))return;
+            e.Handled=true;ToggleHeadingMarksFromHeader();
+            MenuItem top=TopMenuItem(headingMarksMenu);if(top!=null)top.IsSubmenuOpen=false;
+        };
+        view.Items.Add(headingMarksMenu);
+    }
+    string HeadingStyleText(int style){return language=="ko"?HeadingStyleNames[style]:T(HeadingStyleKeys[style]);}
+    // Called by TranslateFocusChoice: true when the element is one of the three style choices.
+    bool TranslateHeadingStyleChoice(DependencyObject element){
+        var item=element as MenuItem;if(item==null)return false;
+        var choice=item.Tag as HeadingStyleChoice;if(choice==null)return false;
+        item.Header=HeadingStyleText(choice.Style);return true;
     }
     internal static bool TryLinePercent(string value,out double percent){string number=(value??"").Trim().TrimEnd('%').Trim();bool parsed=Double.TryParse(number,NumberStyles.Float,CultureInfo.CurrentCulture,out percent)||Double.TryParse(number,NumberStyles.Float,CultureInfo.InvariantCulture,out percent);return parsed&&!Double.IsNaN(percent)&&!Double.IsInfinity(percent)&&percent>=50&&percent<=400;}
     void UpdateLineMenu(){foreach(var pair in linePresets)pair.Value.IsChecked=Math.Abs(pair.Key-linePercent)<.001;if(customLine!=null){customLine.Header=T("사용자 지정")+" ("+customLinePercent.ToString("0.##",CultureInfo.CurrentCulture)+"%)";customLine.IsChecked=!linePresets.ContainsKey((int)linePercent)||Math.Abs(linePercent-(int)linePercent)>.001;}}

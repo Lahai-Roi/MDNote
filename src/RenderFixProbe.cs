@@ -47,6 +47,7 @@ static class RenderFixProbe {
             try {RunNestedBullet(outDir);} catch (Exception ex) {Check("nested-bullet exception",false,ex.ToString());}
             try {RunFoldedDelimiter(outDir);} catch (Exception ex) {Check("folded-delimiter exception",false,ex.ToString());}
             try {RunCollapsedAfterEnter(outDir);} catch (Exception ex) {Check("collapsed-enter exception",false,ex.ToString());}
+            try {RunSwallowedFold(outDir);} catch (Exception ex) {Check("swallowed-fold exception",false,ex.ToString());}
         } catch (Exception ex) {all=false;report.Append("EXCEPTION ").Append(ex).Append('\n');}
         finally {Program.IsSelfTest=oldSelfTest;if (app!=null) app.ShutdownMode=oldShutdown;}
         report.Append("Cases: ").Append(cases).Append("\nResult: ").Append(all ? "PASS" : "FAIL").Append('\n');
@@ -404,7 +405,9 @@ static class RenderFixProbe {
                 if (!info.Table||info.Delimiter||info.Row==null) continue;
                 VisualLine visual=view.GetVisualLine(number);
                 narrowRows++;
-                if (Math.Abs(info.Row.Boundaries[0]-18)>1) {narrowLeft=false;narrowDetail="row "+number+" left="+Number(info.Row.Boundaries[0]);}
+                // 11-01 user decision (MarkdownLivePreview.ListMarkerSlot=32): the table sits at the list
+                // body x, which is the measured bodyX (32 for a top-level bullet), not a fixed 18 px slot.
+                if (Math.Abs(info.Row.Boundaries[0]-bodyX)>1) {narrowLeft=false;narrowDetail="row "+number+" left="+Number(info.Row.Boundaries[0]);}
                 if (visual==null||visual.TextLines.Count!=info.Row.PhysicalRows) {
                     narrowAligned=false;
                     narrowDetail="row "+number+" lines="+(visual==null?-1:visual.TextLines.Count)+" rows="+info.Row.PhysicalRows;
@@ -482,10 +485,11 @@ static class RenderFixProbe {
         } finally {Close();}
     }
 
-    // 8. A bullet item nested under a numbered item: the item's body starts at the parent item's
-    //    body x (the basic view's own rule; FlowDocument cannot hold the negative margin a bullet
-    //    under a decimal slot would need), so the bullet hangs in the 18 px gap just left of that
-    //    x instead of a whole slot further left.
+    // 8. A bullet item nested under a numbered item. 11-01 user decision: every marker takes one
+    //    ListMarkerSlot (32 px), so the bullet and number slots are equal and ListContentWidth gives
+    //    the nested item the ordinary 18 px level step: its body starts 18 px right of the parent
+    //    item's body x, and its marker slot ends at its own body x (slot left = body - 32). The old
+    //    18 px bullet slot made the body align with the parent body; that case no longer exists.
     static void RunNestedBullet(string dir) {
         const string text="1. 첫째\r\n2. 부모 항목의 긴 본문\r\n   - 아이 항목 하나\r\n   - 아이 항목 둘\r\n3. 셋째\r\n\r\n끝\r\n";
         try {
@@ -498,12 +502,12 @@ static class RenderFixProbe {
             double parentBody=BodyX(parentVisual,parentInfo),childBody=BodyX(childVisual,childInfo);
             double slotLeft=childVisual==null||childInfo.List==null?-1:
                 childVisual.GetVisualPosition(childVisual.GetVisualColumn(childInfo.ListStart),VisualYPosition.LineTop).X;
-            Check("nested bullet body aligns with the numbered parent body",
-                parentBody>0&&Math.Abs(childBody-parentBody)<=1.5,
-                "parentBody="+Number(parentBody)+", childBody="+Number(childBody)+", slotLeft="+Number(slotLeft));
-            Check("nested bullet marker hangs just left of the parent body",
-                slotLeft>=0&&Math.Abs(slotLeft-(parentBody-18))<=1.5,
-                "slotLeft="+Number(slotLeft)+", expected="+Number(parentBody-18));
+            Check("nested bullet body steps one level (18 px) right of the numbered parent body",
+                parentBody>0&&Math.Abs(childBody-(parentBody+18))<=1.5,
+                "parentBody="+Number(parentBody)+", childBody="+Number(childBody)+", expected="+Number(parentBody+18)+", slotLeft="+Number(slotLeft));
+            Check("nested bullet marker slot ends at its own body x",
+                slotLeft>=0&&Math.Abs(slotLeft-(childBody-MarkdownLivePreview.ListMarkerSlot))<=1.5,
+                "slotLeft="+Number(slotLeft)+", expected="+Number(childBody-MarkdownLivePreview.ListMarkerSlot));
         } finally {Close();}
     }
     static double BodyX(VisualLine visual,MarkdownLivePreview.LineInfo info) {
@@ -687,6 +691,43 @@ static class RenderFixProbe {
                 text.Contains("| \uB2E4 | \uB77C |\\n |\\n|---"),
                 "dispatcher=" + watch.Detail(600) + ", valid=" + valid + ", covered=" + covered + ", settled=" + settled +
                 ", caret=" + editor.CaretOffset + ", command=" + DescribeCommand(command) + "; " + DescribeView("after"));
+        } finally {
+            try { Close(); } catch (Exception) { }
+            watch.Dispose();
+        }
+    }
+    // 10. A header that becomes the folded delimiter row of the line above it used to keep its own fold:
+    //     the line under it stayed collapsed with no visual line left to span it, and the next layout
+    //     threw "Trying to build visual line from collapsed line" (monkey seed 4 step 1014). Here the
+    //     first row has one cell ("|  |  "), so it is no header over the two-cell row below it; the
+    //     row below is the header of the third line until a typed "x" gives the first row a second
+    //     cell, which makes it the header and the second row its folded delimiter row.
+    //     The repair counters must stay untouched: the second layers (visual line guard, layout
+    //     recovery) would hide a hole in the first one.
+    internal static readonly string SwallowedFoldFixture = "|  |  \n|---|---|\n|---|---|\n\nend\n";
+    static void RunSwallowedFold(string dir) {
+        var watch = new DispatcherWatch();
+        try {
+            Open(SwallowedFoldFixture, 900, dir);
+            var document = editor.Document;
+            object heightTree = HeightTreeOf(session);
+            bool before = session.View.VisualLinesValid && CollapsedAt(heightTree, 3) && !CollapsedAt(heightTree, 2) && CollapsesCovered();
+            long guards = MarkdownLivePreview.DiagFoldGuards, recoveries = MarkdownLivePreview.DiagFoldRecoveries;
+            editor.Select(document.GetLineByNumber(1).EndOffset, 0); Pump();
+            editor.TextArea.PerformTextInput("x"); Pump();
+            if (document.GetLineByNumber(1).Length == 6) { document.Insert(document.GetLineByNumber(1).EndOffset, "x"); Pump(); }
+            Pump();
+            DocumentLine first = document.GetLineByNumber(1);
+            string firstText = document.GetText(first.Offset, first.Length);
+            bool valid = session.View.VisualLinesValid;
+            heightTree = HeightTreeOf(session);
+            bool covered = valid && CollapsesCovered();
+            bool folded = CollapsedAt(heightTree, 2) && !CollapsedAt(heightTree, 3);
+            Check("a header folded into the line above releases its own fold",
+                watch.First == null && before && firstText == "|  |  x" && valid && covered && folded &&
+                MarkdownLivePreview.DiagFoldGuards == guards && MarkdownLivePreview.DiagFoldRecoveries == recoveries,
+                "dispatcher=" + watch.Detail(600) + ", before=" + before + ", first=[" + Escape(firstText) + "], valid=" + valid + ", covered=" + covered +
+                ", folded=" + folded + ", guards=" + (MarkdownLivePreview.DiagFoldGuards - guards) + ", recoveries=" + (MarkdownLivePreview.DiagFoldRecoveries - recoveries) + "; " + DescribeView("after"));
         } finally {
             try { Close(); } catch (Exception) { }
             watch.Dispose();

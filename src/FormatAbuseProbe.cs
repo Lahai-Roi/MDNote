@@ -1131,9 +1131,23 @@ internal static class FormatAbuseProbe {
                 (quoteLevels > 0 && quoteLevels == quote && BlankLine(text, quoteBody));
             ScanList scanned = NextList(text, ListScanStart(text), previous);
             ScanList list = blank ? previous : scanned;
+            // A marker-less line indented to an open item's content column continues that item
+            // (MarkdownLivePreview.ContinuationList); a lazy line after a quote paragraph does not.
+            if (list == null && !blank && previous != null && (quote <= 0 || quoteLevels > 0))
+                list = ContinuationList(text, ListScanStart(text), previous, beforeSetext && quoteLevels == 0 && SetextUnderlineLevel(text) > 0);
+            // A quote line indented to an open item's content column is a quote inside that item
+            // (MarkdownLivePreview.QuoteContinuationList): the list stays open and the block's quote stays 0.
+            bool itemQuote = false;
+            if (list == null && !blank && quoteLevels > 0 && quote <= 0) {
+                list = QuoteContinuationList(text, previous);
+                itemQuote = list != null;
+            }
             // The quote the next line reads: this line's own markers, or a lazy continuation of
             // the open paragraph that cannot start a block of its own.
-            if (quoteLevels > 0) {
+            if (itemQuote) {
+                quote = 0;
+                quoteParagraph = false;
+            } else if (quoteLevels > 0) {
                 quote = quoteLevels;
                 quoteParagraph = QuoteBodyParagraph(text, quoteBody);
             } else if (quote > 0 && quoteParagraph && !BlankLine(text) && !StartsBlock(text)) {
@@ -1275,6 +1289,33 @@ internal static class FormatAbuseProbe {
         state.Number = prefix.Ordered ? (same ? previous.Number + 1 : prefix.Number) : 0;
         state.Parent = same ? previous.Parent : previous;
         return state;
+    }
+    // The open item a marker-less line continues (MarkdownLivePreview.ContinuationList): the deepest
+    // item whose content column the line's indentation reaches; null for a quote, thematic break,
+    // definition or ATX heading (at most three columns of indentation) or when no column is reached.
+    // underline: the "===" / "---" line under a paragraph line keeps the list open even when it reads as a thematic break.
+    static ScanList ContinuationList(string text, int start, ScanList previous, bool underline) {
+        int p = Math.Max(0, Math.Min(start, text.Length)), columns = 0;
+        while (p < text.Length && (text[p] == ' ' || text[p] == '\t')) { columns += text[p] == '\t' ? 4 : 1; p++; }
+        if (p >= text.Length || text[p] == '>') return null;
+        if (!underline && IsRule(text, p, columns)) return null;
+        int after;
+        if (columns <= 3 && (AtxAt(text, p, out after) != '\0' || DefinitionLine(text, p))) return null;
+        for (ScanList state = previous; state != null; state = state.Parent) if (columns >= state.Content) return state;
+        return null;
+    }
+    // The open item a quote line continues (MarkdownLivePreview.QuoteContinuationList): the deepest item
+    // whose content column the indentation before the line's first ">" reaches; null when the quote body
+    // is a list marker (a list inside the quote) or no column is reached.
+    static ScanList QuoteContinuationList(string text, ScanList previous) {
+        if (previous == null) return null;
+        int p = 0, columns = 0;
+        while (p < text.Length && (text[p] == ' ' || text[p] == '\t')) { columns += text[p] == '\t' ? 4 : 1; p++; }
+        if (p >= text.Length || text[p] != '>') return null;
+        ListPrefix prefix;
+        if (ReadList(text, ListScanStart(text), out prefix)) return null;
+        for (ScanList state = previous; state != null; state = state.Parent) if (columns >= state.Content) return state;
+        return null;
     }
     // The live block cache's blank line: ASCII spaces and tabs only, so a U+3000-only line is
     // content (it ends a list instead of keeping it open).
@@ -1428,6 +1469,11 @@ internal static class FormatAbuseProbe {
         if (ctx.PreDoc.Count == 0) return true;
         int first = LineOf(ctx.PreDoc, ctx.SelectionStart);
         int last = LineOf(ctx.PreDoc, ctx.SelectionStart + ctx.SelectionLength - 1);
+        // The code button's documented toggle-off (MarkdownCommands.RemoveCodeBlock): a complete fenced
+        // block under the selection loses BOTH fence lines, so the opener lies outside the selected
+        // lines by construction. Accepted only when the result is exactly the document without that
+        // pair (every other line, in order, byte for byte); anything else takes the strict check.
+        if (ctx.Label == "cmd:code-block" && FencePairToggledOff(ctx, first, last)) return true;
         for (int i = 0; i < ctx.PreDoc.Count; i++) {
             if (i >= first && i <= last) continue;
             int mapped = Mapped(ctx, ctx.PreDoc.Starts[i]);
@@ -1449,6 +1495,48 @@ internal static class FormatAbuseProbe {
             }
         }
         return true;
+    }
+
+    // True when a closed fence pair of the pre-document touches the selected lines first..last and
+    // the post-document is exactly the pre-document without that pair's two fence lines.
+    static bool FencePairToggledOff(StepContext ctx, int first, int last) {
+        DocView pre = ctx.PreDoc, post = ctx.PostDoc;
+        if (post == null || post.Count != pre.Count - 2) return false;
+        bool inFence = false;
+        char fenceChar = '\0';
+        int fenceRun = 0, openLine = -1;
+        for (int i = 0; i < pre.Count; i++) {
+            string line = pre.Lines[i];
+            int p = 0;
+            while (p < line.Length && p < 3 && line[p] == ' ') p++;
+            char c = p < line.Length ? line[p] : '\0';
+            int run = 0;
+            if (c == '`' || c == '~') while (p + run < line.Length && line[p + run] == c) run++;
+            bool fenceLine = (c == '`' || c == '~') && run >= 3;
+            if (!inFence) {
+                if (!fenceLine) continue;
+                inFence = true;
+                fenceChar = c;
+                fenceRun = run;
+                openLine = i;
+                continue;
+            }
+            if (!fenceLine || c != fenceChar || run < fenceRun) continue;
+            bool tail = true;
+            for (int q = p + run; q < line.Length; q++) if (line[q] != ' ' && line[q] != '\t') { tail = false; break; }
+            if (!tail) continue;
+            inFence = false;
+            if (openLine > last || i < first) continue;
+            int next = 0;
+            bool same = true;
+            for (int k = 0; k < pre.Count && same; k++) {
+                if (k == openLine || k == i) continue;
+                if (!String.Equals(pre.Lines[k], post.Lines[next], StringComparison.Ordinal)) same = false;
+                next++;
+            }
+            if (same) return true;
+        }
+        return false;
     }
 
     // ---------------------------------------------------------------- Enter list continuation

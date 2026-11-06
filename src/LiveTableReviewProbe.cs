@@ -518,13 +518,23 @@ internal static class LiveTableReviewProbe {
                 info=session.Info(editor.Document.GetLineByNumber(1));
                 Check("delete takes the escaped pipe pair "+mode,row=="| ab | c |"&&info.Cells.Count==2,
                     "row=["+row+"], cells="+(info.Cells==null?-1:info.Cells.Count));
-                // R7: on a revealed line the closer is text, so a typed character stays after it.
+                // R7: 11-05 user decision (MarkdownLivePreview.HiddenCloseTypingEntering, replacing the
+                // 11-01 "stays after the closer" rule): a non-blank character typed on a closing run's
+                // edge takes the style the toolbar shows there, on the revealed caret line as well as
+                // in the no-reveal view, so "**ab**|" + x writes "**abx**". Inline code is the one
+                // style that keeps the old rule: the character stays after its closing backtick.
                 if (!hide) {
                     editor.Text="**ab**\n\ntail\n";editor.CaretIndex=0;Pump();
                     line=editor.Document.GetLineByNumber(1);
                     editor.Select(line.Offset+6,0);Pump();
                     editor.TextArea.PerformTextInput("x");Pump();
-                    Check("revealed closer stays text",editor.Text=="**ab**x\n\ntail\n",
+                    Check("revealed closer takes the typed character inside",editor.Text=="**abx**\n\ntail\n",
+                        "text=["+editor.Text.Replace("\n","\\n")+"]");
+                    editor.Text="`ab`\n\ntail\n";editor.CaretIndex=0;Pump();
+                    line=editor.Document.GetLineByNumber(1);
+                    editor.Select(line.Offset+4,0);Pump();
+                    editor.TextArea.PerformTextInput("x");Pump();
+                    Check("revealed inline code closer stays text",editor.Text=="`ab`x\n\ntail\n",
                         "text=["+editor.Text.Replace("\n","\\n")+"]");
                 }
                 // H10: the end of a cell is the cell's boundary, even when a closer ends there.

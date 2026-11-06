@@ -72,6 +72,15 @@ internal static class HtmlExporter {
         "code{font-family:Consolas,\"Cascadia Mono\",\"Malgun Gothic\",monospace;font-size:.92em}\n"+
         "p code,li code,td code,th code{background:#eef0f3;padding:.1em .35em;border-radius:4px}\n"+
         "blockquote{margin:.8em 0 1em;padding:.2em 1em;border-left:4px solid #b8c0cc;color:#5f6774}\n"+
+        ".markdown-alert{margin:.8em 0 1em;padding:.2em 1em;border-left:4px solid #0969da;color:#5f6774}\n"+
+        ".markdown-alert>:last-child{margin-bottom:0}\n"+
+        ".markdown-alert-title{display:flex;align-items:center;gap:.5em;margin:0 0 .5em;font-weight:600;line-height:1.5;color:#0969da}\n"+
+        ".markdown-alert-title svg{flex:none;width:1em;height:1em;overflow:visible}\n"+
+        ".markdown-alert-note{border-left-color:#0969da}.markdown-alert-note .markdown-alert-title{color:#0969da}\n"+
+        ".markdown-alert-tip{border-left-color:#1a7f37}.markdown-alert-tip .markdown-alert-title{color:#1a7f37}\n"+
+        ".markdown-alert-important{border-left-color:#8250df}.markdown-alert-important .markdown-alert-title{color:#8250df}\n"+
+        ".markdown-alert-warning{border-left-color:#9a6700}.markdown-alert-warning .markdown-alert-title{color:#9a6700}\n"+
+        ".markdown-alert-caution{border-left-color:#d1242f}.markdown-alert-caution .markdown-alert-title{color:#d1242f}\n"+
         "ul,ol{margin:.3em 0 .9em;padding-left:1.6em}\n"+
         "ul.task{list-style:none;padding-left:.2em}ul.task ul,ul.task ol{padding-left:1.6em}\n"+
         "li.task input{margin:0 .5em 0 0}\n"+
@@ -796,12 +805,32 @@ internal static class HtmlExporter {
     // ---- blocks and inlines ----
     sealed class BlockWriter {
         sealed class Level {internal int Indent,Content;internal bool Ordered,Task;}
-        sealed class State {internal readonly List<Level> Levels=new List<Level>();internal bool Paragraph;}
+        // Soft: the open item's body is plain inline text, so a continuation line joins it with a <br>.
+        sealed class State {internal readonly List<Level> Levels=new List<Level>();internal bool Paragraph,Soft;}
         readonly Context context;readonly StringBuilder sb;readonly bool quiet;
         // quiet: a trial rendering (the title text) that must not mark footnote references as used.
         internal BlockWriter(Context context,StringBuilder sb,bool quiet=false){this.context=context;this.sb=sb;this.quiet=quiet;}
 
-        void Flush(State s){if(s.Paragraph){sb.Append("</p>\n");s.Paragraph=false;}}
+        void Flush(State s){s.Soft=false;if(s.Paragraph){sb.Append("</p>\n");s.Paragraph=false;}}
+        // The deepest open item (index into s.Levels) whose content column the line's indentation reaches, -1 when none.
+        // Same rule as MarkdownPlainText.ContinuationLevel; called only for a line that is plain paragraph text.
+        static int ContinuationLevel(State s,string line){
+            int column=0;
+            for(int at=0;at<line.Length&&Space(line[at]);at++)column+=line[at]=='\t'?4:1;
+            for(int k=s.Levels.Count-1;k>=0;k--)if(column>=s.Levels[k].Content)return k;
+            return -1;
+        }
+        static int[] ContentColumns(State s){
+            var contents=new int[s.Levels.Count];
+            for(int k=0;k<contents.Length;k++)contents[k]=s.Levels[k].Content;
+            return contents;
+        }
+        // The deepest open item (index into s.Levels) a quote line is indented into, -1 when none: a quote
+        // inside that item, not a quote of its own (MarkdownPlainText.ItemQuoteLine, the same rule as the live view).
+        static int ItemQuoteLevel(State s,string line){
+            for(int k=s.Levels.Count-1;k>=0;k--)if(MarkdownPlainText.ItemQuoteLine(line,s.Levels[k].Content))return k;
+            return -1;
+        }
         void Pop(State s){
             Level top=s.Levels[s.Levels.Count-1];
             sb.Append(top.Ordered?"</li>\n</ol>":"</li>\n</ul>");
@@ -865,25 +894,43 @@ internal static class HtmlExporter {
                 string headingBody;int headingLevel;
                 if(MarkdownPlainText.AtxHeading(line,out headingLevel,out headingBody)){Flush(s);CloseLists(s);WriteHeading(headingLevel,headingBody);continue;}
                 if(i+1<lines.Length&&!ListStart(line)&&SetextUnderline(lines[i+1],out headingLevel)){
-                    Flush(s);CloseLists(s);WriteHeading(headingLevel,line);
+                    // A setext heading indented to an open item's content column is an <h1>/<h2> inside that item's <li> and the list
+                    // stays open (MarkdownPlainText.SetextInItem; the live view and the print path read the pair the same way).
+                    int setextKeep,setextClose;
+                    if(s.Levels.Count>0&&MarkdownPlainText.SetextInItem(line,lines[i+1],ContentColumns(s),out setextKeep,out setextClose)){
+                        Flush(s);
+                        while(s.Levels.Count>setextKeep+1)Pop(s);
+                        if(sb.Length>0&&sb[sb.Length-1]!='\n')sb.Append('\n');
+                        WriteHeading(headingLevel,line.TrimStart(' ','\t'));
+                        while(s.Levels.Count>setextClose+1)Pop(s);
+                        i++;
+                        continue;
+                    }
+                    Flush(s);CloseLists(s);WriteHeading(headingLevel,line.TrimStart(' ','\t'));   // the heading's text carries no source indentation ("   b" over a column-0 "===")
                     i++;
                     continue;
                 }
                 if(HorizontalRule(line)){Flush(s);CloseLists(s);sb.Append("<hr>\n");continue;}
                 string quoteBody,nextQuote;
                 if(QuoteLine(line,out quoteBody)){
-                    Flush(s);CloseLists(s);
+                    // A quote indented to an open item's content column is a <blockquote> inside that item's <li>:
+                    // the list stays open, deeper items close, and only the item's own quote lines join it (no lazy line).
+                    int quoteItem=ItemQuoteLevel(s,line);
+                    Flush(s);
+                    if(quoteItem>=0){while(s.Levels.Count>quoteItem+1)Pop(s);}
+                    else CloseLists(s);
                     var quote=new StringBuilder(quoteBody);
                     var lazy=new LazyQuote();lazy.Line(quoteBody);
                     while(i+1<lines.Length){
+                        if(quoteItem>=0){
+                            if(MarkdownPlainText.ItemQuoteLine(lines[i+1],s.Levels[quoteItem].Content)&&QuoteLine(lines[i+1],out nextQuote)){i++;quote.Append('\n').Append(nextQuote);continue;}
+                            break;
+                        }
                         if(QuoteLine(lines[i+1],out nextQuote)){i++;quote.Append('\n').Append(nextQuote);lazy.Line(nextQuote);}
                         else if(lazy.Continues(lines,i+1)){i++;quote.Append('\n').Append(lines[i].TrimStart(' ','\t'));}   // lazy continuation: part of the quote's paragraph
                         else break;
                     }
-                    sb.Append("<blockquote>\n");
-                    if(depth<MaxQuoteDepth)new BlockWriter(context,sb,quiet).Render(quote.ToString().Split('\n'),depth+1);
-                    else{sb.Append("<p>");AppendText(sb,quote.ToString(),false);sb.Append("</p>\n");}
-                    sb.Append("</blockquote>\n");
+                    WriteQuote(quote.ToString(),depth,false);
                     continue;
                 }
                 string indent;bool ordered;string number;bool task;bool checkedBox;string listBody;int contentColumn;
@@ -906,7 +953,25 @@ internal static class HtmlExporter {
                     s.Levels[s.Levels.Count-1].Content=contentColumn;
                     sb.Append(task?"<li class=\"task\">":"<li>");
                     if(task)sb.Append(checkedBox?"<input type=\"checkbox\" disabled checked> ":"<input type=\"checkbox\" disabled> ");
-                    ListItemBody(listBody,depth);
+                    if(listBody.Length>0&&listBody[0]=='>'){
+                        // The quote lines indented to this item's content column that follow are the same <blockquote>.
+                        string firstQuote=listBody.Substring(1);
+                        if(firstQuote.Length>0&&Space(firstQuote[0]))firstQuote=firstQuote.Substring(1);
+                        var itemQuote=new StringBuilder(firstQuote);string nextItemQuote;
+                        while(i+1<lines.Length&&MarkdownPlainText.ItemQuoteLine(lines[i+1],contentColumn)&&QuoteLine(lines[i+1],out nextItemQuote)){i++;itemQuote.Append('\n').Append(nextItemQuote);}
+                        WriteQuote(itemQuote.ToString(),depth,true);
+                    }else ListItemBody(listBody,depth);
+                    s.Soft=!MarkdownPlainText.AtxHeading(listBody,out headingLevel,out headingBody)&&!(listBody.Length>0&&listBody[0]=='>');
+                    continue;
+                }
+                // A plain line indented to an open item's content column continues that item (CommonMark);
+                // items deeper than the one it reaches close. Unindented lines fall through and end the list.
+                int keep=ContinuationLevel(s,line);
+                if(keep>=0){
+                    if(keep<s.Levels.Count-1){Flush(s);while(s.Levels.Count>keep+1)Pop(s);}
+                    if(s.Paragraph||s.Soft)sb.Append("<br>\n");
+                    else{sb.Append("<p>");s.Paragraph=true;}
+                    AppendInline(line.TrimStart(' ','\t'));
                     continue;
                 }
                 if(!s.Paragraph){CloseLists(s);sb.Append("<p>");s.Paragraph=true;}
@@ -923,12 +988,38 @@ internal static class HtmlExporter {
             if(body.Length>0&&body[0]=='>'){
                 string rest=body.Substring(1);
                 if(rest.Length>0&&Space(rest[0]))rest=rest.Substring(1);
-                sb.Append("<blockquote>\n");
-                if(depth<MaxQuoteDepth)new BlockWriter(context,sb,quiet).Render(new[]{rest},depth+1);
-                sb.Append("</blockquote>");
+                WriteQuote(rest,depth,true);
                 return;
             }
             AppendInline(body);
+        }
+        // A quote's lines (the text after each ">", lazy lines included) as <blockquote>. When the first
+        // line is an alert marker ("[!NOTE]", Obsidian's "[!tip]- title"; MarkdownPlainText.AlertMarker) the
+        // quote is GitHub's alert instead: <div class="markdown-alert markdown-alert-note"> with a title
+        // paragraph (icon, then the text after the marker or the default English title) and the rest of the
+        // quote as the body. inItem: the quote is a list item's body, which ends without a newline.
+        void WriteQuote(string text,int depth,bool inItem){
+            int newline=text.IndexOf('\n');
+            string first=newline<0?text:text.Substring(0,newline);
+            int markerEnd=0,titleStart=0;string word="";
+            AlertKind kind=depth<MaxQuoteDepth?MarkdownPlainText.AlertMarker(first,0,out markerEnd,out titleStart,out word):AlertKind.None;
+            if(kind==AlertKind.None){
+                sb.Append("<blockquote>\n");
+                if(depth<MaxQuoteDepth)new BlockWriter(context,sb,quiet).Render(text.Split('\n'),depth+1);
+                else if(!inItem){sb.Append("<p>");AppendText(sb,text,false);sb.Append("</p>\n");}
+                sb.Append(inItem?"</blockquote>":"</blockquote>\n");
+                return;
+            }
+            sb.Append("<div class=\"markdown-alert markdown-alert-").Append(AlertArt.Css(kind)).Append("\">\n<p class=\"markdown-alert-title\">");
+            sb.Append("<svg viewBox=\"0 0 16 16\" width=\"16\" height=\"16\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"").Append(AlertArt.Stroke(kind)).Append("\"/>");
+            string dots=AlertArt.Dots(kind);
+            if(dots.Length>0)sb.Append("<path d=\"").Append(dots).Append("\" fill=\"currentColor\" stroke=\"none\"/>");
+            sb.Append("</svg>");
+            if(titleStart<first.Length)AppendInline(first.Substring(titleStart).TrimEnd(' ','\t'));
+            else AppendEscaped(sb,MarkdownPlainText.AlertDefaultTitle(kind,word),0,MarkdownPlainText.AlertDefaultTitle(kind,word).Length,false);
+            sb.Append("</p>\n");
+            if(newline>=0)new BlockWriter(context,sb,quiet).Render(text.Substring(newline+1).Split('\n'),depth+1);
+            sb.Append(inItem?"</div>":"</div>\n");
         }
         void WriteHeading(int level,string body){
             if(context.Title==null&&!quiet)context.Title=TitleText(body);

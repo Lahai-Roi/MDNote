@@ -1245,6 +1245,9 @@ internal static class LargeDocAbuseProbe {
         Bump(checkCounts, "landing");
         if (ctx.Action != "type" && ctx.Action != "paste") return true;
         if (ctx.PreSelectionLength != 0) return true;
+        // A table's delimiter row is structure: the preview swallows text typed there
+        // (MarkdownLivePreview.cs "The delimiter row is structure"), so nothing lands by design.
+        if (ctx.PreLineText != null && System.Text.RegularExpressions.Regex.IsMatch(ctx.PreLineText, @"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$") && ctx.PreLineText.IndexOf('|') >= 0) return true;
         bool inserted = false, atCaret = false;
         for (int i = 0; i < changes.Count; i++) {
             ChangeInfo change = changes[i];
@@ -1509,7 +1512,7 @@ internal static class LargeDocAbuseProbe {
                 return Fail(ctx, "visible", "the caret line " + line.LineNumber + " is not a realized visual line (document lines " + source.Document.LineCount +
                     ", caret " + source.CaretOffset + "/" + source.Document.TextLength + ", vertical " + view.VerticalOffset.ToString("0.0", CultureInfo.InvariantCulture) +
                     ".." + (view.VerticalOffset + ((System.Windows.Controls.Primitives.IScrollInfo)view).ViewportHeight).ToString("0.0", CultureInfo.InvariantCulture) +
-                    ", extent " + ((System.Windows.Controls.Primitives.IScrollInfo)view).ExtentHeight.ToString("0.0", CultureInfo.InvariantCulture) + RealizedLines(view) + ConstructedTop(source, line) + CaretLineDetail(source, line) + ")");
+                    ", extent " + ((System.Windows.Controls.Primitives.IScrollInfo)view).ExtentHeight.ToString("0.0", CultureInfo.InvariantCulture) + RealizedLines(view) + ConstructedTop(source, line) + CaretLineDetail(source, line) + LateIfPageDown(ctx, source, view) + ")");
             // A long line's prefix/suffix folds shift visual columns relative to document columns;
             // the same GetVisualColumn mapping the long-line window uses is the only valid one.
             int relative = source.CaretOffset - line.Offset;
@@ -1527,24 +1530,57 @@ internal static class LargeDocAbuseProbe {
                 if (visual == null || visual.IsDisposed)
                     return Fail(ctx, "visible", "the caret line " + line.LineNumber + " is not a realized visual line after a settle pass (document lines " + source.Document.LineCount +
                         ", vertical " + view.VerticalOffset.ToString("0.0", CultureInfo.InvariantCulture) + ".." + (view.VerticalOffset + ((System.Windows.Controls.Primitives.IScrollInfo)view).ViewportHeight).ToString("0.0", CultureInfo.InvariantCulture) +
-                        ", extent " + ((System.Windows.Controls.Primitives.IScrollInfo)view).ExtentHeight.ToString("0.0", CultureInfo.InvariantCulture) + RealizedLines(view) + ConstructedTop(source, line) + CaretLineDetail(source, line) + ")");
+                        ", extent " + ((System.Windows.Controls.Primitives.IScrollInfo)view).ExtentHeight.ToString("0.0", CultureInfo.InvariantCulture) + RealizedLines(view) + ConstructedTop(source, line) + CaretLineDetail(source, line) + LateIfPageDown(ctx, source, view) + ")");
                 relative = source.CaretOffset - line.Offset;
                 column = Math.Max(0, Math.Min(visual.GetVisualColumn(Math.Max(0, Math.Min(relative, line.Length))), visual.VisualLength));
                 position = visual.GetVisualPosition(column, VisualYPosition.LineMiddle);
                 top = view.VerticalOffset;
                 bottom = view.VerticalOffset + ((System.Windows.Controls.Primitives.IScrollInfo)view).ViewportHeight;
             }
-            if (position.Y < top - 1 || position.Y > bottom + 1)
+            if (position.Y < top - 1 || position.Y > bottom + 1) {
+                string late = "";
+                if (ctx.Label == "nav:page-down") late = LateRecheck(ctx, source, view);
                 return Fail(ctx, "visible", "the caret line " + line.LineNumber + " is not on screen (caret Y " + position.Y.ToString("0.0", CultureInfo.InvariantCulture) +
                     ", viewport " + top.ToString("0.0", CultureInfo.InvariantCulture) + ".." + bottom.ToString("0.0", CultureInfo.InvariantCulture) +
                     ", visualTop " + visual.VisualTop.ToString("0.0", CultureInfo.InvariantCulture) + ", visualHeight " + visual.Height.ToString("0.0", CultureInfo.InvariantCulture) +
                     ", extent " + ((System.Windows.Controls.Primitives.IScrollInfo)view).ExtentHeight.ToString("0.0", CultureInfo.InvariantCulture) +
-                    ", caretColumn " + (source.TextArea.Caret.Column - 1) + CaretLineDetail(source, line, visual) + ")");
+                    ", caretColumn " + (source.TextArea.Caret.Column - 1) + CaretLineDetail(source, line, visual) + late + ")");
+            }
             if (line.Length > BlockThreshold && !LongLineWindow.IsRealOffset(source, source.CaretOffset))
                 return Fail(ctx, "long-line:caret", "the caret sits in a folded part of the " + line.Length + "-character line at relative " + (source.CaretOffset - line.Offset));
             return true;
         } catch (Exception ex) {
             return Fail(ctx, "visible", "the caret visibility check threw " + ex.GetType().Name + ": " + OneLine(ex.Message));
+        }
+    }
+
+    // Diagnosis aid (walk B2): after a failed visibility check on nav:page-down, wait ~300 ms (longer
+    // than the table idle restart) and measure again, so the report tells whether a later layout
+    // pass moves the caret row into view. The step still fails; this only adds the second answer.
+    // Walk B3: the "not a realized visual line" answers (first check and settle pass) are the other failure paths of
+    // nav:page-down; they get the same 300 ms second measurement as the "not on screen" answer.
+    static string LateIfPageDown(StepContext ctx, SourceEditor source, TextView view) {
+        return ctx.Label == "nav:page-down" ? LateRecheck(ctx, source, view) : "";
+    }
+    static string LateRecheck(StepContext ctx, SourceEditor source, TextView view) {
+        try {
+            Pump(300);
+            ctx.Window.UpdateLayout();
+            view.EnsureVisualLines();
+            DocumentLine line = source.Document.GetLineByNumber(source.TextArea.Caret.Line);
+            VisualLine visual = view.GetVisualLine(line.LineNumber);
+            double top = view.VerticalOffset, bottom = view.VerticalOffset + ((System.Windows.Controls.Primitives.IScrollInfo)view).ViewportHeight;
+            if (visual == null || visual.IsDisposed)
+                return "; after 300 ms: line " + line.LineNumber + " not realized, viewport " + top.ToString("0.0", CultureInfo.InvariantCulture) + ".." + bottom.ToString("0.0", CultureInfo.InvariantCulture);
+            int relative = source.CaretOffset - line.Offset;
+            int column = Math.Max(0, Math.Min(visual.GetVisualColumn(Math.Max(0, Math.Min(relative, line.Length))), visual.VisualLength));
+            Point position = visual.GetVisualPosition(column, VisualYPosition.LineMiddle);
+            bool onScreen = position.Y >= top - 1 && position.Y <= bottom + 1;
+            return "; after 300 ms: " + (onScreen ? "ON SCREEN" : "still off screen") + " (line " + line.LineNumber + ", caret Y " + position.Y.ToString("0.0", CultureInfo.InvariantCulture) +
+                ", viewport " + top.ToString("0.0", CultureInfo.InvariantCulture) + ".." + bottom.ToString("0.0", CultureInfo.InvariantCulture) +
+                ", visualTop " + visual.VisualTop.ToString("0.0", CultureInfo.InvariantCulture) + ", visualHeight " + visual.Height.ToString("0.0", CultureInfo.InvariantCulture) + ")";
+        } catch (Exception ex) {
+            return "; after 300 ms: recheck threw " + ex.GetType().Name;
         }
     }
 

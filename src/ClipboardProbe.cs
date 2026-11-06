@@ -334,11 +334,13 @@ static class ClipboardProbe {
         string pasted=LivePasteAtEnd(liveTarget,RichHtml(fragment,"첫째 항목 둘째 단계 번호 항목"));
         Check("word-list.live-paste",pasted==expected,"got="+Show(pasted));
     }
-    // #4: the escapes the rich paste writes ("\[", "\_", "\*", "\\") show the literal character in
+    // #4: the escapes the rich paste writes ("\_", "\*", "\\") show the literal character in
     // print and in TXT, and an RTF paste writes a literal backslash as "\\" so it round-trips.
+    // 11-01 user decision (HtmlPaste.RelaxPasteBrackets): a line keeps its "[" and "]" unescaped
+    // when it reads back the same, so the live paste writes "[1]" and not "\[1\]".
     static void RunPasteEscapes(){
         string fragment="<p>see [1] and a_b *c* C:\\path</p>";
-        string expected="see \\[1\\] and a\\_b \\*c\\* C:\\\\path";
+        string expected="see [1] and a\\_b \\*c\\* C:\\\\path";
         string pasted=LivePasteAtEnd(liveTarget,RichHtml(fragment,"see [1] and a_b *c* C:\\path"));
         Check("escapes.source",pasted==expected,"got="+Show(pasted));
         string shown="see [1] and a_b *c* C:\\path";

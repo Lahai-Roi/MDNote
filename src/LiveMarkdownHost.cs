@@ -22,7 +22,7 @@ public partial class MainWindow {
         string directory=null;
         string basePath=DocumentBasePath();
         if(!String.IsNullOrEmpty(basePath)){try{directory=Path.GetDirectoryName(Path.GetFullPath(basePath));}catch(ArgumentException){}catch(NotSupportedException){}catch(PathTooLongException){}}
-        return new MarkdownLivePreview.Settings {FontSize=fontSize,Family=family,LinePercent=linePercent,Dark=dark,TextColor=customColor,WordWrap=wordWrap,BaseDirectory=directory,ReadOnly=!editing||documentOperationBusy,Busy=documentOperationBusy,HideMarkers=hideMarkers||MarkdownLivePreview.Settings.HideMarkersFromEnvironment(),Translate=T};
+        return new MarkdownLivePreview.Settings {FontSize=fontSize,Family=family,LinePercent=linePercent,Dark=dark,TextColor=customColor,WordWrap=wordWrap,BaseDirectory=directory,ReadOnly=!editing||documentOperationBusy,Busy=documentOperationBusy,HideMarkers=hideMarkers||MarkdownLivePreview.Settings.HideMarkersFromEnvironment(),HeadingMarks=headingMarkStyle!=2,HeadingHash=headingMarkStyle==1,Translate=T};
     }
     // The raw source view (원문 편집 toggle, preview detached) is source text, not prose: ASCII
     // symbols take the Latin code face while Hangul keeps the chosen document family. The live
@@ -683,6 +683,41 @@ public partial class MainWindow {
             if(window.liveModeMenu!=null)window.liveModeMenu.IsChecked=live;
         }
         if(!self&&liveModeMenu!=null)liveModeMenu.IsChecked=live;
+    }
+    // 보기 > 제목 단계 표시 (slash bars / # symbols / off). headingMarkStyle is static (one preference for
+    // every window and tab): each open window's session gets the new Settings.HeadingMarks/HeadingHash and
+    // redraws its visible lines (Update rebuilds the visual lines, so the heading indent and the marks change
+    // together); a tab that is not showing picks it up when it is switched to. A style choice toggles itself
+    // before its Click fires, so the menu is rewritten from the style afterwards. Off never changes the
+    // remembered style, which the row itself turns back on with.
+    void SetHeadingMarkStyle(int style){
+        if(style<0||style>2)style=0;
+        if(source!=null&&(source.ImeBusy||source.ImeCompositionActive()))FinishComposition();
+        headingMarkStyle=style;if(style!=2)headingMarkLast=style;
+        var app=System.Windows.Application.Current;bool self=false;
+        if(app!=null)foreach(System.Windows.Window candidate in app.Windows){
+            var window=candidate as MainWindow;if(window==null)continue;
+            if(Object.ReferenceEquals(window,this))self=true;
+            window.UpdateLivePreview();
+        }
+        if(!self)UpdateLivePreview();
+        UpdateHeadingMarksMenu();SavePreferences();
+    }
+    // The 제목 단계 표시 row itself: on it turns off, off it comes back at the last style.
+    void ToggleHeadingMarksFromHeader(){SetHeadingMarkStyle(headingMarkStyle!=2?2:headingMarkLast);}
+    void UpdateHeadingMarksMenu(){
+        bool self=false;
+        var app=System.Windows.Application.Current;
+        if(app!=null)foreach(System.Windows.Window candidate in app.Windows){
+            var window=candidate as MainWindow;if(window==null)continue;
+            if(Object.ReferenceEquals(window,this))self=true;
+            window.ShowHeadingMarksMenu();
+        }
+        if(!self)ShowHeadingMarksMenu();
+    }
+    void ShowHeadingMarksMenu(){
+        if(headingMarksMenu!=null&&headingMarksMenu.IsChecked!=(headingMarkStyle!=2))headingMarksMenu.IsChecked=headingMarkStyle!=2;
+        for(int i=0;i<headingMarkChoices.Length;i++)if(headingMarkChoices[i]!=null&&headingMarkChoices[i].IsChecked!=(i==headingMarkStyle))headingMarkChoices[i].IsChecked=i==headingMarkStyle;
     }
 
     static string OutlineText(System.Windows.DependencyObject node){

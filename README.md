@@ -21,8 +21,8 @@ A fast, lightweight Markdown and TXT editor for Windows—just like Notepad.
 
 [Download Latest Release (Releases)](https://github.com/Lahai-Roi/MDNote/releases/latest)
 
-- `MDNote-Setup-2.2.1.exe`: Installer. Choose your language on the first screen of the setup.
-- `MDNote-2.2.1-portable.zip`: Portable version (no installation required). Extract the ZIP and run `MDNote.exe`.
+- `MDNote-Setup-2.3.0.exe`: Installer. Choose your language on the first screen of the setup.
+- `MDNote-2.3.0-portable.zip`: Portable version (no installation required). Extract the ZIP and run `MDNote.exe`.
 - Requires Windows 10/11 64-bit and .NET Framework 4.8 (pre-installed on Windows).
 - Because the executable is not digitally signed, Windows may show a warning on first launch. Click **More info → Run anyway**.
 
@@ -38,6 +38,8 @@ A fast, lightweight Markdown and TXT editor for Windows—just like Notepad.
 - **Find & Replace, Print, Encodings**: Find with regular expressions if you like. Open and save files in UTF-8, UTF-16, CP949, Shift JIS, GBK, Big5, and more.
 - **Save as HTML**: Choose **HTML files (*.html)** in **Save as…** to create a separate .html file that opens in a browser and can be pasted into blogs or email.
 - **Math formulas**: `$E=mc^2$` in a sentence and `$$ … $$` on their own lines are shown as formulas.
+- **Heading level marks**: `/` bars matching the heading level are shown to the left of each heading so you can tell its level at a glance. You can change them to `#` symbols or turn them off under **View → Heading level marks**.
+- **Colored boxes (alerts)**: Writing `[!NOTE]`, `[!TIP]`, `[!WARNING]`, etc. on the first line of a quote shows it as a box with a colored bar and icon, just like on GitHub. They also appear as-is when printing and saving as HTML.
 - **Focus mode & Typewriter mode**: Keep only the current paragraph or line clear, or keep the line you are typing in the middle of the window. Both are off by default.
 - **File change alerts**: If another program changes or deletes an open file, MDNote asks whether to reload it. It also asks before saving over a file that was changed elsewhere.
 - **Dark mode, Font & Line Spacing, F1–F12 Shortcuts**: Customize display settings and function key shortcuts to your liking.
@@ -81,14 +83,14 @@ Yes. Typing right after the end of bold text keeps it bold, just as the Bold but
 This is because the executable is not digitally signed. Click **More info → Run anyway**.
 
 **Can I use it without installing?**
-Yes. Extract `MDNote-2.2.1-portable.zip` and run `MDNote.exe`.
+Yes. Extract `MDNote-2.3.0-portable.zip` and run `MDNote.exe`.
 
 **How do I uninstall it?**
 For the installed version, uninstall it from the Apps list in Windows Settings. If you manually placed any files in the installation folder, only those files will remain. For the portable version, simply delete the extracted folder.
 
 ## Privacy
 
-- By default, MDNote does not connect to the internet. It checks the latest version number on GitHub only when you select **Help → Check for updates**, or once a day if you turn on **Check for updates automatically** (off by default). It never sends usage logs or document contents anywhere.
+- By default, MDNote does not connect to the internet. It checks the latest version number on GitHub only when you select **Help → Check for updates**, or each time MDNote starts if you turn on **Check for updates automatically** (off by default). It never sends usage logs or document contents anywhere.
 - To recover unsaved text, a copy of the content being edited is kept only in your PC's user folder (AppData). It is deleted when you save or close the document.
 - Settings (font, language, shortcuts, etc.) are also saved only on your PC.
 

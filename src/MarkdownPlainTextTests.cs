@@ -95,6 +95,139 @@ namespace MDNote {public partial class MainWindow {
             check("list-continuation","- a\n계속 줄\n- b");
             check("list-indented-continuation","- a\n   계속 줄");
             check("list-after-blank","- a\n\n- b");
+            // An indented body line is the item's continuation: the list stays open, so the next deeper
+            // marker nests under it (the print path, the live view and this converter read one rule).
+            // The document with no heading marks and the one with them ("- ## ...") are both compared with the
+            // oracle, and their output is pinned: an item's heading marks drop like a top-level heading's.
+            string continuationPlain="본문 첫 줄입니다.\n\n- 목록 첫째 항목\n- 목록 안 2단계 제목\n  목록 안 본문 한 줄.\n  - 한 단계 들어간 목록 안 3단계 제목\n    더 들어간 목록 본문.\n    - 두 단계 들어간 4단계 제목\n      가장 깊은 목록 본문.\n1. 번호 목록 안 3단계 제목\n   번호 목록 본문.\n- [ ] 할 일 안 2단계 제목";
+            check("list-continuation-nested",continuationPlain);
+            string continuationShown=continuationPlain.Replace("- [ ] ","☐ ");
+            if(String.Equals(MarkdownPlainText.Convert(continuationPlain),continuationShown,StringComparison.Ordinal)){passed++;report.Append("PASS list-continuation-nested-output\n");}
+            else{failed++;report.Append("FAIL list-continuation-nested-output [").Append(Md2TxtEscape(MarkdownPlainText.Convert(continuationPlain))).Append("]\n");}
+            string continuationHeadings="본문 첫 줄입니다.\n\n- 목록 첫째 항목\n- ## 목록 안 2단계 제목\n  목록 안 본문 한 줄.\n  - ### 한 단계 들어간 목록 안 3단계 제목\n    더 들어간 목록 본문.\n    - #### 두 단계 들어간 4단계 제목\n      가장 깊은 목록 본문.\n1. ### 번호 목록 안 3단계 제목\n   번호 목록 본문.\n- [ ] ## 할 일 안 2단계 제목";
+            check("list-continuation-nested-headings",continuationHeadings);
+            if(String.Equals(MarkdownPlainText.Convert(continuationHeadings),continuationShown,StringComparison.Ordinal)){passed++;report.Append("PASS list-continuation-nested-headings-output\n");}
+            else{failed++;report.Append("FAIL list-continuation-nested-headings-output [").Append(Md2TxtEscape(MarkdownPlainText.Convert(continuationHeadings))).Append("]\n");}
+            // A heading inside a list item or quote, each form on its own: oracle comparison plus the pinned text.
+            string[,] headingForms={
+                {"heading-in-list","- ## 목록 안 2단계 제목","- 목록 안 2단계 제목"},
+                {"heading-in-list-closing-hashes","- ## 제목 ##","- 제목"},
+                {"heading-in-list-keeps-text-hash","- ### C#","- C#"},
+                {"heading-in-list-star-marker","* # 제목\n+ ###### 여섯","- 제목\n- 여섯"},
+                {"heading-in-ordered","1. ### x","1. x"},
+                {"heading-in-ordered-paren","1) ## a\n2) ## b","1. a\n2. b"},
+                {"heading-in-task","- [ ] ## x\n- [x] ### y","☐ x\n☑ y"},
+                {"heading-in-quote","> ## 인용 안 제목","인용 안 제목"},
+                {"heading-in-quote-closing-hashes","> ### 제목 ###","제목"},
+                {"heading-in-item-quote","- > ### x","- x"},
+                {"heading-in-nested-list","- a\n  - #### x","- a\n  - x"},
+                {"heading-in-nested-list-deeper","- a\n  - b\n    - ## x\n    - y","- a\n  - b\n    - x\n    - y"},
+                {"heading-in-quote-list","> - ## x\n> - y","- x\n- y"},
+                {"heading-in-list-with-body","- ## x\n  본문\n- y","- x\n  본문\n- y"},
+                {"heading-in-list-not-heading-no-space","- ##x","- ##x"},
+                {"heading-in-list-not-heading-seven","- ####### x","- ####### x"},
+                {"heading-in-list-not-heading-bare","- ##","- ##"}
+            };
+            for(int f=0;f<headingForms.GetLength(0);f++){
+                check(headingForms[f,0],headingForms[f,1]);
+                string headingForm=MarkdownPlainText.Convert(headingForms[f,1]);
+                if(String.Equals(headingForm,headingForms[f,2],StringComparison.Ordinal)){passed++;report.Append("PASS ").Append(headingForms[f,0]).Append("-output\n");}
+                else{failed++;report.Append("FAIL ").Append(headingForms[f,0]).Append("-output [").Append(Md2TxtEscape(headingForm)).Append("]\n");}
+            }
+            check("heading-in-list-empty","- ## \n- b");
+            check("list-continuation-deeper-marker","- a\n  b\n  - c\n    d\n  e\n  - f");
+            check("list-continuation-ordered","1. a\n   b\n   - c\n2. d");
+            check("list-continuation-after-blank","- a\n\n  b\n  - c");
+            check("list-continuation-lazy-ends","- a\n b\n- c");
+            // The writer's round trip keeps every line, indentation included, of the document with headings.
+            string continuationDocument="본문 첫 줄입니다.\n\n- 목록 첫째 항목\n- ## 목록 안 2단계 제목\n  목록 안 본문 한 줄.\n  - ### 한 단계 들어간 목록 안 3단계 제목\n    더 들어간 목록 본문.\n    - #### 두 단계 들어간 4단계 제목\n      가장 깊은 목록 본문.\n1. ### 번호 목록 안 3단계 제목\n   번호 목록 본문.\n- [ ] ## 할 일 안 2단계 제목";
+            try{
+                string written=MarkdownWriter.Write(Markdown.Parse(continuationDocument,16,"Malgun Gothic",Brushes.Black,false,""));
+                if(String.Equals(written,continuationDocument,StringComparison.Ordinal)){passed++;report.Append("PASS list-continuation-roundtrip\n");}
+                else{failed++;report.Append("FAIL list-continuation-roundtrip [").Append(Md2TxtEscape(written)).Append("]\n");}
+            }catch(Exception ex){failed++;report.Append("FAIL list-continuation-roundtrip [threw ").Append(ex.GetType().Name).Append(": ").Append(ex.Message).Append("]\n");}
+            // A quote line indented to an open item's content column is a quote inside that item: one quote
+            // with the item's own "- > text" line, and the list stays open (the print path, the live view, the
+            // HTML export and this converter read one rule). The reported document with its headings is compared
+            // with the oracle below, and its print model, pinned text and the writer's round trip are checked too.
+            check("list-quote-continuation","- > 목록 안 인용 3단계 제목\n  > 목록 안 인용 본문.\n\n> - 인용 안 목록 5단계 제목\n>   인용 안 목록 본문.");
+            check("list-quote-continuation-ordered","1. > a\n   > b\n1. c");
+            check("list-quote-continuation-plain-item","- a\n  > b\n- c");
+            check("list-quote-continuation-nested","- x\n  - > a\n    > b\n  - c");
+            check("list-quote-continuation-after-blank","- > a\n\n  > b");
+            check("list-quote-column-zero-ends-list","- a\n> b\n- c");
+            check("list-quote-under-content-column","1. a\n  > b");
+            check("list-quote-holding-list-stays-quote","- a\n  > - b");
+            // A setext heading ("b" over "===") indented to an open item's content column is a heading inside that item and the
+            // list stays open: the numbers go on past it. Its underline at column 0 ends the list, as it always did.
+            string[,] setextForms={
+                {"list-setext-continuation-keeps-numbers","1. a\n   b\n   ===\n1. c","1. a\n   b\n2. c"},
+                {"list-setext-h2-keeps-list","- a\n  b\n  ---\n- c","- a\n  b\n- c"},
+                {"list-setext-underline-column-zero-ends-list","1. a\n   b\n===\n1. c","1. a\n   b\n1. c"},
+                {"list-setext-unindented-text-ends-list","1. a\nb\n===\n1. c","1. a\nb\n1. c"},
+                // A nested item's underline sits at column 5, past the three columns a setext underline may be indented, so it is no
+                // underline in any view: "===" stays text, the nested list goes on and the outer numbers go on past it (the oracle agrees).
+                {"list-setext-nested-keeps-outer-numbers","1. a\n   - b\n     c\n     ===\n   - d\n1. e","1. a\n  - b\n     c\n     ===\n  - d\n2. e"},
+                {"list-setext-after-blank","1. a\n\n   b\n   ===\n1. c","1. a\n\n   b\n2. c"}
+            };
+            for(int f=0;f<setextForms.GetLength(0);f++){
+                check(setextForms[f,0],setextForms[f,1]);
+                string setextForm=MarkdownPlainText.Convert(setextForms[f,1]);
+                if(String.Equals(setextForm,setextForms[f,2],StringComparison.Ordinal)){passed++;report.Append("PASS ").Append(setextForms[f,0]).Append("-output\n");}
+                else{failed++;report.Append("FAIL ").Append(setextForms[f,0]).Append("-output [").Append(Md2TxtEscape(setextForm)).Append("]\n");}
+            }
+            // A GitHub alert as the first quote line inside an item ("- > [!NOTE]" and "  > [!NOTE]" under a plain item) is an alert in the
+            // item; the same marker on a line joined to an item's open quote is plain text of that quote.
+            check("list-quote-alert-first-line","- > [!NOTE]\n  > 본문\n- c");
+            check("list-quote-alert-continuation","- a\n  > [!NOTE]\n  > 본문\n- c");
+            check("list-quote-alert-task","- [ ] > [!TIP]\n      > 본문\n- c");
+            string alertJoined=MarkdownPlainText.Convert("- > x\n  > [!NOTE]\n  > y");
+            check("list-quote-alert-joined-is-text","- > x\n  > [!NOTE]\n  > y");
+            if(String.Equals(alertJoined,"- x\n[!NOTE]\ny",StringComparison.Ordinal)){passed++;report.Append("PASS list-quote-alert-joined-is-text-output\n");}
+            else{failed++;report.Append("FAIL list-quote-alert-joined-is-text-output [").Append(Md2TxtEscape(alertJoined)).Append("]\n");}
+            // A task item whose text is a quote: the second quote line joins the first.
+            check("list-quote-task-second-line","- [ ] > a\n      > b\n- [x] c");
+            // A backslash that ends a table cell is a literal backslash (the live view draws it); only a backslash at the end of the
+            // source line is a hard break that drops, so the last cell of a row with no closing pipe loses it.
+            check("table-cell-trailing-backslash","| 경로 | 설명 |\n| --- | --- |\n| C:\\Users\\ | 폴더 |");
+            check("table-cell-trailing-backslash-open-row","| 경로 | 설명 |\n| --- | --- |\n| C:\\Users\\ | 폴더\\");
+            string cellBackslash=MarkdownPlainText.Convert("| 경로 | 설명 |\n| --- | --- |\n| C:\\Users\\ | 폴더 |");
+            if(cellBackslash.EndsWith("C:\\Users\\\t폴더",StringComparison.Ordinal)){passed++;report.Append("PASS table-cell-trailing-backslash-output\n");}
+            else{failed++;report.Append("FAIL table-cell-trailing-backslash-output [").Append(Md2TxtEscape(cellBackslash)).Append("]\n");}
+            string openRowBackslash=MarkdownPlainText.Convert("| 경로 | 설명 |\n| --- | --- |\n| C:\\Users\\ | 폴더\\");
+            if(openRowBackslash.EndsWith("C:\\Users\\\t폴더",StringComparison.Ordinal)){passed++;report.Append("PASS table-cell-trailing-backslash-open-row-output\n");}
+            else{failed++;report.Append("FAIL table-cell-trailing-backslash-open-row-output [").Append(Md2TxtEscape(openRowBackslash)).Append("]\n");}
+            // The paragraph rule the cells follow: a backslash at the end of a line is a hard break and drops in every view.
+            check("backslash-line-end-paragraph","끝 역슬래시 C:\\path\\\n다음 줄");
+            string lineEndBackslash=MarkdownPlainText.Convert("끝 역슬래시 C:\\path\\\n다음 줄");
+            if(String.Equals(lineEndBackslash,"끝 역슬래시 C:\\path\n다음 줄",StringComparison.Ordinal)){passed++;report.Append("PASS backslash-line-end-paragraph-output\n");}
+            else{failed++;report.Append("FAIL backslash-line-end-paragraph-output [").Append(Md2TxtEscape(lineEndBackslash)).Append("]\n");}
+            string listQuoteDocument="- > ### 목록 안 인용 3단계 제목\n  > 목록 안 인용 본문.\n\n> - ##### 인용 안 목록 5단계 제목\n>   인용 안 목록 본문.";
+            check("list-quote-continuation-headings",listQuoteDocument);
+            try{
+                System.Windows.Documents.FlowDocument listQuoteParsed=Markdown.Parse(listQuoteDocument,16,"Malgun Gothic",Brushes.Black,false,"");
+                System.Windows.Documents.List listQuoteList=listQuoteParsed.Blocks.FirstBlock as System.Windows.Documents.List;
+                System.Windows.Documents.ListItem listQuoteItem=null;
+                System.Windows.Documents.Section listQuoteSection=null;
+                if(listQuoteList!=null&&listQuoteList.ListItems.Count==1)listQuoteItem=listQuoteList.ListItems.FirstListItem;
+                if(listQuoteItem!=null&&listQuoteItem.Blocks.Count==1)listQuoteSection=listQuoteItem.Blocks.FirstBlock as System.Windows.Documents.Section;
+                // One list, one item, one quote Section holding both lines (the heading and the body): a single bar.
+                if(listQuoteSection!=null&&listQuoteSection.Blocks.Count==2){passed++;report.Append("PASS list-quote-continuation-one-quote\n");}
+                else{failed++;report.Append("FAIL list-quote-continuation-one-quote [list=").Append(listQuoteList!=null).Append(" item=").Append(listQuoteItem!=null).Append(" section blocks=").Append(listQuoteSection==null?-1:listQuoteSection.Blocks.Count).Append("]\n");}
+                string listQuotePinned="- 목록 안 인용 3단계 제목\n목록 안 인용 본문.\n\n- 인용 안 목록 5단계 제목\n  인용 안 목록 본문.";
+                string listQuotePrinted=ReadableText(listQuoteParsed);
+                if(String.Equals(listQuotePrinted,listQuotePinned,StringComparison.Ordinal)){passed++;report.Append("PASS list-quote-continuation-print-text\n");}
+                else{failed++;report.Append("FAIL list-quote-continuation-print-text [").Append(Md2TxtEscape(listQuotePrinted)).Append("]\n");}
+            }catch(Exception ex){failed++;report.Append("FAIL list-quote-continuation-print [threw ").Append(ex.GetType().Name).Append(": ").Append(ex.Message).Append("]\n");}
+            // MD -> rich -> MD: an unedited list is written back byte for byte, the quote line's own indentation included.
+            string[] listQuoteRoundTrips={listQuoteDocument,"1. > a\n   > b\n1. c","- a\n  > b\n- c","- x\n  - > a\n    > b\n  - c","- > a\n\n  > b","- > a\n    > b"};
+            for(int r=0;r<listQuoteRoundTrips.Length;r++){
+                try{
+                    string written=MarkdownWriter.Write(Markdown.Parse(listQuoteRoundTrips[r],16,"Malgun Gothic",Brushes.Black,false,""));
+                    if(String.Equals(written,listQuoteRoundTrips[r],StringComparison.Ordinal)){passed++;report.Append("PASS list-quote-continuation-roundtrip-").Append(r).Append('\n');}
+                    else{failed++;report.Append("FAIL list-quote-continuation-roundtrip-").Append(r).Append(" [").Append(Md2TxtEscape(written)).Append("]\n");}
+                }catch(Exception ex){failed++;report.Append("FAIL list-quote-continuation-roundtrip-").Append(r).Append(" [threw ").Append(ex.GetType().Name).Append(": ").Append(ex.Message).Append("]\n");}
+            }
             check("list-empty-item","- \n- b");
             // Quotes.
             check("quote","> 인용");
@@ -102,6 +235,25 @@ namespace MDNote {public partial class MainWindow {
             check("quote-list","> - a\n> - b");
             check("quote-blank","> a\n>\n> b");
             check("quote-code","> ```\n> a\n> ```");
+            // GitHub alerts / Obsidian callouts: a title line (the text after the marker, else the default
+            // English title), then the body.
+            check("alert-note","> [!NOTE]\n> 본문");
+            check("alert-tip","> [!TIP]\n> 본문");
+            check("alert-important","> [!IMPORTANT]\n> 본문");
+            check("alert-warning","> [!WARNING]\n> 본문");
+            check("alert-caution","> [!CAUTION]\n> 본문");
+            check("alert-lowercase","> [!tip]\n> 본문");
+            check("alert-custom-title","> [!tip] good **job**\n> 본문");
+            check("alert-alias","> [!info]\n> 본문");
+            check("alert-unknown","> [!foo]\n> 본문");
+            check("alert-fold-sign","> [!tip]-\n> 본문");
+            check("alert-fold-sign-title","> [!warning]+ 주의\n> 본문");
+            check("alert-title-only","> [!NOTE]");
+            check("alert-nested","> 바깥\n> > [!NOTE]\n> > 안쪽");
+            check("alert-lazy","> [!NOTE]\n> 본문\n게으른 줄");
+            check("alert-list-body","> [!NOTE]\n> - a\n> - b");
+            check("alert-not-first-line","> 가\n> [!NOTE]");
+            check("alert-glued-text","> [!NOTE]글자");
             // Tables.
             check("table-basic","| a | b |\n|---|---|\n| 1 | 2 |");
             check("table-pipe-code","| a | `x|y` | c |\n|---|---|---|\n| 1 | 2 | 3 |");

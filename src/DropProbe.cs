@@ -469,16 +469,21 @@ internal static class DropProbe {
             if(!undone)ResetEditor(window,BaseText);
         }catch(Exception ex){Check(label+" exception",false,ex.GetType().Name+": "+ex.Message);try{ResetEditor(window,BaseText);}catch(Exception){}}
     }
-    // An image dropped inside a fenced code block is refused: a token written there is literal
-    // text, not a picture, so the source consumes the drop and writes nothing.
+    // 11-05 user decision (MarkdownCommands.InsertImage/InsertImages, BelowCodeBlock): an image
+    // dropped with the caret in a CLOSED fenced code block is not written inside the fence (a token
+    // there would be literal text); the picture goes on a new line right under the closing fence,
+    // the fences and code lines stay as they were, and the caret ends after the inserted picture.
     static void CodeImageCase(MainWindow window,string mode){
         string label=mode+" image code block";
         try{
             SourceEditor editor=Source(window);
             string before=editor.Document.Text;
-            string openBefore=LineText(editor,14),closeBefore=LineText(editor,17);
+            string openBefore=LineText(editor,14),codeBefore=LineText(editor,15),closeBefore=LineText(editor,17);
             int linesBefore=editor.Document.LineCount;
-            int caretBefore=editor.CaretIndex,selectionBefore=editor.SelectionLength;
+            ICSharpCode.AvalonEdit.Document.DocumentLine closeLine=editor.Document.GetLineByNumber(17);
+            int closeEnd=closeLine.EndOffset;
+            string prefix=closeLine.DelimiterLength>0?editor.Document.GetText(closeLine.EndOffset,closeLine.DelimiterLength):"\n";
+            string want=prefix+Markup(SameAlt,SameRefCopy);
             Point point=DropPoint(editor,15,6,0,false);
             int at=HitOffset(editor,point);
             DropOutcome outcome=RaiseDrop(window,FileDrop(new string[]{SamePath}),point,DragDropEffects.Copy,DragDropKeyStates.LeftMouseButton,false);
@@ -487,11 +492,46 @@ internal static class DropProbe {
             string after=editor.Document.Text;
             int caret=editor.CaretIndex,selection=editor.SelectionLength;
             Check(label+" handler",outcome.Error==null&&outcome.Handled&&dispatchOk,outcome.Error==null?("handled="+outcome.Handled):("error="+outcome.Error.GetType().Name+": "+outcome.Error.Message));
-            bool inFence=LineOf(editor,at)==15&&LineText(editor,15).StartsWith("code ",StringComparison.Ordinal);
-            bool refused=outcome.PreviewHandled&&inFence&&after==before&&LineText(editor,14)==openBefore&&LineText(editor,17)==closeBefore&&editor.Document.LineCount==linesBefore;
-            Check(label+" refuses the image inside the fence and keeps the text",refused,"previewHandled="+outcome.PreviewHandled+", inFence="+inFence+", changed="+(after!=before)+", fences="+(LineText(editor,14)==openBefore&&LineText(editor,17)==closeBefore)+", lines="+editor.Document.LineCount+" want="+linesBefore);
+            bool inFence=LineOf(editor,at)==15&&codeBefore.StartsWith("code ",StringComparison.Ordinal);
+            // The whole text decides, not a common-prefix diff: the text under the fence is "\n\nlast", so the
+            // inserted "\n![..]" shares its first character with the old newline and the diff would shift by one.
+            bool exact=closeEnd<=before.Length&&after==before.Insert(closeEnd,want);
+            int insertedAt=exact?closeEnd:InsertStart(before,after);
+            string inserted=exact?want:InsertedText(before,after);
+            bool below=outcome.PreviewHandled&&inFence&&exact&&insertedAt==closeEnd&&inserted==want&&editor.Document.LineCount==linesBefore+1
+                &&LineText(editor,14)==openBefore&&LineText(editor,15)==codeBefore&&LineText(editor,17)==closeBefore&&LineText(editor,18)==Markup(SameAlt,SameRefCopy);
+            Check(label+" puts the image on a new line under the closing fence and keeps the block",below,"previewHandled="+outcome.PreviewHandled+", inFence="+inFence+", insertedAt="+insertedAt+" want="+closeEnd+", inserted='"+Excerpt(inserted)+"', lines="+editor.Document.LineCount+" want="+(linesBefore+1)+", line18='"+Excerpt(LineText(editor,18))+"'");
+            Check(label+" caret ends after the image",caret==closeEnd+want.Length&&selection==0,"caret="+caret+" selection="+selection+" want="+(closeEnd+want.Length));
+            Call(window,"Undo");Pump();
+            bool undone=editor.Document.Text==before;
+            Check(label+" one undo restores the document",undone,undone?"restored":"text='"+Excerpt(editor.Document.Text)+"'");
+            if(!undone)ResetEditor(window,BaseText);
+        }catch(Exception ex){Check(label+" exception",false,ex.GetType().Name+": "+ex.Message);try{ResetEditor(window,BaseText);}catch(Exception){}}
+    }
+    // The same 11-05 rule's other half: a block left open to the document's end (no closing fence)
+    // has no "under the block" place, so the drop is still refused: text and caret stay.
+    static void OpenCodeImageCase(MainWindow window,string mode){
+        string label=mode+" image unclosed code block";
+        try{
+            string open="첫 줄\n\n```text\ncode a\ncode b";
+            ResetEditor(window,open);
+            SourceEditor editor=Source(window);
+            string before=editor.Document.Text;
+            int linesBefore=editor.Document.LineCount;
+            int caretBefore=editor.CaretIndex,selectionBefore=editor.SelectionLength;
+            Point point=DropPoint(editor,4,4,0,false);
+            int at=HitOffset(editor,point);
+            DropOutcome outcome=RaiseDrop(window,FileDrop(new string[]{SamePath}),point,DragDropEffects.Copy,DragDropKeyStates.LeftMouseButton,false);
+            Pump();
+            bool dispatchOk=DrainDispatch(label);
+            string after=editor.Document.Text;
+            int caret=editor.CaretIndex,selection=editor.SelectionLength;
+            Check(label+" handler",outcome.Error==null&&outcome.Handled&&dispatchOk,outcome.Error==null?("handled="+outcome.Handled):("error="+outcome.Error.GetType().Name+": "+outcome.Error.Message));
+            bool inFence=LineOf(editor,at)==4;
+            bool refused=outcome.PreviewHandled&&inFence&&after==before&&editor.Document.LineCount==linesBefore;
+            Check(label+" refuses the image and keeps the text",refused,"previewHandled="+outcome.PreviewHandled+", inFence="+inFence+", changed="+(after!=before)+", lines="+editor.Document.LineCount+" want="+linesBefore);
             Check(label+" caret and selection stay where they were",caret==caretBefore&&selection==selectionBefore,"caret="+caret+" selection="+selection+" want="+caretBefore+"/"+selectionBefore);
-            if(after!=before)ResetEditor(window,BaseText);
+            ResetEditor(window,BaseText);
         }catch(Exception ex){Check(label+" exception",false,ex.GetType().Name+": "+ex.Message);try{ResetEditor(window,BaseText);}catch(Exception){}}
     }
     static void MultipleImagesCase(MainWindow window,string mode){
@@ -700,6 +740,7 @@ internal static class DropProbe {
             RunImageCase(window,mode+" image heading",SamePath,Markup(SameAlt,SameRefCopy),1,4,0,false,"# ",-1);
             TableImageCase(window,mode);
             CodeImageCase(window,mode);
+            OpenCodeImageCase(window,mode);
             RunImageCase(window,mode+" image document end",SamePath,Markup(SameAlt,SameRefCopy),19,lastLength+1,120,true,null,-1);
             MultipleImagesCase(window,mode);
             if(!raw){
@@ -1235,7 +1276,7 @@ internal static class DropProbe {
         Report.Append("- The mixed image/text case raises PreviewDrop only: bubbling it would make the self-test open the binary png as a document (LoadFileCore rethrows in self-test), so the open-as-document result is covered by the svg/txt cases instead.\n");
         Report.Append("- Read mode runs in its own window (the state a .md opens in): an existing image drop turns editing on through the Ctrl+E entry point and inserts at the hit point, a drop in the empty space under the last line appends at the document end, and a name that is gone inserts nothing while the window still consumes the image-only drop (no document opens, no decoder box).\n");
         Report.Append("- Window-level drops (status bar, tab strip, ribbon, margins) are raised on the window itself: an all-image drop on a Markdown document inserts at the caret as one undo step, read mode included, and an all-image drop never reaches LoadFile. Mixed drops keep the open-as-document answer.\n");
-        Report.Append("- An image dropped inside a fenced code block is refused: a token written there would be literal text, so the source consumes the drop and neither the text nor the caret changes.\n");
+        Report.Append("- An image dropped inside a closed fenced code block (11-05 rule) is not written in the fence: it goes on a new line right under the closing fence, the block stays as it was and the caret ends after the picture; one undo restores the text. A block left unclosed to the document's end still refuses the drop: neither the text nor the caret changes.\n");
         Report.Append("- Staging rule (2026-11-03): only a picture inside the document's own picture folder (<docdir>\\<docname>, subfolders included) is linked where it is. Any other inserted picture, saved document or not, is copied into the shared picture folder (the probe points it at <dir>\\temp-images through MainWindow.ImageTempFolderOverride; original name, an identical file is reused, a different one with that name takes -2) and linked by its absolute path. Every save moves the pictures the text still links from that folder into <docname>\\ of the target and rewrites the links to relative; a Save As of a saved document copies the pictures it links from the old <docname>\\; a save that does not write restores both (RunStageSave). A failed copy keeps the original path. The same rule covers a drop, a Ctrl+V of copied files, a clipboard bitmap and the image button's dialog.\n");
         Report.Append("- Elapsed ").Append(Clock.ElapsedMilliseconds).Append(" ms.\n");
         File.WriteAllText(Path.Combine(OutDir,"drop-probe.txt"),Report.ToString(),new UTF8Encoding(false));

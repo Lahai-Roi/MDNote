@@ -1341,11 +1341,13 @@ internal static class MarkdownStructuralInput {
         DocumentLine line = document.GetLineByOffset(caretOffset);
         int column = caretOffset - line.Offset;
         string text = LineText(document, line);
-        // F1: a fence line is structure, like a table row. Backspace at its edge joins it with a
-        // neighbour or shortens its marker run, and either changes what the block covers: "```"
-        // merged with the first code line turns that line into the fence's info string, and a
-        // merged closing fence lets the block swallow the rest of the document.
-        if (FenceBoundaryBackspace(document, line, text, column)) return StayAt(caretOffset);
+        // F1: a fence line is structure, like a table row. Backspace at its edge would join it
+        // with a neighbour or shorten its marker run. A fence pair is one unit (11-06 user: the
+        // closing ``` must be deletable): the key takes the block's two fence lines and keeps
+        // every other line as plain text, the same change the toolbar code button makes. A fence
+        // still being typed (an opening fence with no closer, drawn as source) has no pair, so
+        // DeleteFenceBlock answers null and the ordinary character delete runs there.
+        if (FenceBoundaryBackspace(document, line, text, column)) return MarkdownCommands.DeleteFenceBlock(document, caretOffset);
         char fenceChar;
         int fenceLength;
         if (TryFenceMark(text, out fenceChar, out fenceLength) || IsInsideFence(document, line)) return null;
@@ -1382,6 +1384,42 @@ internal static class MarkdownStructuralInput {
             return result;
         }
         return null;
+    }
+
+    // Delete at the end of an ordered item, or Backspace at the start of the line below it, takes the line break between the
+    // two lines, and the ordered items that follow keep counting from this item (the same renumbering Enter writes, AddRenumber):
+    // the line that joined is no longer an item, and a blank or plain line that kept two runs apart is gone, so a run "2, 3" that
+    // now meets "2" reads "2, 3, 4" and a run that lost an item closes its gap. Null when the key is not that join or nothing after
+    // the item needs a new number; the editor's own delete then runs as before.
+    internal static CommandResult JoinOrdered(TextDocument document, int caretOffset, bool back) {
+        if (!Validate(document, caretOffset, 0)) return null;
+        DocumentLine caretLine = document.GetLineByOffset(caretOffset);
+        DocumentLine upper;
+        DocumentLine lower;
+        if (back) {
+            if (caretOffset != caretLine.Offset || caretLine.PreviousLine == null) return null;
+            upper = caretLine.PreviousLine;
+            lower = caretLine;
+        } else {
+            if (caretOffset != caretLine.EndOffset || caretLine.NextLine == null) return null;
+            upper = caretLine;
+            lower = caretLine.NextLine;
+        }
+        if (upper.DelimiterLength == 0) return null;
+        string upperText = LineText(document, upper);
+        LineSlots slots = ParseSlots(upperText);
+        if (!slots.HasList || slots.Kind != ListKind.Number) return null;
+        if (IsFenceLine(document, upper) || IsFenceLine(document, lower) || IsInsideFence(document, upper)) return null;
+        int number;
+        if (!Int32.TryParse(upperText.Substring(slots.ListStart, slots.NumberLength), NumberStyles.None, CultureInfo.InvariantCulture, out number)) return null;
+        CommandResult result = new CommandResult();
+        result.Add(upper.EndOffset, upper.DelimiterLength, string.Empty);
+        AddRenumber(document, result, lower.NextLine, upperText.Substring(0, slots.ListStart), number + 1);
+        if (result.Edits.Count < 2) return null;
+        result.SortEdits();
+        result.SelectionStart = back ? caretOffset - upper.DelimiterLength : caretOffset;
+        result.SelectionLength = 0;
+        return result;
     }
 
     // True when Backspace at this column would join a fence line with the line next to it, or
@@ -1432,8 +1470,10 @@ internal static class MarkdownStructuralInput {
 
     // F2 (Delete): true when forward-deleting at this caret would join a fence line with the next
     // one or remove one of its marker characters - the other direction of the Backspace rule
-    // above. The host's Delete key asks this and swallows the key. Only the caret line and its
-    // neighbour are read, and a long marker run is read no further than the answer needs.
+    // above. The host's Delete key asks this and then takes the block's fence pair away
+    // (MarkdownCommands.DeleteFenceBlock). Joining a blank neighbour changes nothing about a
+    // fence, so that Delete stays ordinary, like the blank join of Backspace. Only the caret line
+    // and its neighbour are read, and a long marker run is read no further than the answer needs.
     internal static bool DeleteAtFenceBoundary(TextDocument document, int caretOffset) {
         if (document == null || caretOffset < 0 || caretOffset > document.TextLength) return false;
         DocumentLine line = document.GetLineByOffset(caretOffset);
@@ -1442,11 +1482,18 @@ internal static class MarkdownStructuralInput {
         int end;
         if (FenceRun(document, line, column, out start, out end)) {
             if (column >= start && column < end) return true;
-            if (line.NextLine != null && column >= line.Length) return true;
-            return false;
+            return line.NextLine != null && column >= line.Length && LineHasVisibleChar(document, line.NextLine);
         }
         DocumentLine next = line.NextLine;
-        return next != null && column >= line.Length && FenceRun(document, next, 0, out start, out end);
+        return next != null && column >= line.Length && line.Length > 0 && FenceRun(document, next, 0, out start, out end);
+    }
+
+    static bool LineHasVisibleChar(TextDocument document, DocumentLine line) {
+        for (int at = line.Offset; at < line.EndOffset; at++) {
+            char c = document.GetCharAt(at);
+            if (c != ' ' && c != '\t') return true;
+        }
+        return false;
     }
 
     // A fence line's leading marker run as line columns [start, end). The run is read only as far

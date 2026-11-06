@@ -23,7 +23,8 @@ namespace MDNote {
 // one list (one numbering, the line itself stays a blank line), and a deeper marker nests only
 // when it reaches the parent item's content column ("1. " content starts at column 3, so a
 // two-space bullet under it is a sibling list). ListContentColumn and BlankLine below are the
-// shared scans.
+// shared scans. A paragraph line indented to an open item's content column is that item's
+// continuation and keeps the list open (MarkdownLivePreview.ContinuationList, Markdown.NestLists).
 // Linear in the input length: no FlowDocument is built and no Regex runs per character.
 internal static class MarkdownPlainText {
     sealed class References {
@@ -305,6 +306,21 @@ internal static class MarkdownPlainText {
         return true;
     }
 
+    // A quote line indented to an open item's content column ("  > text" under "- > text"): a quote inside
+    // that item (CommonMark), not a quote of its own that ends the list. Its first non-blank character is
+    // ">" and its indentation reaches `content`; a quote whose body is a list marker ("  > - a") keeps the
+    // list-in-quote reading. MarkdownLivePreview.QuoteContinuationList, Markdown.NestLists, Render below and
+    // the HTML export apply the same rule.
+    internal static bool ItemQuoteLine(string line,int content){
+        int at=0,column=0;
+        while(at<line.Length&&Space(line[at])){column+=line[at]=='\t'?4:1;at++;}
+        if(column<content||at>=line.Length||line[at]!='>')return false;
+        int levels=0;
+        while(at<line.Length&&line[at]=='>'&&levels<6){at++;levels++;if(at<line.Length&&Space(line[at]))at++;}
+        string indent;bool ordered;string number;bool task;bool checkedBox;string body;int bodyColumn;
+        return !ListLine(line.Substring(at),out indent,out bodyColumn,out ordered,out number,out task,out checkedBox,out body);
+    }
+
     // Markdown.Cells: trim, drop one edge pipe, then split on unescaped pipes outside backtick spans.
     internal static string[] Cells(string line){
         var cells=new List<string>();
@@ -313,7 +329,8 @@ internal static class MarkdownPlainText {
         if(value.StartsWith("|"))value=value.Substring(1);
         // The closing pipe is structure unless an ODD backslash run escapes it: "\\|" is a literal
         // backslash and a live pipe, so the row still ends there (MarkdownLivePreview.TablePipes).
-        if(value.EndsWith("|")&&!PipeEscaped(value,value.Length-1))value=value.Substring(0,value.Length-1);
+        bool closed=value.EndsWith("|")&&!PipeEscaped(value,value.Length-1);
+        if(closed)value=value.Substring(0,value.Length-1);
         bool escaped=false;int budget=value.Length*3;
         for(int i=0;i<value.Length;i++){
             char c=value[i];
@@ -335,7 +352,26 @@ internal static class MarkdownPlainText {
             else cell.Append(c);
         }
         cells.Add(cell.ToString());
-        return cells.ToArray();
+        string[] result=cells.ToArray();
+        // A backslash at the end of a cell is a literal backslash (GFM, and the live view draws it): only a backslash at the end
+        // of the source line is a hard break that drops. The last cell of a row with no closing pipe is that line end.
+        bool lineEndBackslash=!closed&&line.Length>0&&line[line.Length-1]=='\\';
+        for(int k=0;k<result.Length;k++){
+            if(k==result.Length-1&&lineEndBackslash)continue;
+            result[k]=KeepCellBackslash(result[k]);
+        }
+        return result;
+    }
+    // The backslash that ends the cell's text (an odd run: a pair is one escaped backslash already) travels as the escape sentinel
+    // for "\\", so the inline pass, which drops a backslash at the end of the text it gets, keeps it. Trailing spaces stay where
+    // they are for the caller's Trim.
+    static string KeepCellBackslash(string cell){
+        int end=cell.Length;
+        while(end>0&&Space(cell[end-1]))end--;
+        int count=0;
+        for(int i=end-1;i>=0&&cell[i]=='\\';i--)count++;
+        if((count&1)==0)return cell;
+        return cell.Substring(0,end-1)+(char)(0xE000+Markdown.EscapablePunctuation.IndexOf('\\'))+cell.Substring(end);
     }
     // Odd backslash run before the pipe: escaped (a backslash pair is one literal backslash).
     internal static bool PipeEscaped(string value,int at){
@@ -426,16 +462,26 @@ internal static class MarkdownPlainText {
             if(i+1<lines.Length&&!ListStart(line)&&SetextUnderline(lines[i+1],out headingLevel)){
                 AppendInline(result,line,references,imageLabel);
                 result.Append('\n');
+                // A setext heading indented to an open item's content column is a heading inside that item and the list stays
+                // open (SetextInItem; the live view and the print path read the same pair the same way).
+                int setextKeep,setextClose;
+                if(levels.Count>0&&SetextInItem(line,lines[i+1],ContentColumns(levels),out setextKeep,out setextClose)){
+                    if(levels.Count>setextClose+1)levels.RemoveRange(setextClose+1,levels.Count-setextClose-1);
+                }else levels.Clear();
                 i++;
-                levels.Clear();
                 continue;
             }
             if(HorizontalRule(line)){levels.Clear();continue;} // BlockUIContainer contributes no text
             string quoteBody,nextQuote;
             if(QuoteLine(line,out quoteBody)){
+                int quoteItem=ItemQuoteLevel(levels,line);
                 var body=new StringBuilder(quoteBody);
                 while(i+1<lines.Length&&QuoteLine(lines[i+1],out nextQuote)){i++;body.Append('\n').Append(nextQuote);}
-                Render(body.ToString().Split('\n'),references,result,imageLabel);
+                RenderQuote(body.ToString().Split('\n'),references,result,imageLabel);
+                // A quote indented to an open item's content column is a quote inside that item: the list
+                // stays open (items deeper than the one it sits in close), the same rule as the live view
+                // (MarkdownLivePreview.QuoteContinuationList) and the print path (Markdown.NestLists).
+                if(quoteItem>=0){if(levels.Count>quoteItem+1)levels.RemoveRange(quoteItem+1,levels.Count-quoteItem-1);continue;}
                 levels.Clear();
                 continue;
             }
@@ -461,15 +507,86 @@ internal static class MarkdownPlainText {
                 else if(level.Style==2)marker="- ";
                 else marker="";
                 result.Append(' ',(levels.Count-1)*2).Append(marker);
-                AppendInline(result,listBody,references,imageLabel);
-                result.Append('\n');
+                if(listBody.Length>0&&listBody[0]=='>'){
+                    // An item whose text is a quote ("- > text") holds that quote (Markdown.ParseCore's list branch),
+                    // and the quote lines indented to the item's content column that follow it are the same quote.
+                    string firstQuote=listBody.Substring(1);
+                    if(firstQuote.Length>0&&Space(firstQuote[0]))firstQuote=firstQuote.Substring(1);
+                    var itemQuote=new StringBuilder(firstQuote);string nextItemQuote;
+                    while(i+1<lines.Length&&ItemQuoteLine(lines[i+1],contentColumn)&&QuoteLine(lines[i+1],out nextItemQuote)){i++;itemQuote.Append('\n').Append(nextItemQuote);}
+                    RenderQuote(itemQuote.ToString().Split('\n'),references,result,imageLabel);
+                }else{
+                    // An item whose text is an ATX heading ("- ## text", "1. ### text", "- [ ] ## text") loses the
+                    // heading marks and the closing "#" run like a top-level heading (Markdown.ParseCore's list branch
+                    // reads the same AtxHeading); the list marker and the task box stay.
+                    if(AtxHeading(listBody,out headingLevel,out headingBody))AppendInline(result,headingBody,references,imageLabel);
+                    else AppendInline(result,listBody,references,imageLabel);
+                    result.Append('\n');
+                }
                 level.Number++; // NestLists numbers every item, whatever the source number was
                 continue;
             }
             AppendInline(result,line,references,imageLabel);
             result.Append('\n');
+            // A paragraph line indented to an open item's content column continues that item (CommonMark),
+            // so the list stays open: the same rule as the live view (MarkdownLivePreview.ContinuationList)
+            // and the print path (Markdown.NestLists). Items deeper than the one it continues are closed.
+            int keep=ContinuationLevel(levels,line);
+            if(keep>=0){if(levels.Count>keep+1)levels.RemoveRange(keep+1,levels.Count-keep-1);continue;}
             levels.Clear();
         }
+    }
+    // A quote's lines (the text after each ">") as blocks. A quote whose first line is an alert marker prints its
+    // title line (the text after the marker, else the default title) and then the body, the way the print
+    // parser lays it out. Shared by a quote of its own and a quote that is a list item's body.
+    static void RenderQuote(string[] quoteLines,References references,StringBuilder result,string imageLabel){
+        int alertEnd,alertTitle;string alertWord;
+        AlertKind alert=AlertMarker(quoteLines[0],0,out alertEnd,out alertTitle,out alertWord);
+        if(alert!=AlertKind.None){
+            if(alertTitle<quoteLines[0].Length)AppendInline(result,quoteLines[0].Substring(alertTitle).TrimEnd(' ','\t'),references,imageLabel);
+            else result.Append(AlertDefaultTitle(alert,alertWord));
+            result.Append('\n');
+            var rest=new string[quoteLines.Length-1];
+            Array.Copy(quoteLines,1,rest,0,rest.Length);
+            Render(rest,references,result,imageLabel);
+        }else Render(quoteLines,references,result,imageLabel);
+    }
+    // A setext heading ("b" over "===") whose text line reaches an open item's content column sits inside that item, and the list stays
+    // open (CommonMark; the live view's ContinuationList keeps it open on both lines). keep: the deepest item the text line reaches;
+    // close: the deepest item (at or above keep) the underline line reaches - the items below it close. False (the list ends, as it did
+    // before) when the text line is a thematic break, reaches no item, or the underline reaches none.
+    internal static bool SetextInItem(string line,string underline,int[] contents,out int keep,out int close){
+        keep=-1;close=-1;
+        if(HorizontalRule(line))return false;
+        int first=IndentColumns(line),second=IndentColumns(underline);
+        for(int k=contents.Length-1;k>=0&&keep<0;k--)if(first>=contents[k])keep=k;
+        if(keep<0)return false;
+        for(int k=keep;k>=0&&close<0;k--)if(second>=contents[k])close=k;
+        return close>=0;
+    }
+    internal static bool HorizontalRuleLine(string line){return HorizontalRule(line);}
+    static int IndentColumns(string line){
+        int column=0;
+        for(int at=0;at<line.Length&&Space(line[at]);at++)column+=line[at]=='\t'?4:1;
+        return column;
+    }
+    static int[] ContentColumns(List<ListLevel> levels){
+        var contents=new int[levels.Count];
+        for(int k=0;k<contents.Length;k++)contents[k]=levels[k].Content;
+        return contents;
+    }
+    // The deepest open item (index into levels) a quote line is indented into (ItemQuoteLine), -1 when none.
+    static int ItemQuoteLevel(List<ListLevel> levels,string line){
+        for(int k=levels.Count-1;k>=0;k--)if(ItemQuoteLine(line,levels[k].Content))return k;
+        return -1;
+    }
+    // The deepest open item (index into levels) whose content column the line's indentation reaches, -1 when none.
+    // Called only for a line that is plain paragraph text: every block shape was taken above.
+    static int ContinuationLevel(List<ListLevel> levels,string line){
+        int column=0;
+        for(int at=0;at<line.Length&&Space(line[at]);at++)column+=line[at]=='\t'?4:1;
+        for(int k=levels.Count-1;k>=0;k--)if(column>=levels[k].Content)return k;
+        return -1;
     }
 
     static void AppendRow(StringBuilder result,string[] cells,References references,string imageLabel){
@@ -828,6 +945,63 @@ internal static class MarkdownPlainText {
         return false;
     }
 
+    // GitHub alert / Obsidian callout marker at the first content character of a quote's first line:
+    // "[!TYPE]" (up to three spaces before it), an optional Obsidian fold sign "+" / "-", then the end
+    // of the line or a space/tab and the optional title text. start is where the line's own content
+    // begins (after the quote markers). markerEnd is just after the "]" and the fold sign, titleStart
+    // the first character of the title (text.Length when there is none; the spaces between are part of
+    // the hidden marker). typeWord is the word as written. O(marker length): nothing else is read.
+    // The editor, the print parser, the HTML export and this converter all read this one scan.
+    internal static AlertKind AlertMarker(string text,int start,out int markerEnd,out int titleStart,out string typeWord){
+        markerEnd=start;titleStart=start;typeWord="";
+        if(text==null||start<0||start>=text.Length)return AlertKind.None;
+        int p=start,columns=0;
+        while(p<text.Length&&Space(text[p])){columns+=text[p]=='\t'?4:1;if(columns>3)return AlertKind.None;p++;}
+        if(p+3>=text.Length||text[p]!='['||text[p+1]!='!')return AlertKind.None;
+        int word=p+2,q=word;
+        while(q<text.Length&&q-word<32&&AlertWordChar(text[q]))q++;
+        if(q==word||q>=text.Length||text[q]!=']')return AlertKind.None;
+        int end=q+1;
+        if(end<text.Length&&(text[end]=='+'||text[end]=='-'))end++;
+        if(end<text.Length&&!Space(text[end]))return AlertKind.None;
+        int title=end;
+        while(title<text.Length&&Space(text[title]))title++;
+        markerEnd=end;titleStart=title;typeWord=text.Substring(word,q-word);
+        return AlertKindOf(typeWord);
+    }
+    static bool AlertWordChar(char c){return c>='a'&&c<='z'||c>='A'&&c<='Z'||c>='0'&&c<='9'||c=='-'||c=='_';}
+    // The five GitHub types keep their own colour; the Obsidian names map to the nearest one and
+    // anything else is a note.
+    internal static AlertKind AlertKindOf(string word){
+        switch((word??"").ToLowerInvariant()){
+            case "tip":case "success":case "check":case "done":case "hint":return AlertKind.Tip;
+            case "important":case "question":case "help":case "faq":case "example":case "quote":case "cite":return AlertKind.Important;
+            case "warning":case "attention":case "failure":case "fail":case "missing":case "bug":return AlertKind.Warning;
+            case "caution":case "danger":case "error":return AlertKind.Caution;
+            default:return AlertKind.Note;
+        }
+    }
+    // The title line when the marker carries no text of its own: English in every UI language. The
+    // five GitHub names are fixed; an alias or unknown word is shown with its first letter capitalised.
+    internal static string AlertDefaultTitle(AlertKind kind,string typeWord){
+        string word=(typeWord??"").ToLowerInvariant();
+        switch(word){
+            case "note":return "Note";
+            case "tip":return "Tip";
+            case "important":return "Important";
+            case "warning":return "Warning";
+            case "caution":return "Caution";
+        }
+        if(word.Length>0)return Char.ToUpperInvariant(word[0])+word.Substring(1);
+        switch(kind){
+            case AlertKind.Tip:return "Tip";
+            case AlertKind.Important:return "Important";
+            case AlertKind.Warning:return "Warning";
+            case AlertKind.Caution:return "Caution";
+            default:return "Note";
+        }
+    }
+
     // Markdown.ScanReferences: definitions are collected outside fenced code only.
     static void ScanReferences(string[] lines,References references){
         char marker='\0';int length=0;
@@ -846,4 +1020,61 @@ internal static class MarkdownPlainText {
             }
         }
     }
-}}
+}
+
+// The five GitHub alert types (a quote whose first line is "[!NOTE]" and so on).
+internal enum AlertKind { None, Note, Tip, Important, Warning, Caution }
+
+// Colours and icon outlines shared by the editor, the print view and the HTML export. The icons are
+// path data in a 16 x 16 box (the SVG / WPF path mini-language): Stroke is drawn as a 1.5 wide round
+// outline, Dots as filled discs.
+internal static class AlertArt {
+    internal static string Css(AlertKind kind){
+        switch(kind){
+            case AlertKind.Tip:return "tip";
+            case AlertKind.Important:return "important";
+            case AlertKind.Warning:return "warning";
+            case AlertKind.Caution:return "caution";
+            default:return "note";
+        }
+    }
+    // "#rrggbb" of the type's colour on a light or dark page.
+    internal static string Hex(AlertKind kind,bool dark){
+        switch(kind){
+            case AlertKind.Tip:return dark?"#3fb950":"#1a7f37";
+            case AlertKind.Important:return dark?"#ab7df8":"#8250df";
+            case AlertKind.Warning:return dark?"#d29922":"#9a6700";
+            case AlertKind.Caution:return dark?"#f85149":"#d1242f";
+            default:return dark?"#4493f8":"#0969da";
+        }
+    }
+    internal static string Stroke(AlertKind kind){
+        switch(kind){
+            case AlertKind.Tip:   // light bulb
+                return "M5.6,10.8 L5.6,10 A4.7,4.7 0 1 1 10.4,10 L10.4,10.8 Z M6.4,12.8 L9.6,12.8 M7.1,14.7 L8.9,14.7";
+            case AlertKind.Important:   // speech bubble with "!"
+                return "M2.5,1.75 L13.5,1.75 A1.25,1.25 0 0 1 14.75,3 L14.75,9.75 A1.25,1.25 0 0 1 13.5,11 L9,11 L5.5,14.25 L5.5,11 L2.5,11 A1.25,1.25 0 0 1 1.25,9.75 L1.25,3 A1.25,1.25 0 0 1 2.5,1.75 Z M8,4.2 L8,7";
+            case AlertKind.Warning:   // triangle with "!"
+                return "M8,1.9 L14.9,13.9 L1.1,13.9 Z M8,6.2 L8,9.6";
+            case AlertKind.Caution:   // octagon with "!"
+                return "M5.2,1.4 L10.8,1.4 L14.6,5.2 L14.6,10.8 L10.8,14.6 L5.2,14.6 L1.4,10.8 L1.4,5.2 Z M8,4.6 L8,8.6";
+            default:   // info circle
+                return "M1.25,8 A6.75,6.75 0 1 0 14.75,8 A6.75,6.75 0 1 0 1.25,8 Z M8,7.2 L8,11.4";
+        }
+    }
+    internal static string Dots(AlertKind kind){
+        switch(kind){
+            case AlertKind.Tip:return "";
+            case AlertKind.Important:return Dot(8,8.8);
+            case AlertKind.Warning:return Dot(8,11.7);
+            case AlertKind.Caution:return Dot(8,11);
+            default:return Dot(8,4.7);
+        }
+    }
+    static string Dot(double x,double y){
+        const double r=0.95;
+        var c=CultureInfo.InvariantCulture;
+        return "M"+(x-r).ToString(c)+","+y.ToString(c)+" A"+r.ToString(c)+","+r.ToString(c)+" 0 1 0 "+(x+r).ToString(c)+","+y.ToString(c)+" A"+r.ToString(c)+","+r.ToString(c)+" 0 1 0 "+(x-r).ToString(c)+","+y.ToString(c)+" Z";
+    }
+}
+}

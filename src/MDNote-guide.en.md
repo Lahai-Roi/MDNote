@@ -57,6 +57,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | Open files in tabs | | When on, files open in new tabs; when off, they open in new windows. |
 | Word wrap | | Wrap lines to fit the window width. |
 | Markdown Live Preview | | When on, shows only the cursor line and selected lines as source text (with symbols) in the editing screen. When off, uses the basic mode. |
+| Heading level marks | | Choose from Slash bars, # symbols, or Off. Clicking the item toggles it on or off, and turning it back on restores the last used style. Defaults to Slash bars. |
 | Increase text size / Decrease text size | Ctrl++ / Ctrl+- | Also works with Ctrl+mouse wheel. |
 | Reset text size | Ctrl+0 | Return to the default text size. |
 | Line spacing | | Choose 100%, 125%, 150%, 200%, or Custom. |
@@ -102,7 +103,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | Writing Markdown | Open an example document with Markdown syntax and writing tips. |
 | Using MDNote | Open this guide. |
 | Check for updates | Check GitHub for a new version right away. If one is available, you can open the release page. Downloading and installing are done manually. |
-| Check for updates automatically | When on, MDNote checks GitHub once a day at the first launch and shows a one-line notice above the status bar if a new version is out. In the notice, **Details** opens the release info and checking **Skip this version** stops notices for that version. Off by default; you can turn it on during setup. |
+| Check for updates automatically | When on, MDNote checks GitHub each time it starts and shows a one-line notice above the status bar if a new version is out. In the notice, **Details** opens the release info and checking **Skip this version** stops notices for that version. Off by default; you can turn it on during setup. |
 | About MDNote | Check the app version. |
 
 ## 7. Toolbars and Screen
@@ -118,6 +119,8 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 - Turning off **Source** returns to the formatted view.
 - In TXT mode, you edit plain text with line numbers shown.
 - The Outline displays H1–H6 markers, and you can drag its border with the document to resize it.
+- Diagonal `/` bars appear to the left of headings to show their level. The number of bars matches the level (1 for H1, 6 for H6), and their color follows the heading text color. In Live mode, the heading line with the cursor shows the `#` symbols instead of the bars. Under View → **Heading level marks**, you can change the bars to faint `#` symbols or turn them off.
+- Put `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, or `[!CAUTION]` on the first line of a quote to display it as a callout box with a colored bar, icon, and title, just like on GitHub. For details, see **Help → Writing Markdown**.
 
 ## 8. Typing Behavior
 
@@ -128,6 +131,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | Inside a list | Tab / Shift+Tab | Indent or outdent by one level. |
 | Empty list item | Enter | Creates another empty item at the same level. |
 | Start of a list item | Backspace | First press removes the list marker; second press removes the indent. |
+| Opening or closing line of a code block | Backspace / Delete | Removes both the top and bottom ```` ``` ```` lines, leaving the content inside as normal paragraphs. |
 | Non-empty checkbox line | Enter | Creates a new checkbox line below. |
 | Inside bold, italic, strikethrough, or inline code | Enter | In both basic mode and Live mode, pressing Enter continues the formatting across both lines. |
 | Inside a table cell | Home / End | Move to the start or end of that cell. |

@@ -403,6 +403,38 @@ internal static class MarkdownTableCommandsTests {
         };
     }
 
+    // Flag: history:mode-run (mode-switch abuse seed 4 basic step 143). Text-mode toggles are history entries
+    // that leave the text alone. Six in a row on top of one real edit must each pop exactly one entry (so the
+    // probe's undo oracle cannot mistake them for a stall) and the real edit must still undo to the start text.
+    static Func<TextDocument, int, string> ModeRunHistoryCheck() {
+        return delegate(TextDocument document, int caret) {
+            DocumentHistory history = new DocumentHistory();
+            string start = "a|b", edited = "a|2-4b";
+            history.Record(start, edited);
+            bool mode = true;
+            for (int index = 0; index < 6; index++) {
+                history.Record(edited, edited, mode, !mode);
+                mode = !mode;
+            }
+            int depth = history.UndoDepth;
+            string text = edited;
+            int popped = 0;
+            while (history.CanUndo) {
+                int before = history.UndoDepth;
+                text = history.Undo(text);
+                if (history.UndoDepth == before - 1) popped++;
+            }
+            int redone = 0;
+            while (history.CanRedo) {
+                int before = history.RedoDepth;
+                text = history.Redo(text);
+                if (history.RedoDepth == before - 1) redone++;
+            }
+            return "depth=" + depth.ToString(CultureInfo.InvariantCulture) + " popped=" + popped.ToString(CultureInfo.InvariantCulture)
+                + " redone=" + redone.ToString(CultureInfo.InvariantCulture) + " restored=" + (text == edited ? "yes" : "no");
+        };
+    }
+
     // Delete at a cell's end is a wall: three presses must leave the row text and the caret
     // exactly as they were, so no press can step into the neighbour and eat its first character.
     static Func<TextDocument, int, string> CellEndDeleteRepeatCheck() {
@@ -1101,6 +1133,17 @@ internal static class MarkdownTableCommandsTests {
             "plain ‸text", null, EnterOutside());
         Add(cases, "enter in a fenced pipe block returns null",
             "```\n| a |‸\n|---|\n```", null, EnterOutside());
+        // Walk A1 (table-abuse seed 6): a revealed delimiter row past column 0 must not split. The key
+        // is swallowed with the caret kept and no edit, so the body rows stay in the table.
+        Add(cases, "enter-delimiter-nosplit at the delimiter row end keeps the table",
+            "| a | b |\n|---|:-:|‸\n|   |   |",
+            "| a | b |\n|---|:-:|‸\n|   |   |", EnterOutside());
+        Add(cases, "enter-delimiter-nosplit inside the delimiter row keeps the table",
+            "| a | b |\n|--‸-|:-:|\n|   |   |",
+            "| a | b |\n|--‸-|:-:|\n|   |   |", EnterOutside());
+        Add(cases, "enter-delimiter-nosplit CRLF document keeps the table",
+            "| a |\r\n|---|‸\r\n| b |\r\n| c |",
+            "| a |\r\n|---|‸\r\n| b |\r\n| c |", EnterOutside());
 
         // Stage 4, the caret-only cell rules. Enter inside a cell is the basic view's cell
         // paragraph break, saved as "<br>" (MarkdownWriter.cs:63), so the row never splits.
@@ -1391,6 +1434,8 @@ internal static class MarkdownTableCommandsTests {
             "‸| h \\\\|\n| --- |", "cols=1", BasicTableColumnsCheck());
         AddHelper(cases, "basic table keeps an escaped pipe inside a cell",
             "‸| a \\| b | c |\n| --- | --- |", "cols=2", BasicTableColumnsCheck());
+        AddHelper(cases, "history: six consecutive mode entries each undo and redo as one step",
+            "‸a", "depth=7 popped=7 redone=7 restored=yes", ModeRunHistoryCheck());
         return cases;
     }
 }

@@ -308,6 +308,51 @@ internal static class PrintProbe {
         FlowDocument lazyList=Markdown.Parse("> a\n- b",size,"Malgun Gothic",Brushes.Black,false,"");
         Section lazyListSection=lazyList.Blocks.FirstBlock as Section;
         Check("quote","print-lazy-not-list",lazyListSection!=null&&lazyListSection.Blocks.Count==1&&lazyList.Blocks.Count>=2,DescribeQuote(lazyList));
+        // GitHub alerts / Obsidian callouts: the quote Section gets a 4 px bar in the type's colour and a
+        // title paragraph (icon + title) before the body. A quote without the marker stays a 3 px grey bar.
+        string[] alertTypes={"NOTE","TIP","IMPORTANT","WARNING","CAUTION"};
+        string[] alertTitles={"Note","Tip","Important","Warning","Caution"};
+        for(int a=0;a<alertTypes.Length;a++){
+            FlowDocument alertDoc=Markdown.Parse("> [!"+alertTypes[a]+"]\n> 본문",size,"Malgun Gothic",Brushes.Black,false,"");
+            Section alertSection=alertDoc.Blocks.FirstBlock as Section;
+            Paragraph alertHead=alertSection==null?null:alertSection.Blocks.FirstBlock as Paragraph;
+            Paragraph alertBody=alertSection==null?null:alertSection.Blocks.LastBlock as Paragraph;
+            Check("quote","print-alert-"+alertTypes[a].ToLowerInvariant(),alertDoc.Blocks.Count==1&&alertSection!=null&&alertSection.Blocks.Count==2&&alertSection.BorderThickness.Left==4&&
+                AlertColorIs(alertSection.BorderBrush,AlertArt.Hex((AlertKind)(a+1),false))&&RunsText(alertHead)==alertTitles[a]&&AlertHasIcon(alertHead)&&ParagraphText(alertBody)=="본문",DescribeQuote(alertDoc));
+        }
+        FlowDocument alertCustom=Markdown.Parse("> [!tip]- good job\n> 본문",size,"Malgun Gothic",Brushes.Black,false,"");
+        Section alertCustomSection=alertCustom.Blocks.FirstBlock as Section;
+        Paragraph alertCustomHead=alertCustomSection==null?null:alertCustomSection.Blocks.FirstBlock as Paragraph;
+        Check("quote","print-alert-custom-title-fold-sign",alertCustomSection!=null&&alertCustomSection.Blocks.Count==2&&RunsText(alertCustomHead)=="good job"&&AlertColorIs(alertCustomSection.BorderBrush,AlertArt.Hex(AlertKind.Tip,false)),DescribeQuote(alertCustom));
+        Check("quote","print-alert-writer-keeps-marker",alertCustomSection!=null&&MarkdownWriter.Block(alertCustomSection,false)=="> [!tip]- good job\n> 본문",alertCustomSection==null?"":MarkdownWriter.Block(alertCustomSection,false).Replace("\n","\\n"));
+        FlowDocument alertAlias=Markdown.Parse("> [!info]\n> a",size,"Malgun Gothic",Brushes.Black,false,"");
+        Section alertAliasSection=alertAlias.Blocks.FirstBlock as Section;
+        Check("quote","print-alert-alias-info",alertAliasSection!=null&&RunsText(alertAliasSection.Blocks.FirstBlock as Paragraph)=="Info"&&AlertColorIs(alertAliasSection.BorderBrush,AlertArt.Hex(AlertKind.Note,false)),DescribeQuote(alertAlias));
+        FlowDocument alertUnknown=Markdown.Parse("> [!foo]\n> a",size,"Malgun Gothic",Brushes.Black,false,"");
+        Section alertUnknownSection=alertUnknown.Blocks.FirstBlock as Section;
+        Check("quote","print-alert-unknown-is-note",alertUnknownSection!=null&&RunsText(alertUnknownSection.Blocks.FirstBlock as Paragraph)=="Foo"&&AlertColorIs(alertUnknownSection.BorderBrush,AlertArt.Hex(AlertKind.Note,false)),DescribeQuote(alertUnknown));
+        FlowDocument alertDark=Markdown.Parse("> [!WARNING]\n> a",size,"Malgun Gothic",Brushes.White,true,"");
+        Section alertDarkSection=alertDark.Blocks.FirstBlock as Section;
+        Check("quote","print-alert-dark-colour",alertDarkSection!=null&&AlertColorIs(alertDarkSection.BorderBrush,AlertArt.Hex(AlertKind.Warning,true)),DescribeQuote(alertDark));
+        FlowDocument alertLazy=Markdown.Parse("> [!NOTE]\n> 본문\n게으른 줄",size,"Malgun Gothic",Brushes.Black,false,"");
+        Section alertLazySection=alertLazy.Blocks.FirstBlock as Section;
+        Check("quote","print-alert-lazy-line-inside",alertLazy.Blocks.Count==1&&alertLazySection!=null&&alertLazySection.Blocks.Count==3&&alertLazySection.BorderThickness.Left==4,DescribeQuote(alertLazy));
+        FlowDocument alertNested=Markdown.Parse("> 바깥\n> > [!NOTE]\n> > 안쪽",size,"Malgun Gothic",Brushes.Black,false,"");
+        Section alertOuter=alertNested.Blocks.FirstBlock as Section;
+        Section alertInner=alertOuter==null?null:alertOuter.Blocks.LastBlock as Section;
+        Check("quote","print-alert-nested-inner-only",alertOuter!=null&&alertOuter.BorderThickness.Left==3&&alertInner!=null&&alertInner.BorderThickness.Left==4&&alertInner.Blocks.Count==2,DescribeQuote(alertNested));
+        FlowDocument alertPlain=Markdown.Parse("> 보통 인용",size,"Malgun Gothic",Brushes.Black,false,"");
+        Section alertPlainSection=alertPlain.Blocks.FirstBlock as Section;
+        Check("quote","print-alert-plain-quote-unchanged",alertPlainSection!=null&&alertPlainSection.BorderThickness.Left==3&&alertPlainSection.Blocks.Count==1&&ParagraphText(alertPlainSection.Blocks.FirstBlock as Paragraph)=="보통 인용",DescribeQuote(alertPlain));
+        FlowDocument alertLate=Markdown.Parse("> 가\n> [!NOTE]",size,"Malgun Gothic",Brushes.Black,false,"");
+        Section alertLateSection=alertLate.Blocks.FirstBlock as Section;
+        Check("quote","print-alert-marker-not-first-line-stays-text",alertLateSection!=null&&alertLateSection.BorderThickness.Left==3&&alertLateSection.Blocks.Count==2,DescribeQuote(alertLate));
+        FlowDocument alertItem=Markdown.Parse("- > [!NOTE]",size,"Malgun Gothic",Brushes.Black,false,"");
+        string alertItemText=FlowLines(alertItem.Blocks);
+        Check("quote","print-alert-in-list-item",alertItemText=="Note","text=["+alertItemText.Replace("\n","\\n")+"]");
+        string alertTxt=MarkdownPlainText.Convert("> [!NOTE]\n> 본문");
+        string alertPrinted=FlowLines(Markdown.Parse("> [!NOTE]\n> 본문",size,"Malgun Gothic",Brushes.Black,false,"").Blocks);
+        Check("quote","txt-alert-matches-print",alertTxt==alertPrinted&&alertTxt=="Note\n본문","txt=["+alertTxt.Replace("\n","\\n")+"] print=["+alertPrinted.Replace("\n","\\n")+"]");
         // bughunt3 rendering items 10 and 11, the list rule the live preview draws read from
         // the FlowDocument this renderer builds. A blank line between items keeps one list
         // (CommonMark), so three "1." items print 1, 2, 3 from one List: the blank paragraph
@@ -386,6 +431,41 @@ internal static class PrintProbe {
         return count;
     }
     static string ParagraphText(Paragraph paragraph){return paragraph==null?"":new TextRange(paragraph.ContentStart,paragraph.ContentEnd).Text;}
+    // The Run text of a paragraph (nested spans included), without any inline object such as the alert icon.
+    static string RunsText(Paragraph paragraph){return paragraph==null?"":RunsText(paragraph.Inlines);}
+    static string RunsText(InlineCollection inlines){
+        var text=new StringBuilder();
+        foreach(Inline inline in inlines){
+            var run=inline as Run;
+            if(run!=null)text.Append(run.Text);
+            else if(inline is Span)text.Append(RunsText(((Span)inline).Inlines));
+        }
+        return text.ToString();
+    }
+    // The paragraphs of a print document as lines (quotes and list items read through), the plain text the
+    // TXT conversion is held to.
+    static string FlowLines(BlockCollection blocks){
+        var lines=new List<string>();
+        foreach(Block block in blocks){
+            var paragraph=block as Paragraph;
+            if(paragraph!=null){lines.Add(RunsText(paragraph));continue;}
+            var section=block as Section;
+            if(section!=null){lines.Add(FlowLines(section.Blocks));continue;}
+            var list=block as System.Windows.Documents.List;
+            if(list!=null)foreach(ListItem item in list.ListItems)lines.Add(FlowLines(item.Blocks));
+        }
+        return String.Join("\n",lines.ToArray());
+    }
+    static bool AlertColorIs(Brush brush,string hex){
+        var solid=brush as SolidColorBrush;
+        return solid!=null&&solid.Color==(Color)ColorConverter.ConvertFromString(hex);
+    }
+    // The alert title paragraph starts with the icon: a tagged "marker" inline holding a drawing.
+    static bool AlertHasIcon(Paragraph paragraph){
+        if(paragraph==null)return false;
+        var first=paragraph.Inlines.FirstInline as InlineUIContainer;
+        return first!=null&&Object.Equals(first.Tag,"marker")&&first.Child is System.Windows.Controls.Viewbox;
+    }
     static int CountTables(FlowDocument document){int count=0;foreach(Block block in document.Blocks)if(block is Table)count++;return count;}
     static Table FirstTable(FlowDocument document){foreach(Block block in document.Blocks){var table=block as Table;if(table!=null)return table;}return null;}
     static List<DocCase> Cases(){

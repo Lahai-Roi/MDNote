@@ -787,6 +787,42 @@ internal static class SyntaxComboProbe {
                 check(mode + " " + route + " IME commit after closed bold undoes in one step",
                     editor.Document.Text == "**굵게**", "text=[" + editor.Document.Text + "]");
             }
+            // 11-06: the caret stays INSIDE the pair after the commit, so the next Korean syllable of the
+            // same composition (and of the next one) is bold too: `**굵게**` + 한 + 글 is `**굵게한글**`
+            // with the caret before the closer (it used to end after the closer, and 글 came out plain).
+            foreach (string route in new[] { "normal", "redirected", "late" }) {
+                Load(window, "**굵게**");
+                SourceEditor editor = Source(window);
+                editor.Select(editor.Document.GetLineByNumber(1).EndOffset, 0);
+                Pump();
+                int at = editor.CaretOffset;
+                editor.SimulateImeCommit(2);
+                if (route != "normal") {
+                    typeof(SourceEditor).GetField("imeCommitTarget", Members).SetValue(editor, at);
+                    typeof(SourceEditor).GetField("imeCommitTargetDocument", Members).SetValue(editor, editor.Document);
+                    typeof(SourceEditor).GetField("imeCommitTargetTick", Members).SetValue(editor, Environment.TickCount);
+                }
+                bool accepted = true;
+                if (route == "late") Keyboard.ClearFocus();
+                int caretAfterFirst = -1;
+                foreach (string syllable in new[] { "한", "글" }) {
+                    if (route == "late") accepted = editor.AcceptLateImeCommit(syllable) && accepted;
+                    else editor.TextArea.PerformTextInput(syllable);
+                    if (syllable == "한") caretAfterFirst = editor.CaretOffset;
+                }
+                bool released = !editor.ImeBusy;
+                int caretAfter = editor.CaretOffset;
+                editor.ResetCompositionSimulation();
+                Pump();
+                string text2 = editor.Document.Text;
+                int h2 = text2.IndexOf('한'), g2 = text2.IndexOf('글');
+                check(mode + " " + route + " two Korean syllables after closed bold stay inside the bold",
+                    accepted && released && text2 == "**굵게한글**" && h2 > 0 && g2 > 0 && FlagsAt(Session(window), h2) == "B---" && FlagsAt(Session(window), g2) == "B---",
+                    "text=[" + text2 + "], accepted=" + accepted + ", released=" + released);
+                check(mode + " " + route + " the caret stays inside the closing markers after each syllable",
+                    caretAfterFirst == "**굵게한".Length && caretAfter == "**굵게한글".Length,
+                    "caretAfterFirst=" + caretAfterFirst + ", caretAfter=" + caretAfter + ", text=[" + text2 + "]");
+            }
         }
         HideMarkers(window, true);
     }
@@ -1326,65 +1362,98 @@ internal static class SyntaxComboProbe {
         Undo(window);
 
         // The joins at a fence boundary, on a block with nothing between the paragraph and the
-        // fence (the case a blank neighbour line would hide).
+        // fence (the case a blank neighbour line would hide). The key there would join a fence
+        // line to its neighbour or eat a marker character, so it takes both fence lines of the
+        // block and keeps the code line as ordinary text (MarkdownCommands.DeleteFenceBlock).
         string tight = "앞 문단\n```js\nvar a = 1;\n```\n뒷 문단";
+        string unTight = "앞 문단\nvar a = 1;\n뒷 문단";
         Load(window, tight);
         source = Source(window);
         source.Select(source.Document.GetLineByNumber(1).EndOffset, 0);
         Pump();
         Delete(window);
-        check("Delete above a fence cannot merge the paragraph into it", source.Document.Text == tight,
-            "text=[" + Flat(source.Document.Text) + "]");
+        check("Delete above a fence takes both fence lines and keeps the code line",
+            source.Document.Text == unTight, "text=[" + Flat(source.Document.Text) + "]");
+        Load(window, tight);
+        source = Source(window);
         source.Select(source.Document.GetLineByNumber(3).EndOffset, 0);
         Pump();
         Delete(window);
-        check("Delete at the last code line cannot merge the closing fence", source.Document.Text == tight,
-            "text=[" + Flat(source.Document.Text) + "]");
+        check("Delete at the last code line takes both fence lines and keeps the code line",
+            source.Document.Text == unTight, "text=[" + Flat(source.Document.Text) + "]");
+        Load(window, tight);
+        source = Source(window);
         source.Select(source.Document.GetLineByNumber(5).Offset, 0);
         Pump();
         Backspace(window);
-        check("Backspace under a closing fence cannot merge the paragraph into it", source.Document.Text == tight,
-            "text=[" + Flat(source.Document.Text) + "]");
+        check("Backspace under a closing fence takes both fence lines and keeps the code line",
+            source.Document.Text == unTight, "text=[" + Flat(source.Document.Text) + "]");
         MarkdownLivePreview.Session tightSession = Session(window);
-        bool tightBlock = tightSession.Info(source.Document.GetLineByNumber(2)).FenceLine &&
-            tightSession.Info(source.Document.GetLineByNumber(3)).Code &&
-            tightSession.Info(source.Document.GetLineByNumber(4)).FenceLine;
-        check("the fenced block still parses after the boundary keys", tightBlock, "text=[" + Flat(source.Document.Text) + "]");
+        bool tightPlain = tightSession != null &&
+            !tightSession.Info(source.Document.GetLineByNumber(2)).FenceLine &&
+            !tightSession.Info(source.Document.GetLineByNumber(2)).Code;
+        check("no fence line or code block is left after the boundary keys", tightPlain,
+            "text=[" + Flat(source.Document.Text) + "]");
 
         // F5: a fence line is structure. A selection that covers only one fence of a block must
-        // not be deleted, cut, typed over or pasted over: the partner fence would stay behind
-        // (an opening fence without its closer turns the rest of the document into code, a
-        // closing fence without its opener becomes literal text). Only a selection holding both
-        // fences of the block is ordinary text.
+        // not be typed or pasted over: the partner fence would stay behind (an opening fence
+        // without its closer turns the rest of the document into code, a closing fence without
+        // its opener becomes literal text). Delete, Backspace and Cut are the exception: they
+        // take both fence lines of the block and keep the rest of its text (FenceSelectionDelete,
+        // 11-06 user), the same text change the toolbar code-block toggle-off makes. Only a
+        // selection holding both fences of the block is ordinary text.
         string fencedBlock = "앞\n\n```js\nvar a = 1;\n```\n\n뒤";
+        string unFencedBlock = "앞\n\nvar a = 1;\n\n뒤";
         Load(window, fencedBlock);
         source = Source(window);
         DocumentLine fenceOpen = source.Document.GetLineByNumber(3);
         DocumentLine fenceClose = source.Document.GetLineByNumber(5);
         int fenceOpenStart = fenceOpen.Offset, fenceOpenLength = fenceOpen.Length;
+        int fenceCloseStart = fenceClose.Offset, fenceCloseLength = fenceClose.Length;
         source.Select(fenceOpenStart, fenceOpenLength);
         Pump();
         TextInput(window, "X");
         check("typing over a lone hidden opening fence is swallowed",
             source.Document.Text == fencedBlock, "text=[" + Flat(source.Document.Text) + "]");
+        Load(window, fencedBlock);
+        source = Source(window);
         source.Select(fenceOpenStart, fenceOpenLength);
         Pump();
         Delete(window);
-        check("Delete over a lone hidden opening fence is swallowed",
-            source.Document.Text == fencedBlock, "text=[" + Flat(source.Document.Text) + "]");
-        source.Select(fenceClose.Offset, fenceClose.Length);
+        check("Delete over a lone hidden opening fence takes both fences and keeps the code",
+            source.Document.Text == unFencedBlock, "text=[" + Flat(source.Document.Text) + "]");
+        Load(window, fencedBlock);
+        source = Source(window);
+        source.Select(fenceCloseStart, fenceCloseLength);
         Pump();
         Delete(window);
-        check("Delete over a lone hidden closing fence is swallowed",
-            source.Document.Text == fencedBlock, "text=[" + Flat(source.Document.Text) + "]");
+        check("Delete over a lone hidden closing fence takes both fences and keeps the code",
+            source.Document.Text == unFencedBlock, "text=[" + Flat(source.Document.Text) + "]");
+        // Cut removes the same range as Delete and puts the selection on the clipboard first. A
+        // preview handler on Copy stands in for the clipboard here (the probe leaves the user's
+        // clipboard untouched), so the captured text is what the cut would copy: the selection,
+        // never the fence lines the rule takes along.
+        Load(window, fencedBlock);
+        source = Source(window);
         source.Select(fenceOpenStart, fenceOpenLength);
         Pump();
+        string fenceCutCopy = null;
+        ExecutedRoutedEventHandler fenceCopyCapture = delegate(object sender, ExecutedRoutedEventArgs args) {
+            if (args.Command != ApplicationCommands.Copy) return;
+            args.Handled = true;
+            fenceCutCopy = source.SelectedText;
+        };
         ExecutedRoutedEventArgs fenceCutArgs = CommandArguments(ApplicationCommands.Cut);
         MethodInfo fenceCut = typeof(MarkdownLivePreview.Session).GetMethod("HiddenMarkerDelete", Members);
-        fenceCut.Invoke(Session(window), new object[] { source.TextArea, fenceCutArgs });
-        check("Cut over a lone hidden fence is swallowed and copies nothing",
-            fenceCutArgs.Handled && source.Document.Text == fencedBlock && source.SelectionLength == fenceOpenLength,
-            "handled=" + fenceCutArgs.Handled + ", text=[" + Flat(source.Document.Text) + "]");
+        CommandManager.AddPreviewExecutedHandler(source.TextArea, fenceCopyCapture);
+        try { fenceCut.Invoke(Session(window), new object[] { source.TextArea, fenceCutArgs }); }
+        finally { CommandManager.RemovePreviewExecutedHandler(source.TextArea, fenceCopyCapture); }
+        check("Cut over a lone hidden fence takes both fences and copies only the selection",
+            fenceCutArgs.Handled && source.Document.Text == unFencedBlock &&
+            fenceCutCopy == fencedBlock.Substring(fenceOpenStart, fenceOpenLength),
+            "handled=" + fenceCutArgs.Handled + ", copy=[" + Flat(fenceCutCopy) + "], text=[" + Flat(source.Document.Text) + "]");
+        Load(window, fencedBlock);
+        source = Source(window);
         source.Select(fenceOpenStart, fenceOpenLength);
         Pump();
         ExecutedRoutedEventArgs fencePasteArgs = CommandArguments(ApplicationCommands.Paste);
@@ -1397,7 +1466,7 @@ internal static class SyntaxComboProbe {
         check("the app's Ctrl+V over a lone hidden fence is swallowed",
             fenceCtrlV && source.Document.Text == fencedBlock,
             "handled=" + fenceCtrlV + ", text=[" + Flat(source.Document.Text) + "]");
-        source.Select(fenceOpenStart, fenceClose.EndOffset - fenceOpenStart);
+        source.Select(fenceOpenStart, fenceCloseStart + fenceCloseLength - fenceOpenStart);
         Pump();
         string wholeBlockBefore = source.Document.Text;
         TextInput(window, "X");

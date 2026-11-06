@@ -1010,6 +1010,8 @@ internal static class MarkdownTableCommands {
     //                           caret on the new line. The delimiter row is included because
     //                           splitting it (the editor's own newline) would destroy the table;
     //                           the delimiter row is normally hidden, so this is the raw-view case.
+    //   past column 0 of the delimiter row - the key is swallowed (a no-edit result keeps the caret):
+    //                           a split would leave the body rows outside the table.
     // A caret inside a row (between two pipes) is table cell editing (Stage 4) and is left alone,
     // as is a caret in the middle of any row.
     internal static CommandResult EnterOutsideTable(TextDocument document, int selectionStart, int selectionLength) {
@@ -1043,7 +1045,20 @@ internal static class MarkdownTableCommands {
                 }
             }
         }
+        // The delimiter row past column 0 (a revealed row, reached by an arrow key or a click): the
+        // editor's own newline would cut it in two and leave the body rows outside the table, so
+        // the key is swallowed and the caret stays (a no-edit result, no undo step).
+        if (column > 0 && line.LineNumber == firstLine + 1) return KeepCaret(selectionStart);
         return null;
+    }
+
+    // A result with no edit that keeps the caret where it is (the host reselects it instead of
+    // handing the key to the editor).
+    static CommandResult KeepCaret(int caret) {
+        CommandResult result = new CommandResult();
+        result.SelectionStart = caret;
+        result.SelectionLength = 0;
+        return result;
     }
 
     // One newline in front of the table; the caret stays on the new line, above the header row.

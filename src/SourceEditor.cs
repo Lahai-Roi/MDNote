@@ -230,7 +230,10 @@ internal bool AcceptLateImeCommit(string text){
     string adopted=NormalizeCommittedNewlines(text);
     RestoreCommitTypingState();
     MarkImeCommitText();
-    using(Document.RunUpdate()){InsertCommittedText(at,adopted);CaretOffset=caret>=at?caret+adopted.Length:caret;}
+    int landed;
+    using(Document.RunUpdate()){landed=InsertCommittedText(at,adopted);CaretOffset=caret>=at?(caret==at&&landed<at?landed:caret)+adopted.Length:caret;}
+    // Landed inside a closing run: the rest of the composition continues from the inside point too.
+    if(landed<at)imeCommitTarget=landed+adopted.Length;
     imeCommitPending=Math.Max(0,imeCommitPending-text.Length);
     if(imeCommitPending<=0){imeCommitTarget=-1;imeCommitTargetDocument=null;ForgetCommitTypingState();/* The counted result is in the document: a command parked behind it runs now, exactly as the other commit paths release it (the 500 ms timer is only the fallback). */if(!ImeBusy)RunParked();}
     if(ImeTrace.Enabled)ImeTrace.Write("late commit adopted text="+TraceText(text)+" at="+at+" pending="+imeCommitPending+" focus="+MainWindow.FocusName());
@@ -361,7 +364,10 @@ internal Func<int,int> CellClamp;
 // The preview's pending closing-edge space must also follow commits which bypass TextEntering.
 // True means the preview inserted the complete text; false leaves the plain insertion here.
 internal Func<int,string,bool> CommitTextInserter;
-void InsertCommittedText(int at,string text){if(CommitTextInserter==null||!CommitTextInserter(at,text))Document.Insert(at,text);}
+// The preview sets this to the offset the text really landed at when it wrote the commit INSIDE a closing run (11-05 rule); -1 otherwise.
+internal int CommitLandedOffset=-1;
+// Returns where the text landed: `at`, or an earlier offset when the preview put it inside a closing run (the caller keeps the caret there, so the next syllable follows the style).
+int InsertCommittedText(int at,string text){CommitLandedOffset=-1;if(CommitTextInserter==null||!CommitTextInserter(at,text))Document.Insert(at,text);int landed=CommitLandedOffset;CommitLandedOffset=-1;return landed>=0&&landed<at?landed:at;}
 // Set by the live preview: every caret move re-checks that a rendered table row keeps the
 // caret inside a cell (undo/redo restores an offset the row no longer owns).
 internal Action CaretGuardChangedForTable;
@@ -784,9 +790,10 @@ RestoreCommitTypingState();
 MarkImeCommitText();
 e.Handled=true;
 imeCommitInserting=true;
-try{using(Document.RunUpdate()){InsertCommittedText(at,committed);CaretOffset=caret>=at?caret+length:caret;}}
+int landed=at;
+try{using(Document.RunUpdate()){landed=InsertCommittedText(at,committed);CaretOffset=caret>=at?(caret==at&&landed<at?landed:caret)+length:caret;}}
 finally{imeCommitInserting=false;}
-imeCommitTarget=at+length;imeCommitTargetTick=Environment.TickCount;imeCommitTargetDocument=Document;
+imeCommitTarget=(landed<at?landed:at)+length;imeCommitTargetTick=Environment.TickCount;imeCommitTargetDocument=Document;
 // ImeResultEntering already took this text out of the counted result when the input entered
 // (a handled TextEntering raises no TextEntered); only the target bookkeeping is left here.
 if(imeCommitPending<=0){imeCommitTarget=-1;imeCommitTargetDocument=null;ForgetCommitTypingState();CancelCompositionSession();}
@@ -1239,13 +1246,20 @@ internal sealed class ImeInlineGenerator:VisualLineElementGenerator{
     public override VisualLineElement ConstructElement(int offset){
         var context=CurrentContext;string text=Text;byte[] attrs=Attrs;
         var props=context.GlobalTextRunProperties;
-        var formatter=System.Windows.Media.TextFormatting.TextFormatter.Create(System.Windows.Media.TextOptions.GetTextFormattingMode(context.TextView));
+        // First build with the editor's base font so Width/TargetX exist; the element re-formats with the caret text's run properties
+        // (heading, bold ...) once the colorizers have run (ImeInlineElement.CreateTextRun).
+        var line=FormatLine(context.TextView,text,attrs,props);
+        owner.NoteImeDrawn(offset);
+        return new ImeInlineElement(line,offset,this,text,attrs,props);
+    }
+    // Formats the composition string with the given run properties and records its measured Width and TargetX.
+    internal System.Windows.Media.TextFormatting.TextLine FormatLine(System.Windows.DependencyObject view,string text,byte[] attrs,System.Windows.Media.TextFormatting.TextRunProperties props){
+        var formatter=System.Windows.Media.TextFormatting.TextFormatter.Create(System.Windows.Media.TextOptions.GetTextFormattingMode(view));
         var line=formatter.FormatLine(new ImeInlineSource(text,attrs,props),0,32000,new ImeInlineParagraph(props),null);
         Width=line.WidthIncludingTrailingWhitespace;
         int target=-1;if(attrs!=null)for(int i=0;i<attrs.Length&&i<text.Length;i++)if(attrs[i]==1||attrs[i]==3){target=i;break;}
         TargetX=target<=0?0:line.GetDistanceFromCharacterHit(new System.Windows.Media.TextFormatting.CharacterHit(target,0));
-        owner.NoteImeDrawn(offset);
-        return new ImeInlineElement(line,offset);
+        return line;
     }
 }
 // Run properties of the inline composition string: the editor's own font and colour, plus the clause styling.
@@ -1258,6 +1272,8 @@ internal sealed class ImeInlineProps:System.Windows.Media.TextFormatting.TextRun
         decorations.Add(new TextDecoration(TextDecorationLocation.Underline,new Pen(foreground,target?2:1),0,TextDecorationUnit.FontRecommended,TextDecorationUnit.Pixel));
         decorations.Freeze();
         if(target){var c=SystemColors.HighlightColor;var b=new SolidColorBrush(Color.FromArgb(70,c.R,c.G,c.B));b.Freeze();background=b;}
+        // The rest keeps the run's own background (inline code's box) so the syllable does not punch a hole in it.
+        else background=baseProps.BackgroundBrush;
     }
     public override Typeface Typeface{get{return baseProps.Typeface;}}
     public override double FontRenderingEmSize{get{return baseProps.FontRenderingEmSize;}}
@@ -1295,8 +1311,67 @@ internal sealed class ImeInlineParagraph:System.Windows.Media.TextFormatting.Tex
 internal sealed class ImeInlineElement:FormattedTextElement{
     // The document offset the element was built for (the caret offset of that line build).
     internal readonly int BuiltOffset;
-    internal ImeInlineElement(System.Windows.Media.TextFormatting.TextLine line,int builtOffset):base(line,0){BuiltOffset=builtOffset;}
+    readonly ImeInlineGenerator generator;readonly string text;readonly byte[] attrs;
+    // The line handed to the text source and the font values it was formatted with (the editor's base font at first).
+    System.Windows.Media.TextFormatting.TextLine current;Typeface curFace;double curEm;Brush curBrush;
+    internal ImeInlineElement(System.Windows.Media.TextFormatting.TextLine line,int builtOffset,ImeInlineGenerator generator,string text,byte[] attrs,System.Windows.Media.TextFormatting.TextRunProperties baseProps):base(line,0){
+        BuiltOffset=builtOffset;this.generator=generator;this.text=text;this.attrs=attrs;current=line;curFace=baseProps.Typeface;curEm=baseProps.FontRenderingEmSize;curBrush=baseProps.ForegroundBrush;
+    }
+    // Runs after the colorizers: the composition takes the typeface, size and colour the text around the caret has (a heading or bold run
+    // draws the syllable in that weight at once instead of after the commit). The underline and target background stay the clause styling.
+    // A line whose font equals the formatted one is reused, so plain lines cost nothing extra; Width and TargetX follow the final line.
+    public override System.Windows.Media.TextFormatting.TextRun CreateTextRun(int startVisualColumn,ITextRunConstructionContext context){
+        var chosen=ImeInlineStyle.Pick(this,context);
+        if(!ImeInlineStyle.Same(chosen,curFace,curEm,curBrush)){
+            current=generator.FormatLine(context.TextView,text,attrs,chosen);curFace=chosen.Typeface;curEm=chosen.FontRenderingEmSize;curBrush=chosen.ForegroundBrush;
+        }
+        return new ImeInlineRun(this,current,TextRunProperties);
+    }
     // No caret stop inside the provisional text; the caret stays where the document says it is.
     public override int GetNextCaretPosition(int visualColumn,System.Windows.Documents.LogicalDirection direction,CaretPositioningMode mode){return -1;}
+}
+// Which run properties the inline composition string uses. Order: the element's own (when a colorizer changed them), the nearest
+// preceding text element of the visual line, the nearest following one, the editor's base font. Elements that are not plain document
+// text (markers, widgets) and sizes under 4 (hidden delimiter lines) are skipped.
+internal static class ImeInlineStyle{
+    internal static System.Windows.Media.TextFormatting.TextRunProperties Pick(ImeInlineElement self,ITextRunConstructionContext context){
+        var global=context.GlobalTextRunProperties;
+        System.Windows.Media.TextFormatting.TextRunProperties own=self.TextRunProperties;
+        if(own!=null&&Usable(own)&&!Same(own,global.Typeface,global.FontRenderingEmSize,global.ForegroundBrush))return own;
+        var line=context.VisualLine;var elements=line==null?null:line.Elements;
+        if(elements!=null){
+            int index=-1;for(int i=0;i<elements.Count;i++)if(Object.ReferenceEquals(elements[i],self)){index=i;break;}
+            if(index>=0){
+                for(int i=index-1;i>=0;i--){var found=TextProps(elements[i]);if(found!=null)return found;}
+                for(int i=index+1;i<elements.Count;i++){var found=TextProps(elements[i]);if(found!=null)return found;}
+                // No text on the line yet (an empty "# " heading): the hidden prefix carries the line's style too.
+                for(int i=index-1;i>=0;i--){var p=elements[i].TextRunProperties;if(p!=null&&Usable(p))return p;}
+            }
+        }
+        return global;
+    }
+    static System.Windows.Media.TextFormatting.TextRunProperties TextProps(VisualLineElement element){
+        if(!(element is VisualLineText)||element.DocumentLength<=0)return null;
+        System.Windows.Media.TextFormatting.TextRunProperties p=element.TextRunProperties;
+        return p!=null&&Usable(p)?p:null;
+    }
+    static bool Usable(System.Windows.Media.TextFormatting.TextRunProperties p){return p.Typeface!=null&&p.FontRenderingEmSize>=4;}
+    internal static bool Same(System.Windows.Media.TextFormatting.TextRunProperties p,Typeface face,double em,Brush brush){
+        return p.FontRenderingEmSize==em&&Object.ReferenceEquals(p.ForegroundBrush,brush)&&p.Typeface.Equals(face);
+    }
+}
+// The TextRun of ImeInlineElement: the same embedded object as FormattedTextRun, drawing the element's re-formatted line.
+internal sealed class ImeInlineRun:System.Windows.Media.TextFormatting.TextEmbeddedObject{
+    readonly ImeInlineElement element;readonly System.Windows.Media.TextFormatting.TextLine line;readonly System.Windows.Media.TextFormatting.TextRunProperties properties;
+    internal ImeInlineRun(ImeInlineElement element,System.Windows.Media.TextFormatting.TextLine line,System.Windows.Media.TextFormatting.TextRunProperties properties){this.element=element;this.line=line;this.properties=properties;}
+    public override System.Windows.LineBreakCondition BreakBefore{get{return element.BreakBefore;}}
+    public override System.Windows.LineBreakCondition BreakAfter{get{return element.BreakAfter;}}
+    public override bool HasFixedSize{get{return true;}}
+    public override System.Windows.Media.TextFormatting.CharacterBufferReference CharacterBufferReference{get{return new System.Windows.Media.TextFormatting.CharacterBufferReference();}}
+    public override int Length{get{return element.VisualLength;}}
+    public override System.Windows.Media.TextFormatting.TextRunProperties Properties{get{return properties;}}
+    public override System.Windows.Media.TextFormatting.TextEmbeddedObjectMetrics Format(double remainingParagraphWidth){return new System.Windows.Media.TextFormatting.TextEmbeddedObjectMetrics(line.WidthIncludingTrailingWhitespace,line.Height,line.Baseline);}
+    public override Rect ComputeBoundingBox(bool rightToLeft,bool sideways){return new Rect(0,0,line.WidthIncludingTrailingWhitespace,line.Height);}
+    public override void Draw(DrawingContext drawingContext,Point origin,bool rightToLeft,bool sideways){origin.Y-=line.Baseline;line.Draw(drawingContext,origin,System.Windows.Media.TextFormatting.InvertAxes.None);}
 }
 }

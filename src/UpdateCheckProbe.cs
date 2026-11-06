@@ -177,7 +177,7 @@ static class UpdateCheckProbe {
         Check("b null answer",!ok,"");
     }
     static void CaseDailyRule(){
-        Check("c same date: no check",!UpdateChecker.AutoDue(true,"2026-11-05","2026-11-05"),"");
+        Check("c same date: check again (every launch)",UpdateChecker.AutoDue(true,"2026-11-05","2026-11-05"),"");
         Check("c yesterday: check",UpdateChecker.AutoDue(true,"2026-11-04","2026-11-05"),"");
         Check("c never checked: check",UpdateChecker.AutoDue(true,"","2026-11-05"),"");
         Check("c setting off: no check",!UpdateChecker.AutoDue(false,"2026-11-04","2026-11-05")&&!UpdateChecker.AutoDue(false,"","2026-11-05"),"");
@@ -214,9 +214,9 @@ static class UpdateCheckProbe {
     static void CaseSameDay(MainWindow window){
         bool done=AutoRun(window,Today(),true,"",delegate{return Json(Newer());});
         Check("e1 finished",done,"");
-        Check("e1 same date: no request",jsonCalls==0,"calls="+jsonCalls);
-        Check("e1 no strip",!window.UpdateStripVisible,"");
-        Check("e1 date unchanged",MainWindow.updateCheckedDate==Today(),MainWindow.updateCheckedDate);
+        Check("e1 same date: request again",jsonCalls==1,"calls="+jsonCalls);
+        Check("e1 strip shown",window.UpdateStripVisible,"");
+        Check("e1 date stays today",MainWindow.updateCheckedDate==Today(),MainWindow.updateCheckedDate);
     }
     static void CaseStrip(MainWindow window){
         SourceEditor editor=Field<SourceEditor>(window,"source");
@@ -328,9 +328,9 @@ static class UpdateCheckProbe {
         Check("e6 failure finished",done,"");
         Check("e6 failure: attempted, date recorded",jsonCalls==1&&MainWindow.updateCheckedDate==Today(),"calls="+jsonCalls+" date="+MainWindow.updateCheckedDate);
         Check("e6 failure: nothing shown",!window.UpdateStripVisible&&offerCalls==0&&noticeCalls==0,"");
-        // the same day again: no second attempt
+        // the next launch the same day tries again (every launch checks)
         done=AutoRun(window,MainWindow.updateCheckedDate,true,"",delegate{throw new InvalidOperationException("offline");});
-        Check("e6 failed day is not retried",jsonCalls==0,"calls="+jsonCalls);
+        Check("e6 failed day is retried at the next launch",jsonCalls==1,"calls="+jsonCalls);
         AutoRun(window,Yesterday(),true,"",delegate{return "{\"message\":\"rate limit\"}";});
         Check("e6 answer without a tag: silent",!window.UpdateStripVisible&&offerCalls==0&&noticeCalls==0&&MainWindow.updateCheckedDate==Today(),"");
         AutoRun(window,Yesterday(),true,"",delegate{return Json(Cur());});

@@ -1392,7 +1392,8 @@ internal static class FileAbuseProbe {
     // LiteralMarkdown used to pass a backslash through raw, so "\*" reached the markdown as
     // "\&#42;" (the preview hid the backslash and left the entity on screen) and one backslash
     // disappeared on the way back. Every escaped character is now checked over the whole chain:
-    // the markdown source has no raw backslash, Convert gives the original text, and the print /
+    // the markdown source has no backslash that would escape the next character (11-01: a harmless raw
+    // backslash may stay), Convert gives the original text, and the print /
     // RTF parser (Markdown.Parse + ReadableText, the oracle both views follow) draws it.
     static void ConversionBackslashRoundTrip() {
         if (!BudgetLeft()) return;
@@ -1410,7 +1411,16 @@ internal static class FileAbuseProbe {
                 "한글 섞인 \\경로\\파일\r\n";
             string input = CanonicalNewlines(txt);
             string md = (string)InvokeStatic("LiteralMarkdown", input);
-            Check("backslash-md-no-raw-slash", md.IndexOf('\\') < 0, "no raw backslash in the markdown", "markdown=" + Esc(md));
+            // 11-01 user decision (TextMode.cs MinimalLiteral): a line whose plain conversion already reads
+            // back the same stays as typed, so "C:\path\file.txt" and "\n \t \r" keep backslashes that
+            // escape nothing. The old "no raw backslash anywhere" rule is replaced by: no backslash in the
+            // markdown may be followed by an ASCII punctuation character (that pair is a markdown escape and
+            // would eat the character); the round-trip checks below cover that the text still reads back.
+            const string escapable = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+            int eaten = -1;
+            for (int i = 0; i + 1 < md.Length && eaten < 0; i++)
+                if (md[i] == '\\' && escapable.IndexOf(md[i + 1]) >= 0) eaten = i;
+            Check("backslash-md-no-raw-escape", eaten < 0, "no backslash before a markdown punctuation character", "index=" + eaten + " markdown=" + Esc(md));
             string back = MarkdownPlainText.Convert(md);
             Check("backslash-txt-roundtrip", CanonicalNewlines(back) == input, "text=" + Esc(input), "text=" + TextDiff(input, CanonicalNewlines(back)));
             var rendered = Markdown.Parse(md, 16, "Malgun Gothic", System.Windows.Media.Brushes.Black, false, "");

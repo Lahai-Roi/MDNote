@@ -8,7 +8,7 @@ Right below each section of the plan, a **[Writing tip]** quote box explains the
 
 ---
 
-> **[Writing tip]** ![H2](guide-heading.png) Put `#` at the start of a line to make a heading. One `#` is the largest heading (H1), and you can use up to six (H6).
+> **[Writing tip]** ![H2](guide-heading.png) Put `#` at the start of a line to make a heading. One `#` is the largest heading (H1), and you can use up to six (H6). On screen, `/` bars matching the number of `#` symbols appear to the left of the heading to show its level.
 >
 > - You can also place the cursor in a paragraph and pick H1–H6 from the **arrow next to Heading**.
 > - Clicking the button itself applies the last heading level you used, and clicking the same level again returns the line to a normal paragraph.
@@ -234,11 +234,15 @@ Kuromon Market prices can be steep for tourists, so always check the price tag b
 >
 > If it rains, switch to indoor spots and don't overdo it.
 
+> [!WARNING] Passport
+> Make sure it's valid for at least 6 months before departure!
+
 ---
 
 > **[Writing tip]** ![>](guide-quote.png) Put `> ` at the start of a line to make a quote. To split paragraphs inside a quote, insert a line with just `>`.
 >
 > - You can also select paragraphs and click **Quote**. If you select normal paragraphs and quotes together, clicking applies quoting to all of them, and clicking again removes it.
+> - Put `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, or `[!CAUTION]` on the first line of a quote to turn it into a callout box with a colored bar and icon, like "Passport" above. Any text after the marker becomes the title; if left blank, the type name (such as "Warning") is used as the title. This syntax is also used in GitHub and Obsidian.
 
 ---
 

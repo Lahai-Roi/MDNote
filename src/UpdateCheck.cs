@@ -14,9 +14,11 @@ using System.Windows.Threading;
 namespace MDNote {
 /* Probe seam for the new-version dialog: (version, release link) -> true when the release page should be opened. */
 internal delegate bool UpdateOfferDialog(string version,string url);
-/* 2.1.x: the "업데이트 확인" help item. 2.2.0 adds the automatic check: once a day, on the first launch of the day,
-   when the "업데이트 자동 확인" help item is on (default). These two are the only code in the app that touches the
-   network. Nothing is downloaded or installed: a newer version only opens a dialog with the GitHub release link. */
+/* 2.1.x: the "업데이트 확인" help item. 2.2.0 adds the automatic check: once per launch (2.2.0-2.2.1: once a day), when the
+   app is idle after launch, if the "업데이트 자동 확인" help item is on (off unless the user or the installer tick turned it on; see
+   autoUpdateCheck). These two are the only code in the app that touches the network. Nothing is downloaded or
+   installed: the help item answers in a dialog, the automatic check shows a strip above the status bar, and both
+   only lead to the GitHub release page. */
 public partial class MainWindow {
     void CheckForUpdates(){UpdateChecker.Run(this);}
     /* The result arrives from a dispatcher callback after the Help menu has closed. The menu bar can still hold the
@@ -25,8 +27,8 @@ public partial class MainWindow {
        back when the dialog closes. */
     internal void UpdateDialogOpening(){try{FocusActiveSource();}catch(Exception){}}
     internal void UpdateDialogClosed(){try{if(IsLoaded)FocusActiveSource();}catch(Exception){}}
-    /* Preferences shared by every window (Preferences.cs saves them): the automatic check is on unless the user turned
-       it off; updateCheckedDate is the local day (yyyy-MM-dd) of the last automatic attempt; skippedUpdateVersion is
+    /* Preferences shared by every window (Preferences.cs saves them): autoUpdateChoice is the user's own on/off choice
+       for the automatic check (null when never set); updateCheckedDate is the local day (yyyy-MM-dd) of the last automatic attempt; skippedUpdateVersion is
        the version whose announcement the user switched off (only a newer release is announced again). */
     internal static bool? autoUpdateChoice;
     /* Off unless switched on: the user's own choice (Help menu, stored for on and off) wins; with none stored the
@@ -238,8 +240,10 @@ static class UpdateChecker {
         }catch(Exception){return null;}
     }
 
-    /* ---- the daily automatic check ---- */
-    internal static bool AutoDue(bool enabled,string lastDate,string today){return enabled&&!String.Equals(lastDate,today,StringComparison.Ordinal);}
+    /* ---- the automatic check ---- */
+    /* 2.3.0: every launch checks while the setting is on (the once-a-day rule hid a release published later the same
+       day). The date is still recorded, but only as information. */
+    internal static bool AutoDue(bool enabled,string lastDate,string today){return enabled;}
     internal static string Today(){
         Func<DateTime> hook=NowHook;DateTime now=hook!=null?hook():DateTime.Now;
         return now.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture);
@@ -263,7 +267,7 @@ static class UpdateChecker {
         try{
             string today=Today();
             if(!AutoDue(MainWindow.autoUpdateCheck,MainWindow.updateCheckedDate,today)){Completed++;return;}
-            /* The attempt itself is recorded, success or not: a broken network is not retried at every launch of the same day. */
+            /* The attempt itself is recorded, success or not (the date no longer limits the next launch). */
             MainWindow.updateCheckedDate=today;
             try{window.SaveUpdatePreferences();}catch(Exception){}
             Start(window,true);

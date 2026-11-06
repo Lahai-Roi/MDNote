@@ -51,6 +51,9 @@ internal static class MarkdownWriter {
     internal static string Block(Block block,bool preserve){
         var meta=block.Tag as BlockMeta;string kind=meta==null?"":meta.Kind;string result="";
         var p=block as Paragraph;
+        // An alert's title line (QuoteSection): its icon and default title are not source text, so the writer
+        // gives back the marker line it was parsed from ("[!TIP]- title"), which keeps the quote an alert.
+        if(p!=null&&kind.StartsWith("alert:"))return kind.Substring(6);
         if(p!=null){
             if(!kind.StartsWith("code:")&&!kind.StartsWith("list:")){
                 FrameworkContentElement ancestor=p;while(ancestor!=null&&!(ancestor is FlowDocument))ancestor=ancestor.Parent as FrameworkContentElement;

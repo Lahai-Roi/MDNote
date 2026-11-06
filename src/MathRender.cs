@@ -256,7 +256,8 @@ internal sealed class MathRun : TextEmbeddedObject {
         return new Rect(0, 0, slot, visual.Height);
     }
     public override void Draw(DrawingContext drawingContext, Point origin, bool rightToLeft, bool sideways) {
-        if (fallback != null) { drawingContext.DrawText(fallback, origin); return; }
+        // origin is the baseline (Format reported fallback.Baseline); DrawText takes the top-left corner.
+        if (fallback != null) { drawingContext.DrawText(fallback, new Point(origin.X, origin.Y - fallback.Baseline)); return; }
         if (visual.Drawing == null) return;
         double x = origin.X + visual.OffsetX + (display ? Math.Max(0, (slot - visual.Width) / 2) : 0);
         drawingContext.PushTransform(new TranslateTransform(x, origin.Y - visual.Ascent));

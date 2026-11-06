@@ -102,10 +102,18 @@ internal static class LiveLayoutProbeRunner {
         var editor = new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=wrap, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
         editor.TextArea.TextView.LineHeight = double.NaN; editor.Text=Fixture;
         var session = MarkdownLivePreview.Attach(editor, new MarkdownLivePreview.Settings { FontSize=16, Family="Malgun Gothic", LinePercent=150, WordWrap=wrap });
-        Window richWindow = Host(rich, width), liveWindow = Host(editor, width);
+        // The editor's own basic view (no caret-line reveal) of the same fixture: the list checks measure
+        // the live view against it, not against the print-style FlowDocument above.
+        var basicEditor = new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=wrap, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+        basicEditor.TextArea.TextView.LineHeight = double.NaN; basicEditor.Text=Fixture;
+        var basicSession = MarkdownLivePreview.Attach(basicEditor, new MarkdownLivePreview.Settings { FontSize=16, Family="Malgun Gothic", LinePercent=150, WordWrap=wrap, HideMarkers=true });
+        Window richWindow = Host(rich, width), liveWindow = Host(editor, width), basicWindow = Host(basicEditor, width);
         try {
-            richWindow.Show(); liveWindow.Show(); Pump(editor);
+            richWindow.Show(); liveWindow.Show(); basicWindow.Show(); Pump(editor);
+            basicEditor.TextArea.Caret.Line = 1; Pump(basicEditor);
             var refs = new List<ReferenceItem>(); Collect(rich.Document.Blocks, refs);
+            var basicMeasures = new Dictionary<string,ListMeasure>();
+            foreach (ReferenceItem item in refs) basicMeasures[item.Text] = MeasureList(basicEditor, basicSession, item.Text);
             var inks = new List<Ink>(); CollectInk(rich, Transform.Identity, inks);
             double bodyX=((Paragraph)rich.Document.Blocks.FirstBlock).ContentStart.GetInsertionPosition(LogicalDirection.Forward).GetCharacterRect(LogicalDirection.Forward).X;
             foreach (ReferenceItem item in refs) {
@@ -125,7 +133,7 @@ internal static class LiveLayoutProbeRunner {
             for (int active = 0; active < 2; active++) {
                 editor.TextArea.Caret.Line = active == 0 ? 1 : 8; Pump(editor);
                 string label=key + (active == 0 ? " formatted" : " caret1");
-                CheckLists(label, editor, session, refs);
+                CheckLists(label, editor, session, refs, basicMeasures);
                 CheckTables(label, editor, session);
                 if (active == 1) Save(liveWindow, Path.Combine(directory, key + "-caret1.png"));
             }
@@ -140,7 +148,7 @@ internal static class LiveLayoutProbeRunner {
             }
             Check(key + " editable raw cell mapping", mapped, "all source offsets round-trip");
             Save(richWindow, Path.Combine(directory, key + "-basic.png"));
-        } finally { session.Dispose(); richWindow.Close(); liveWindow.Close(); }
+        } finally { session.Dispose(); basicSession.Dispose(); richWindow.Close(); liveWindow.Close(); basicWindow.Close(); }
     }
     static void CheckCacheContract() {
         const string fixture="Cache fixture\n\n| key | value |\n| --- | --- |\n| 1 | repeated cell |\n| 22 | repeated cell |\n\nunrelated body\n\n| other | value |\n| --- | --- |\n| 999 | independent |\n\nend";
@@ -325,7 +333,10 @@ internal static class LiveLayoutProbeRunner {
                 Check("setext "+texts[i]+" size and weight match basic",
                     properties!=null&&Math.Abs(properties.FontRenderingEmSize-run.FontSize)<.01&&properties.Typeface.Weight==run.FontWeight,
                     "live="+(properties==null?0:properties.FontRenderingEmSize)+" basic="+run.FontSize+" weight="+(properties==null?"-":properties.Typeface.Weight.ToString())+"/"+run.FontWeight);
-                Check("setext "+texts[i]+" text x matches basic",Math.Abs(liveX-basicX)<=2,"live="+N(liveX)+" basic="+N(basicX));
+                // The print path draws no heading level marks; the editor starts a heading's text right of its mark (Session.HeadingShift).
+                var lineInfo=session.Info(editor.Document.GetLineByNumber(numbers[i]));
+                double markShift=session.Options.HeadingMarks&&lineInfo.Heading>0 ? session.HeadingShift(lineInfo.Heading) : 0;
+                Check("setext "+texts[i]+" text x matches basic plus the heading mark",Math.Abs(liveX-(basicX+markShift))<=2,"live="+N(liveX)+" basic="+N(basicX)+" mark="+N(markShift));
             }
             var title=session.Info(editor.Document.GetLineByNumber(1));
             var underline=session.Info(editor.Document.GetLineByNumber(2));
@@ -535,47 +546,64 @@ internal static class LiveLayoutProbeRunner {
             if(live!=null)live.SetValue(null,false); File.Delete(file); Application.Current.Shutdown();
         }
     }
-    static void CheckLists(string key, SourceEditor editor, MarkdownLivePreview.Session session, List<ReferenceItem> refs) {
+    // One list item's text x and marker ink as the editor draws it. Embedded list markers are
+    // drawings rather than native glyph runs, so each MarkerElement's actual CreateTextRun result is
+    // inspected and drawn through the public TextRun API.
+    sealed class ListMeasure { internal bool Searched, Found; internal double X; internal Ink Marker; }
+    static ListMeasure MeasureList(SourceEditor editor, MarkdownLivePreview.Session session, string itemText) {
+        var result=new ListMeasure();
+        int number=FindLine(editor, itemText); if (number < 0) return result;
+        result.Searched=true;
+        var source=editor.Document.GetLineByNumber(number); var info=session.Info(source);
+        VisualLine visual=editor.TextArea.TextView.GetVisualLine(number);
+        int start=info.Text.IndexOf(itemText, StringComparison.Ordinal);
+        if (visual == null || start < 0) return result;
+        result.Found=true;
+        result.X=visual.GetVisualPosition(visual.GetVisualColumn(start), VisualYPosition.LineTop).X;
+        var inks=new List<Ink>();
+        foreach (TextLine line in visual.TextLines) foreach (IndexedGlyphRun run in line.GetIndexedGlyphRuns()) AddInk(run.GlyphRun, Transform.Identity, inks);
+        foreach (VisualLineElement element in visual.Elements) {
+            if (element.GetType().Name != "MarkerElement") continue;
+            TextEmbeddedObject obj=element.CreateTextRun(element.VisualColumn, null) as TextEmbeddedObject;
+            if (obj == null) continue;
+            obj.Format(1000); var drawing=new DrawingVisual();
+            using (DrawingContext dc=drawing.RenderOpen()) obj.Draw(dc, new Point(visual.GetVisualPosition(element.VisualColumn, VisualYPosition.LineTop).X, 0), false, false);
+            CollectInk(drawing, Transform.Identity, inks);
+        }
+        foreach (Ink ink in inks) if ((NumberMarker(ink.Text)||DiscMarker(ink.Text)||ink.Text=="◦"||ink.Text=="▪") && ink.Right<=result.X+1) result.Marker=ink;
+        return result;
+    }
+    // 11-01 user decision (MarkdownLivePreview.ListMarkerSlot=32): every marker takes one 32 px slot in
+    // the editor, basic and live alike (they share one engine). The rich FlowDocument built by
+    // Markdown.Parse (print style) keeps an 18 px bullet slot, so its REF numbers are only reported.
+    // The list checks compare the live view (markers revealed on the caret line) with the same build's
+    // basic editor view (Settings.HideMarkers, markers hidden), measured the same way.
+    static void CheckLists(string key, SourceEditor editor, MarkdownLivePreview.Session session, List<ReferenceItem> refs, Dictionary<string,ListMeasure> basic) {
         bool text=true, markers=true, discs=true, numbers=true; double right=-1;
         foreach (ReferenceItem item in refs) {
-            int number=FindLine(editor, item.Text); if (number < 0) continue;
-            var source=editor.Document.GetLineByNumber(number); var info=session.Info(source);
-            VisualLine visual=editor.TextArea.TextView.GetVisualLine(number);
-            int start=info.Text.IndexOf(item.Text, StringComparison.Ordinal);
-            if (visual == null || start < 0) { text=markers=false; continue; }
-            double x=visual.GetVisualPosition(visual.GetVisualColumn(start), VisualYPosition.LineTop).X;
-            double inset=0;
-            text &= Math.Abs(x-item.X-inset)<=2;
-            var inks=new List<Ink>();
-            foreach (TextLine line in visual.TextLines) foreach (IndexedGlyphRun run in line.GetIndexedGlyphRuns()) AddInk(run.GlyphRun, Transform.Identity, inks);
-            // Embedded list markers are drawings rather than native glyph runs. Inspect
-            // their actual CreateTextRun result and draw it through the public TextRun API.
-            foreach (VisualLineElement element in visual.Elements) {
-                if (element.GetType().Name != "MarkerElement") continue;
-                TextEmbeddedObject obj=element.CreateTextRun(element.VisualColumn, null) as TextEmbeddedObject;
-                if (obj == null) continue;
-                obj.Format(1000); var drawing=new DrawingVisual();
-                using (DrawingContext dc=drawing.RenderOpen()) obj.Draw(dc, new Point(visual.GetVisualPosition(element.VisualColumn, VisualYPosition.LineTop).X, 0), false, false);
-                CollectInk(drawing, Transform.Identity, inks);
-            }
-            Ink marker=null;
-            foreach (Ink ink in inks) if ((NumberMarker(ink.Text)||DiscMarker(ink.Text)||ink.Text=="◦"||ink.Text=="▪") && ink.Right<=x+1) marker=ink;
+            ListMeasure live=MeasureList(editor, session, item.Text); if (!live.Searched) continue;
+            ListMeasure reference; basic.TryGetValue(item.Text, out reference);
+            if (!live.Found || reference == null || !reference.Found) { text=markers=false; continue; }
+            double x=live.X; Ink marker=live.Marker; Ink basicMarker=reference.Marker;
+            text &= Math.Abs(x-reference.X)<=2;
             if (item.Text.StartsWith("Bullet", StringComparison.Ordinal)) discs &= marker != null && DiscMarker(marker.Text);
-            if (!item.Text.StartsWith("Task", StringComparison.Ordinal) && item.Marker == null) markers=false;
-            if (item.Marker != null) {
-                markers &= marker != null && Math.Abs(marker.X-item.MarkerX-inset)<=2;
-                if (item.Text.StartsWith("Bullet", StringComparison.Ordinal)) discs &= marker != null && DiscMarker(marker.Text);
+            if (!item.Text.StartsWith("Task", StringComparison.Ordinal) && basicMarker == null) markers=false;
+            if (basicMarker != null) {
+                markers &= marker != null && Math.Abs(marker.X-basicMarker.X)<=2;
                 if (item.Text.StartsWith("Number", StringComparison.Ordinal)) {
+                    // The editor's own numbers: every live number starts at one left x (11-01 user: every
+                    // marker starts at the same left x of its slot, MarkdownLivePreview.MarkerLeadEm).
                     if (marker==null) numbers=false;
-                    else { if (right>=0) numbers &= Math.Abs(right-marker.Right)<=1; right=marker.Right; }
+                    else { if (right>=0) numbers &= Math.Abs(right-marker.X)<=1; right=marker.X; }
                 }
             }
-            report.Append("LIVE ").Append(key).Append(' ').Append(item.Text).Append(" x=").Append(N(x)).Append(" marker=").Append(marker==null ? "missing" : marker.Text+"@"+N(marker.X)+"/"+N(marker.Right)).Append('\n');
+            report.Append("LIVE ").Append(key).Append(' ').Append(item.Text).Append(" x=").Append(N(x)).Append(" marker=").Append(marker==null ? "missing" : marker.Text+"@"+N(marker.X)+"/"+N(marker.Right))
+                .Append(" | basic x=").Append(N(reference.X)).Append(" marker=").Append(basicMarker==null ? "missing" : basicMarker.Text+"@"+N(basicMarker.X)+"/"+N(basicMarker.Right)).Append('\n');
         }
-        Check(key + " list text x vs basic", text, "tolerance 2px; no inset compensation");
-        Check(key + " list marker x vs basic", markers, "tolerance 2px; no inset compensation");
+        Check(key + " list text x vs basic", text, "live vs basic editor view, tolerance 2px");
+        Check(key + " list marker x vs basic", markers, "live vs basic editor view, tolerance 2px");
         Check(key + " same disc at every depth", discs, "three levels");
-        Check(key + " shared number right edge", numbers && right>=0, "1..12 and caret on item 1");
+        Check(key + " shared number left edge", numbers && right>=0, "1..12 and caret on item 1");
     }
     static void CheckTables(string key, SourceEditor editor, MarkdownLivePreview.Session session) {
         bool bounded=true, shared=true, last=true, fits=true; double[] boundaries=null; int checkedRuns=0, rows=0;

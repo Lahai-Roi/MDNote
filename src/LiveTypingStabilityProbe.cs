@@ -496,7 +496,12 @@ internal static class LiveTypingStabilityProbe {
         result[16]=Handlers(editor.TextArea.Caret,"PositionChanged");result[17]=Handlers(editor.TextArea,"SelectionChanged");return result;
     }
     static int Handlers(object owner,string name) {
-        FieldInfo field=owner.GetType().GetField(name,Fields);if (field==null) return -1;
+        // A private event field declared on a base class is invisible to GetField on the derived type:
+        // the editor's TextArea is the SafeAutomationTextArea subclass (SourceEditor.cs) of the vendor
+        // TextArea that declares SelectionChanged, so walk up the BaseType chain.
+        FieldInfo field=null;
+        for (Type type=owner.GetType();type!=null&&field==null;type=type.BaseType) field=type.GetField(name,Fields|BindingFlags.DeclaredOnly);
+        if (field==null) return -1;
         var handlers=field.GetValue(owner) as Delegate;return handlers==null ? 0 : handlers.GetInvocationList().Length;
     }
     static void VerifyCounts(string name,List<int[]> counts,Action<string,bool,string> check) {

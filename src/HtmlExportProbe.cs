@@ -151,6 +151,26 @@ static class HtmlExportProbe {
         // line inside the quote ends it.
         string lazyHtml=Norm(HtmlExporter.Convert("> 인용 하나\n> 인용 둘\n게으른 줄","","",null));
         Has("quote-lazy-continuation",lazyHtml,"<blockquote>\n<p>인용 하나<br>\n인용 둘<br>\n게으른 줄</p>\n</blockquote>");
+        // A plain line indented to an open item's content column continues that item, and the items
+        // deeper than it close (MarkdownPlainText.ContinuationLevel): headings and body lines nest by indent,
+        // and the ordered list after them is its own top-level <ol>.
+        string contHtml=Norm(HtmlExporter.Convert("- 목록 첫째 항목\n- ## 목록 안 2단계 제목\n  목록 안 본문 한 줄.\n  - ### 한 단계 들어간 목록 안 3단계 제목\n    더 들어간 목록 본문.\n    - #### 두 단계 들어간 4단계 제목\n      가장 깊은 목록 본문.\n1. ### 번호 목록 안 3단계 제목\n   번호 목록 본문.","","",null));
+        string[] contTexts={"목록 첫째 항목","목록 안 2단계 제목","목록 안 본문 한 줄.","한 단계 들어간 목록 안 3단계 제목","더 들어간 목록 본문.","두 단계 들어간 4단계 제목","가장 깊은 목록 본문."};
+        int[] contDepths={1,1,1,2,2,3,3};
+        string contDetail="";bool contOk=true;
+        for(int i=0;i<contTexts.Length;i++){
+            int body=contHtml.IndexOf("<article>",StringComparison.Ordinal);
+            int at=contHtml.IndexOf(contTexts[i],Math.Max(0,body),StringComparison.Ordinal);
+            int depth=-1;
+            if(at>=0){string before=contHtml.Substring(0,at);depth=Count(before,"<ul")+Count(before,"<ol")-Count(before,"</ul>")-Count(before,"</ol>");}
+            if(depth!=contDepths[i]){contOk=false;contDetail+=contTexts[i]+" depth="+depth+" want "+contDepths[i]+"; ";}
+        }
+        Check("list-continuation-nesting",contOk,contDetail+contHtml);
+        int orderedAt=contHtml.IndexOf("<ol",StringComparison.Ordinal);
+        string beforeOrdered=orderedAt<0?"":contHtml.Substring(0,orderedAt);
+        int orderedBody=contHtml.IndexOf("번호 목록 본문.",StringComparison.Ordinal);
+        Check("list-continuation-ordered-separate",orderedAt>0&&Count(contHtml,"<ol")==1&&Count(beforeOrdered,"<ul")==Count(beforeOrdered,"</ul>")&&orderedBody>orderedAt&&orderedBody<contHtml.IndexOf("</ol>",StringComparison.Ordinal),contHtml);
+        Check("list-continuation-balance",Count(contHtml,"<ul>")==Count(contHtml,"</ul>")&&Count(contHtml,"<ol")==Count(contHtml,"</ol>")&&Count(contHtml,"<li")==Count(contHtml,"</li>")&&Count(contHtml,"<p>")==Count(contHtml,"</p>"),contHtml);
         Check("quote-lazy-one-blockquote",Count(lazyHtml,"<blockquote>")==1&&Count(lazyHtml,"<p>")==1,"blockquote="+Count(lazyHtml,"<blockquote>")+" p="+Count(lazyHtml,"<p>"));
         Has("quote-lazy-nested",Norm(HtmlExporter.Convert("> > 안쪽\n게으른 줄","","",null)),"<blockquote>\n<blockquote>\n<p>안쪽<br>\n게으른 줄</p>\n</blockquote>\n</blockquote>");
         Has("quote-lazy-ends-at-blank",Norm(HtmlExporter.Convert("> 인용\n\n바깥 문단","","",null)),"<blockquote>\n<p>인용</p>\n</blockquote>\n<p>바깥 문단</p>");
@@ -161,6 +181,86 @@ static class HtmlExportProbe {
         Has("quote-lazy-not-fence",Norm(HtmlExporter.Convert("> a\n```\nx\n```","","",null)),"<blockquote>\n<p>a</p>\n</blockquote>\n<pre><code>x</code></pre>");
         Has("quote-lazy-not-after-heading-in-quote",Norm(HtmlExporter.Convert("> # h\n바깥 문단","","",null)),"</blockquote>\n<p>바깥 문단</p>");
         Has("quote-lazy-not-table",Norm(HtmlExporter.Convert("> a\n| x | y |\n|---|---|\n| 1 | 2 |","","",null)),"<blockquote>\n<p>a</p>\n</blockquote>\n<div class=\"table-wrap\">");
+        // A quote line indented to an open item's content column is a quote inside that item
+        // (MarkdownPlainText.ItemQuoteLine): one <blockquote> in the <li>, not a second quote after the list.
+        // Searched after <article> so the page's own style rules cannot match.
+        string itemQuoteHtml=Norm(HtmlExporter.Convert("- > ### 목록 안 인용 3단계 제목\n  > 목록 안 인용 본문.","","",null));
+        int itemArticle=itemQuoteHtml.IndexOf("<article>",StringComparison.Ordinal);
+        string itemQuoteBody=itemArticle<0?itemQuoteHtml:itemQuoteHtml.Substring(itemArticle);
+        int itemHeading=itemQuoteBody.IndexOf("목록 안 인용 3단계 제목",StringComparison.Ordinal);
+        int itemText=itemQuoteBody.IndexOf("<p>목록 안 인용 본문.</p>",StringComparison.Ordinal);
+        int itemClose=itemQuoteBody.IndexOf("</blockquote></li>",StringComparison.Ordinal);
+        int itemListEnd=itemQuoteBody.IndexOf("</ul>",StringComparison.Ordinal);
+        Check("list-quote-one-blockquote-in-li",Count(itemQuoteBody,"<blockquote>")==1&&Count(itemQuoteBody,"</blockquote>")==1&&Count(itemQuoteBody,"<li>")==1&&itemQuoteBody.IndexOf("<li><blockquote>",StringComparison.Ordinal)>=0&&itemHeading>0&&itemText>itemHeading&&itemClose>itemText&&itemListEnd>itemClose,itemQuoteBody);
+        string orderedQuoteBody=Norm(HtmlExporter.Convert("1. > a\n   > b\n1. c","","",null));
+        orderedQuoteBody=orderedQuoteBody.Substring(Math.Max(0,orderedQuoteBody.IndexOf("<article>",StringComparison.Ordinal)));
+        Check("list-quote-ordered-one-blockquote",Count(orderedQuoteBody,"<blockquote>")==1&&Count(orderedQuoteBody,"<li>")==2&&Count(orderedQuoteBody,"<ol")==1&&orderedQuoteBody.IndexOf("<li><blockquote>\n<p>a<br>\nb</p>\n</blockquote></li>\n<li>c</li>",StringComparison.Ordinal)>=0,orderedQuoteBody);
+        string plainItemQuoteBody=Norm(HtmlExporter.Convert("- a\n  > b","","",null));
+        plainItemQuoteBody=plainItemQuoteBody.Substring(Math.Max(0,plainItemQuoteBody.IndexOf("<article>",StringComparison.Ordinal)));
+        Check("list-quote-after-plain-item",Count(plainItemQuoteBody,"<blockquote>")==1&&plainItemQuoteBody.IndexOf("<li>a<blockquote>\n<p>b</p>\n</blockquote>\n</li>",StringComparison.Ordinal)>=0&&plainItemQuoteBody.IndexOf("<blockquote>",StringComparison.Ordinal)<plainItemQuoteBody.IndexOf("</ul>",StringComparison.Ordinal),plainItemQuoteBody);
+        string outsideQuoteBody=Norm(HtmlExporter.Convert("- a\n> b","","",null));
+        outsideQuoteBody=outsideQuoteBody.Substring(Math.Max(0,outsideQuoteBody.IndexOf("<article>",StringComparison.Ordinal)));
+        Check("list-quote-column-zero-is-own-quote",outsideQuoteBody.IndexOf("<blockquote>",StringComparison.Ordinal)>outsideQuoteBody.IndexOf("</ul>",StringComparison.Ordinal)&&outsideQuoteBody.IndexOf("</ul>",StringComparison.Ordinal)>0,outsideQuoteBody);
+        string blankQuoteBody=Norm(HtmlExporter.Convert("- > a\n\n  > b","","",null));
+        blankQuoteBody=blankQuoteBody.Substring(Math.Max(0,blankQuoteBody.IndexOf("<article>",StringComparison.Ordinal)));
+        Check("list-quote-blank-line-starts-second-quote",Count(blankQuoteBody,"<blockquote>")==2&&Count(blankQuoteBody,"<li>")==1&&Count(blankQuoteBody,"<ul>")==1,blankQuoteBody);
+        Has("list-quote-quote-holding-list-unchanged",Norm(HtmlExporter.Convert("> - ##### 인용 안 목록 5단계 제목\n>   인용 안 목록 본문.","","",null)),"<blockquote>\n<ul>\n<li>");
+        // A setext heading indented to an open item's content column is an <h1>/<h2> inside that item's <li> and the list goes on
+        // (MarkdownPlainText.SetextInItem; the live view keeps the list open on both lines too). Its underline at column 0 ends the list.
+        string setextItemHtml=Norm(HtmlExporter.Convert("1. a\n   b\n   ===\n1. c","","",null));
+        Has("list-setext-heading-in-item",setextItemHtml,"<li>a\n<h1 id=\"b\">b</h1>\n</li>\n<li>c</li>");
+        Check("list-setext-one-ordered-list",Count(setextItemHtml,"<ol")==1&&Count(setextItemHtml,"</ol>")==1,setextItemHtml);
+        Has("list-setext-h2-in-item",Norm(HtmlExporter.Convert("- a\n  b\n  ---\n- c","","",null)),"<li>a\n<h2 id=\"b\">b</h2>\n</li>\n<li>c</li>");
+        string setextOutHtml=Norm(HtmlExporter.Convert("1. a\n   b\n===\n1. c","","",null));
+        Has("list-setext-underline-column-zero-ends-list",setextOutHtml,"</li>\n</ol>\n<h1 id=\"b\">b</h1>");
+        Check("list-setext-underline-column-zero-two-lists",Count(setextOutHtml,"<ol")==2,setextOutHtml);
+        // A GitHub alert as the first quote line inside an item is the alert <div> in the <li>; the same marker on a line joined
+        // to the item's open quote is plain text of that blockquote.
+        string itemAlertHtml=Norm(HtmlExporter.Convert("- > [!NOTE]\n  > 본문\n- c","","",null));
+        Has("list-quote-alert-first-line",itemAlertHtml,"<li><div class=\"markdown-alert markdown-alert-note\">");
+        Check("list-quote-alert-first-line-one-box",Count(itemAlertHtml,"markdown-alert-note\">")==1&&Count(itemAlertHtml,"<blockquote>")==0&&Count(itemAlertHtml,"<li")==2,itemAlertHtml);
+        string contAlertHtml=Norm(HtmlExporter.Convert("- a\n  > [!NOTE]\n  > 본문\n- c","","",null));
+        Has("list-quote-alert-continuation",contAlertHtml,"<li>a<div class=\"markdown-alert markdown-alert-note\">");
+        Check("list-quote-alert-continuation-inside-li",Count(contAlertHtml,"markdown-alert-note\">")==1&&Count(contAlertHtml,"<ul>")==1&&contAlertHtml.IndexOf("</div>\n</li>",StringComparison.Ordinal)>contAlertHtml.IndexOf("markdown-alert-note",StringComparison.Ordinal),contAlertHtml);
+        string joinedAlertHtml=Norm(HtmlExporter.Convert("- > x\n  > [!NOTE]\n  > y","","",null));
+        Check("list-quote-alert-joined-is-text",Count(joinedAlertHtml,"<div class=\"markdown-alert")==0&&Count(joinedAlertHtml,"<blockquote>")==1&&joinedAlertHtml.IndexOf("[!NOTE]",joinedAlertHtml.IndexOf("<article>",StringComparison.Ordinal),StringComparison.Ordinal)>0,joinedAlertHtml);
+        string taskAlertHtml=Norm(HtmlExporter.Convert("- [ ] > [!TIP]\n      > 본문\n- c","","",null));
+        Check("list-quote-alert-task",taskAlertHtml.IndexOf("<li class=\"task\"><input type=\"checkbox\" disabled> <div class=\"markdown-alert markdown-alert-tip\">",StringComparison.Ordinal)>=0&&Count(taskAlertHtml,"markdown-alert-tip\">")==1,taskAlertHtml);
+        string taskQuoteHtml=Norm(HtmlExporter.Convert("- [ ] > a\n      > b\n- [x] c","","",null));
+        Check("list-quote-task-second-line-one-blockquote",Count(taskQuoteHtml,"<blockquote>")==1&&taskQuoteHtml.IndexOf("<li class=\"task\"><input type=\"checkbox\" disabled> <blockquote>\n<p>a<br>\nb</p>\n</blockquote></li>",StringComparison.Ordinal)>=0,taskQuoteHtml);
+        // A backslash that ends a table cell is a literal backslash (the live view draws it); only the last cell of a row with no
+        // closing pipe ends at the source line's end, where a backslash is a hard break that drops.
+        string cellBackslashHtml=Norm(HtmlExporter.Convert("| x | y |\n| --- | --- |\n| C:\\p\\ | 폴더 |","","",null));
+        Has("table-cell-trailing-backslash",cellBackslashHtml,"<td>C:\\p\\</td>","<td>폴더</td>");
+        string openRowBackslashHtml=Norm(HtmlExporter.Convert("| x | y |\n| --- | --- |\n| C:\\p\\ | 폴더\\","","",null));
+        Has("table-cell-trailing-backslash-open-row",openRowBackslashHtml,"<td>C:\\p\\</td>","<td>폴더</td>");
+        // GitHub alerts / Obsidian callouts: a quote whose first line is "[!TYPE]" becomes the alert <div>.
+        string[] alertTypes={"NOTE","TIP","IMPORTANT","WARNING","CAUTION"};
+        string[] alertTitles={"Note","Tip","Important","Warning","Caution"};
+        for(int a=0;a<alertTypes.Length;a++){
+            string alertHtml=Norm(HtmlExporter.Convert("> [!"+alertTypes[a]+"]\n> 본문","","",null));
+            Has("alert-"+alertTypes[a].ToLowerInvariant(),alertHtml,"<div class=\"markdown-alert markdown-alert-"+alertTypes[a].ToLowerInvariant()+"\">\n<p class=\"markdown-alert-title\"><svg viewBox=\"0 0 16 16\"","</svg>"+alertTitles[a]+"</p>\n<p>본문</p>\n</div>");
+            Lacks("alert-"+alertTypes[a].ToLowerInvariant()+"-not-blockquote",alertHtml,"<blockquote>");
+        }
+        Has("alert-lowercase",Norm(HtmlExporter.Convert("> [!tip]\n> a","","",null)),"markdown-alert-tip\">","</svg>Tip</p>");
+        Has("alert-custom-title",Norm(HtmlExporter.Convert("> [!tip] good *job*\n> a","","",null)),"markdown-alert-tip\">","</svg>good <em>job</em></p>\n<p>a</p>");
+        Has("alert-alias-info",Norm(HtmlExporter.Convert("> [!info]\n> a","","",null)),"markdown-alert-note\">","</svg>Info</p>");
+        Has("alert-alias-danger",Norm(HtmlExporter.Convert("> [!danger]\n> a","","",null)),"markdown-alert-caution\">","</svg>Danger</p>");
+        Has("alert-unknown-type",Norm(HtmlExporter.Convert("> [!foo]\n> a","","",null)),"markdown-alert-note\">","</svg>Foo</p>");
+        Has("alert-fold-sign-hidden",Norm(HtmlExporter.Convert("> [!tip]-\n> a","","",null)),"markdown-alert-tip\">","</svg>Tip</p>");
+        Has("alert-fold-plus-title",Norm(HtmlExporter.Convert("> [!warning]+ 주의 사항\n> a","","",null)),"markdown-alert-warning\">","</svg>주의 사항</p>");
+        Lacks("alert-marker-text-hidden",HtmlExporter.Convert("> [!NOTE]\n> a","","",null),"[!NOTE]");
+        Has("alert-lazy-continuation",Norm(HtmlExporter.Convert("> [!NOTE]\n> a\n게으른 줄","","",null)),"</svg>Note</p>\n<p>a<br>\n게으른 줄</p>\n</div>");
+        string nestedAlert=Norm(HtmlExporter.Convert("> 바깥\n> > [!NOTE]\n> > 안쪽","","",null));
+        Has("alert-nested-inner-only",nestedAlert,"<blockquote>\n<p>바깥</p>\n<div class=\"markdown-alert markdown-alert-note\">","<p>안쪽</p>\n</div>\n</blockquote>");
+        Check("alert-nested-one-div",Count(nestedAlert,"<div class=\"markdown-alert")==1&&Count(nestedAlert,"<blockquote>")==1,"div="+Count(nestedAlert,"<div class=\"markdown-alert")+" blockquote="+Count(nestedAlert,"<blockquote>"));
+        Has("alert-in-list-item",Norm(HtmlExporter.Convert("- > [!NOTE]","","",null)),"<li><div class=\"markdown-alert markdown-alert-note\">","</svg>Note</p>\n</div></li>");
+        Has("quote-plain-unchanged",Norm(HtmlExporter.Convert("> 보통 인용","","",null)),"<blockquote>\n<p>보통 인용</p>\n</blockquote>");
+        Lacks("quote-plain-no-alert",Norm(HtmlExporter.Convert("> 보통 인용","","",null)),"<div class=\"markdown-alert");
+        string notFirst=Norm(HtmlExporter.Convert("> 가\n> [!NOTE]","","",null));
+        Has("alert-marker-not-first-line",notFirst,"<blockquote>\n<p>가<br>\n[!NOTE]</p>\n</blockquote>");
+        Lacks("alert-marker-not-first-no-div",notFirst,"<div class=\"markdown-alert");
+        Lacks("alert-marker-glued-text-stays-quote",Norm(HtmlExporter.Convert("> [!NOTE]글자","","",null)),"<div class=\"markdown-alert");
         Has("fenced-code-language",html,"<pre><code class=\"language-python\">print('x &lt; y')</code></pre>");
         Has("fenced-code-tilde",html,"<pre><code>틸데 `코드` &amp; &lt;tag&gt;</code></pre>");
         Has("table",html,"<table>","<thead>","<th style=\"text-align:left\">이름</th>","<th style=\"text-align:right\">값</th>","<th style=\"text-align:center\">가운데</th>","<td style=\"text-align:left\">a</td>","<td style=\"text-align:right\">1</td>","<td style=\"text-align:center\">x</td>");

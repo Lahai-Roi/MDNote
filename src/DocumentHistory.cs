@@ -3,7 +3,20 @@ using System.Collections.Generic;
 using ICSharpCode.AvalonEdit.Document;
 namespace MDNote {
 internal sealed class DocumentHistory {
-    internal sealed class MismatchException:InvalidOperationException {internal MismatchException(string message):base(message){}}
+    internal sealed class MismatchException:InvalidOperationException {internal MismatchException(string message):base(message){MismatchCount++;LastMismatch=message;}}
+    // Diagnostic counters for the mode-switch abuse probe (they change nothing in the product):
+    // how many MismatchExceptions were built, the last message, and how many times the window
+    // answered one with ResetMismatchedHistory (which clears both stacks).
+    internal static int MismatchCount,ResetCount;
+    internal static string LastMismatch;
+    // One line describing the entry on top of the undo (or redo) stack, for probe failure reports.
+    internal string DiagTop(bool redoStack){
+        var stack=redoStack?redo:undo;if(stack.Count==0)return "empty";var edit=stack[stack.Count-1];
+        string kind=edit.Parts!=null?"parts"+edit.Parts.Count:(edit.BeforeMode.HasValue||edit.AfterMode.HasValue?"mode":"delta");
+        return "n="+stack.Count+" "+kind+" at="+edit.At+" rem="+(edit.Removed==null?-1:edit.Removed.Length)+" ins="+(edit.Inserted==null?-1:edit.Inserted.Length)
+            +" bm="+(edit.BeforeMode.HasValue?(edit.BeforeMode.Value?"1":"0"):"-")+" am="+(edit.AfterMode.HasValue?(edit.AfterMode.Value?"1":"0"):"-")
+            +(edit.Source?" src":"")+(edit.Typed?" typed":"")+(edit.Atomic?" atomic":"")+(edit.Backspace?" bksp":"");
+    }
     // Before/AfterSel are the caret or selection the action started and ended with; an undo puts
     // both back. Source marks an entry recorded from the source editor, Typed one that came from
     // continuous text input (a plain character or any IME commit). The whole run is one undo step,
@@ -244,6 +257,9 @@ internal sealed class DocumentHistory {
     }
     internal bool CanUndo {get{return undo.Count>0;}}
     internal bool CanRedo {get{return redo.Count>0;}}
+    // Stack sizes for the probes: a mode-only entry (text mode toggle) leaves the document text alone, so a step is only "stalled" when it also left these unchanged.
+    internal int UndoDepth {get{return undo.Count;}}
+    internal int RedoDepth {get{return redo.Count;}}
     // Reading mode on a Markdown body edits only through the live task boxes, so its undo and redo
     // may replay exactly one of those ticks and nothing else. A tick changes the single character
     // between the brackets of a task box between blank and x, and the '[' and ']' are still that
@@ -509,6 +525,7 @@ public partial class MainWindow {
     bool SourceMatchesSaved(){if(source.Document.TextLength!=saved.Length)return false;var snapshot=source.Document.CreateSnapshot();for(int at=0;at<saved.Length;at+=8192){int count=Math.Min(8192,saved.Length-at);string chunk=snapshot.GetText(at,count);if(String.CompareOrdinal(chunk,0,saved,at,count)!=0)return false;}return true;}
     System.Windows.Threading.DispatcherTimer historyResetNoticeTimer;
     void ResetMismatchedHistory(){
+        DocumentHistory.ResetCount++;
         History.Clear();
         if(historyResetNoticeTimer==null){historyResetNoticeTimer=new System.Windows.Threading.DispatcherTimer {Interval=TimeSpan.FromSeconds(4)};historyResetNoticeTimer.Tick+=delegate{historyResetNoticeTimer.Stop();UpdateTitle();};Closed+=delegate{historyResetNoticeTimer.Stop();};}
         historyResetNoticeTimer.Stop();historyResetNoticeTimer.Start();UpdateTitle();

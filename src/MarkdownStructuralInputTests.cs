@@ -117,11 +117,11 @@ internal static class MarkdownStructuralInputProbe {
             cases++;
             if (RunFenceDeleteChecks(out sequenceDetail)) {
                 passed++;
-                report.Append("PASS sequence Delete at a fence boundary is refused\n");
+                report.Append("PASS sequence Delete at a fence boundary is detected\n");
             } else {
                 failed++;
                 all = false;
-                report.Append("FAIL sequence Delete at a fence boundary is refused");
+                report.Append("FAIL sequence Delete at a fence boundary is detected");
                 if (sequenceDetail != null) report.Append(": ").Append(sequenceDetail);
                 report.Append('\n');
             }
@@ -205,6 +205,14 @@ internal static class MarkdownStructuralInputProbe {
         };
     }
 
+    // The host's Delete / Backspace arm that joins a line into the ordered item above it (LiveMarkdownCommands.SourceDelete,
+    // SourceBackspace): the line break goes and the items after it keep counting. Null leaves the key to the editor's own delete.
+    static Func<TextDocument, int, int, CommandResult> JoinOrderedKey(bool back) {
+        return delegate(TextDocument document, int start, int length) {
+            return MarkdownStructuralInput.JoinOrdered(document, start, back);
+        };
+    }
+
     static Func<TextDocument, int, int, CommandResult> TabKey(bool shift) {
         return delegate(TextDocument document, int start, int length) {
             return MarkdownStructuralInput.Tab(document, start, length, shift);
@@ -214,6 +222,32 @@ internal static class MarkdownStructuralInputProbe {
     static Func<TextDocument, int, int, CommandResult> BackspaceKey() {
         return delegate(TextDocument document, int start, int length) {
             return MarkdownStructuralInput.Backspace(document, start);
+        };
+    }
+
+    // The host's Delete arm (LiveMarkdownCommands.SourceDelete) for a fence boundary: the gate
+    // asks whether the key touches a fence, then the pair of fence lines goes and the block's
+    // text stays. Null leaves the key to the editor's ordinary character delete.
+    static Func<TextDocument, int, int, CommandResult> FenceDeleteKey() {
+        return delegate(TextDocument document, int start, int length) {
+            if (!MarkdownStructuralInput.DeleteAtFenceBoundary(document, start)) return null;
+            return MarkdownCommands.DeleteFenceBlock(document, start);
+        };
+    }
+
+    // `count` one-letter lines, each with its line break: filler that puts a block far down a
+    // long document (the pair read must not stop at a 400-line bound).
+    static string Rows(int count) {
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < count; i++) builder.Append("x\n");
+        return builder.ToString();
+    }
+
+    // The editor's own Delete/Backspace/Cut over a selection (MarkdownLivePreview.
+    // FenceSelectionDelete): the selected text and both fence lines of every block it touches.
+    static Func<TextDocument, int, int, CommandResult> FenceSelectionKey() {
+        return delegate(TextDocument document, int start, int length) {
+            return MarkdownCommands.RemoveSelectionWithFences(document, start, length);
         };
     }
 
@@ -583,9 +617,11 @@ internal static class MarkdownStructuralInputProbe {
         return captured;
     }
 
-    // F2 (Delete): the host asks MarkdownStructuralInput.DeleteAtFenceBoundary before its own
-    // Delete and swallows the key on true. These are the boundary positions the rule must catch
-    // and the ordinary edits it must leave to the editor (bughunt2 insert 10).
+    // F2 (Delete): the host asks MarkdownStructuralInput.DeleteAtFenceBoundary before it answers
+    // a Delete at a fence line; true sends the key to the fence-pair rule (MarkdownCommands.
+    // DeleteFenceBlock) instead of the ordinary character delete. These are the boundary
+    // positions the rule must catch and the ordinary edits it must leave to the editor
+    // (bughunt2 insert 10; the key's own outcome is checked by the fence-pair cases above).
     static bool RunFenceDeleteChecks(out string detail) {
         string[][] cases = new string[][] {
             // text, caret offset, expected ("1" = the key is swallowed)
@@ -599,7 +635,10 @@ internal static class MarkdownStructuralInputProbe {
             new string[] { "text\n```", "2", "0" },               // inside the text, not at the line end
             new string[] { "```\ncode\n```\nnext", "12", "1" },   // end of the closing fence
             new string[] { "```\ncode\n```\nnext", "13", "0" },   // the next line's own text
-            new string[] { "```", "3", "0" }                      // nothing follows the last fence line
+            new string[] { "```", "3", "0" },                     // nothing follows the last fence line
+            new string[] { "```\ncode\n```\n\nnext", "12", "0" }, // a blank line after the closing fence may be joined
+            new string[] { "```\n\ncode\n```", "3", "0" },        // a blank line after the opening fence may be joined
+            new string[] { "\n```\ncode\n```", "0", "0" }         // an empty line before the opening fence is just removed
         };
         for (int i = 0; i < cases.Length; i++) {
             TextDocument document = new TextDocument(cases[i][0]);
@@ -847,6 +886,18 @@ internal static class MarkdownStructuralInputProbe {
         Add(cases, "backspace nine digit ordered marker", "123456789. ‸x", "‸x", BackspaceKey());
         Add(cases, "backspace empty bullet item", "- ‸", "‸", BackspaceKey());
         Add(cases, "backspace empty indented bullet item", "  - ‸", "  ‸", BackspaceKey());
+        // Delete / Backspace that takes the line break after an ordered item: the items below keep counting (FormatAbuseProbe k).
+        Add(cases, "delete joins the next ordered item and renumbers the rest", "1. a‸\n2. b\n3. c\n4. d", "1. a‸2. b\n2. c\n3. d", JoinOrderedKey(false));
+        Add(cases, "backspace at an item start joins it and renumbers the rest", "1. a\n‸2. b\n3. c", "1. a‸2. b\n2. c", JoinOrderedKey(true));
+        Add(cases, "delete joins a blank line and the run below keeps counting", "2. a\n3. b‸\n\n2. c", "2. a\n3. b‸\n4. c", JoinOrderedKey(false));
+        Add(cases, "delete joins a plain line and the run below keeps counting", "1. a‸\n문단\n1. b", "1. a‸문단\n2. b", JoinOrderedKey(false));
+        Add(cases, "delete renumbers the item's own level only", "1. a\n   1. x‸\n   2. y\n   3. z\n2. b", "1. a\n   1. x‸   2. y\n   2. z\n2. b", JoinOrderedKey(false));
+        Add(cases, "delete renumbers quoted ordered items", "> 1. a‸\n> 2. b\n> 3. c", "> 1. a‸> 2. b\n> 2. c", JoinOrderedKey(false));
+        Add(cases, "delete with nothing to renumber is left to the editor", "1. a‸\n2. b", null, JoinOrderedKey(false));
+        Add(cases, "delete mid line is left to the editor", "1. ‸a\n2. b\n3. c", null, JoinOrderedKey(false));
+        Add(cases, "delete after a bullet is left to the editor", "- a‸\n1. b\n2. c", null, JoinOrderedKey(false));
+        Add(cases, "backspace at the first line is left to the editor", "‸1. a\n2. b", null, JoinOrderedKey(true));
+        Add(cases, "delete inside a fence is left to the editor", "~~~\n1. a‸\n2. b\n3. c\n~~~", null, JoinOrderedKey(false));
         Add(cases, "backspace empty task item", "- [ ] ‸", "‸", BackspaceKey());
         Add(cases, "backspace quoted bullet marker", "> - ‸item", "> ‸item", BackspaceKey());
         Add(cases, "backspace bullet with tab separator", "-\t‸item", "‸item", BackspaceKey());
@@ -885,18 +936,91 @@ internal static class MarkdownStructuralInputProbe {
         Add(cases, "backspace in fence quote", "```\n> ‸a\n```", null, BackspaceKey());
         Add(cases, "backspace in fence indent", "```\n  ‸a\n```", null, BackspaceKey());
         Add(cases, "backspace in fence list", "```\n- ‸a\n```", null, BackspaceKey());
-        // F1: a fence line is structure. Backspace at its edges would join lines or shorten the
-        // marker run, and either changes what the block covers - the first code line becomes the
-        // fence's info string, a closing fence merged with the paragraph below lets the block
-        // swallow the rest of the document - so the key writes nothing (bughunt2 insert 10).
-        AddNoEdits(cases, "backspace at the first code line after a fence stays", "```\n‸code\n```",
-            "```\n‸code\n```", BackspaceKey());
-        AddNoEdits(cases, "backspace at a line start right after a closing fence stays",
-            "```\ncode\n```\n‸below", "```\ncode\n```\n‸below", BackspaceKey());
-        AddNoEdits(cases, "backspace at the end of a closing fence stays",
-            "```\ncode\n```‸", "```\ncode\n```‸", BackspaceKey());
-        AddNoEdits(cases, "backspace at the end of an opening fence stays",
-            "```‸\ncode\n```", "```‸\ncode\n```", BackspaceKey());
+        // 11-06 user (forum report: after inserting a code block the closing ``` could not be
+        // deleted). A key that would break a closed fence pair takes the block's two fence lines
+        // and keeps every other line as plain text, the same change the toolbar code button makes.
+        // A fence still being typed (an opening fence with no closer, drawn as source) keeps the
+        // ordinary character delete, and a code line that merely starts with a marker run is text.
+        Add(cases, "backspace at the first code line takes the fence pair", "```\n‸code\n```",
+            "‸code", BackspaceKey());
+        Add(cases, "backspace at a line start right after a closing fence takes the pair",
+            "```\ncode\n```\n‸below", "code\n‸below", BackspaceKey());
+        Add(cases, "backspace at the end of a closing fence takes the pair", "```\ncode\n```‸",
+            "code‸", BackspaceKey());
+        Add(cases, "backspace at the end of an opening fence takes the pair", "```‸\ncode\n```",
+            "‸code", BackspaceKey());
+        Add(cases, "backspace inside the closing fence run takes the pair", "```\ncode\n``‸`",
+            "code‸", BackspaceKey());
+        Add(cases, "backspace in an unclosed code block keeps the ordinary key", "```\n‸code", null, BackspaceKey());
+        Add(cases, "backspace at a code line after a fence-like code line keeps the ordinary key",
+            "```\n```inner\n‸code\n```", null, BackspaceKey());
+        Add(cases, "delete at the end of a code line takes the fence pair", "```\ncode‸\n```",
+            "code‸", FenceDeleteKey());
+        Add(cases, "delete at the end of a closing fence takes the fence pair", "```\ncode\n```‸\nnext",
+            "code\n‸next", FenceDeleteKey());
+        Add(cases, "delete at the end of a line before an opening fence takes the pair", "text‸\n```\ncode\n```",
+            "text‸\ncode", FenceDeleteKey());
+        Add(cases, "delete inside a fence-like code line keeps the ordinary key", "```\n``‸`inner\ncode\n```", null, FenceDeleteKey());
+        // More shapes of the same rule: the empty block, tilde and longer closing runs, CRLF, text
+        // above the opener, the opener's marker run, and blocks far from the top of the document.
+        Add(cases, "backspace at the end of an empty block's closing fence takes the block", "```\n```‸",
+            "‸", BackspaceKey());
+        Add(cases, "backspace at the end of a tilde closing fence takes the pair", "~~~\ncode\n~~~‸",
+            "code‸", BackspaceKey());
+        Add(cases, "backspace at the end of a longer closing fence takes the pair", "```\ncode\n````‸",
+            "code‸", BackspaceKey());
+        Add(cases, "backspace at the end of a closing fence takes the pair CRLF", "```\r\ncode\r\n```‸",
+            "code‸", BackspaceKey());
+        Add(cases, "backspace at an opening fence under text takes the pair", "text\n‸```\ncode\n```",
+            "text\n‸code", BackspaceKey());
+        Add(cases, "backspace at an opening fence under an empty line is left to the editor", "\n‸```\ncode\n```",
+            null, BackspaceKey());
+        Add(cases, "backspace at the end of a closing fence far down the document takes the pair",
+            Rows(450) + "```\ncode\n```‸", Rows(450) + "code‸", BackspaceKey());
+        Add(cases, "backspace at the end of a block longer than the old scan bound takes the pair",
+            "```\n" + Rows(450) + "```‸", Rows(449) + "x‸", BackspaceKey());
+        Add(cases, "delete inside the opening fence run takes the pair", "`‸``\ncode\n```",
+            "‸code", FenceDeleteKey());
+        Add(cases, "delete before the opening fence takes the pair", "‸```\ncode\n```",
+            "‸code", FenceDeleteKey());
+        Add(cases, "delete inside the closing fence run takes the pair", "```\ncode\n`‸``",
+            "code‸", FenceDeleteKey());
+        Add(cases, "delete at the end of an opening fence takes the pair", "```‸\ncode\n```",
+            "‸code", FenceDeleteKey());
+        Add(cases, "delete at the end of an empty block's opening fence takes the block", "```‸\n```",
+            "‸", FenceDeleteKey());
+        Add(cases, "delete at the end of a code line takes the fence pair CRLF", "```\r\ncode‸\r\n```",
+            "code‸", FenceDeleteKey());
+        Add(cases, "delete at the end of a closing fence above a blank line is left to the editor",
+            "```\ncode\n```‸\n\nnext", null, FenceDeleteKey());
+        Add(cases, "delete at the end of an unclosed opening fence is left to the editor", "```‸\ncode",
+            null, FenceDeleteKey());
+        // A selection that touches one fence: the selected text and both fence lines of every
+        // touched block go, the block's other lines stay as plain text. A selection that holds
+        // both fences of a block is ordinary text for the editor (null here), and a fence still
+        // being typed (no closer) is ordinary text too.
+        Add(cases, "selection over the closing fence takes the pair", "```\ncode\n«```»",
+            "code‸", FenceSelectionKey());
+        Add(cases, "selection over the opening fence takes the pair", "«```»\ncode\n```",
+            "‸code", FenceSelectionKey());
+        Add(cases, "selection from code into the closing fence takes the pair", "```\nco«de\n```»",
+            "co‸", FenceSelectionKey());
+        Add(cases, "selection from the opening fence into code takes the pair", "«```\nco»de\n```",
+            "‸de", FenceSelectionKey());
+        Add(cases, "selection over the closing fence takes the pair CRLF", "```\r\ncode\r\n«```»",
+            "code‸", FenceSelectionKey());
+        Add(cases, "selection from one block into the next takes both pairs", "```\na«b\n```\ntext\n```\nc»d\n```",
+            "a‸d", FenceSelectionKey());
+        Add(cases, "selection of a whole block is ordinary text", "a\n«```\ncode\n```»\nb",
+            null, FenceSelectionKey());
+        Add(cases, "selection of the whole document is ordinary text", "«```\ncode\n```»",
+            null, FenceSelectionKey());
+        Add(cases, "selection inside the code text touches no fence", "```\n«cod»e\n```",
+            null, FenceSelectionKey());
+        Add(cases, "selection that ends where the closing fence line starts touches no fence", "```\n«code\n»```",
+            null, FenceSelectionKey());
+        Add(cases, "selection over an unclosed opening fence is ordinary text", "«```»\ncode",
+            null, FenceSelectionKey());
         // A character of the info string is ordinary text, and a blank line may be joined: the
         // fence line keeps its shape either way, so the editor's own key still runs there.
         Add(cases, "backspace inside a fence info string is left to the editor", "```csharp‸", null, BackspaceKey());

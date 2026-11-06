@@ -66,9 +66,9 @@ public static partial class Markdown {
             var quote=Regex.Match(line,@"^[ \t]*>[ \t]?(.*)$");
             if(quote.Success){var body=new StringBuilder(quote.Groups[1].Value);var lazy=new HtmlExporter.LazyQuote();lazy.Line(quote.Groups[1].Value);while(i+1<lines.Length){var next=Regex.Match(lines[i+1],@"^[ \t]*>[ \t]?(.*)$");if(next.Success){i++;body.Append('\n').Append(next.Groups[1].Value);lazy.Line(next.Groups[1].Value);}else if(lazy.Continues(lines,i+1)){i++;body.Append('\n').Append(lines[i].TrimStart(' ','\t'));}else break;}var section=QuoteSection(body.ToString(),size,family,foreground,dark,file,imageLabel);Add(doc,section,lines,start,i,"quote");continue;}
             var list=Regex.Match(line,@"^([ \t]*)(?:([-+*])|(\d+)[.)])[ \t]+(.*)$");
-            if(list.Success){string body=list.Groups[4].Value;string prefix=list.Groups[1].Value+(list.Groups[3].Success?list.Groups[3].Value+". ":"- ");string bullet=list.Groups[3].Success?prefix:"•  ";var check=Regex.Match(body,@"^\[([ xX])\][ \t]*(.*)$");bool task=check.Success;if(check.Success){bullet=check.Groups[1].Value==" "?"☐  ":"☑  ";prefix+="["+(check.Groups[1].Value==" "?" ":"x")+"] ";body=check.Groups[2].Value;}int itemHeadingLevel;string itemHeadingBody;if(MarkdownPlainText.AtxHeading(body,out itemHeadingLevel,out itemHeadingBody)){var itemParagraph=Para(itemHeadingBody,size,dark,file,imageLabel);itemParagraph.FontSize=size*HeadingScale(itemHeadingLevel);itemParagraph.FontWeight=FontWeights.Bold;itemParagraph.LineHeight=Double.NaN;itemParagraph.Margin=new Thickness(0,itemHeadingLevel==1?8:18,0,10);if(task)InsertFirst(itemParagraph,TaskBox(itemParagraph,check.Groups[1].Value!=" "));Add(doc,itemParagraph,lines,start,i,"list:"+prefix);continue;}var itemQuote=Regex.Match(body,@"^>[ \t]?(.*)$");if(itemQuote.Success){var itemSection=QuoteSection(itemQuote.Groups[1].Value,size,family,foreground,dark,file,imageLabel);if(task){var itemFirst=itemSection.Blocks.FirstBlock as Paragraph;if(itemFirst!=null)InsertFirst(itemFirst,TaskBox(itemFirst,check.Groups[1].Value!=" "));}Add(doc,itemSection,lines,start,i,"listquote:"+prefix);continue;}var p=Para(body,size,dark,file,imageLabel);Inline marker;if(check.Success)marker=TaskBox(p,check.Groups[1].Value!=" ");else marker=new Run(bullet){Tag="marker"};InsertFirst(p,marker);p.Margin=new Thickness(12+Math.Min(100,list.Groups[1].Length*5),2,0,4);Add(doc,p,lines,start,i,"list:"+prefix);continue;}
+            if(list.Success){string body=list.Groups[4].Value;string prefix=list.Groups[1].Value+(list.Groups[3].Success?list.Groups[3].Value+". ":"- ");string bullet=list.Groups[3].Success?prefix:"•  ";var check=Regex.Match(body,@"^\[([ xX])\][ \t]*(.*)$");bool task=check.Success;if(check.Success){bullet=check.Groups[1].Value==" "?"☐  ":"☑  ";prefix+="["+(check.Groups[1].Value==" "?" ":"x")+"] ";body=check.Groups[2].Value;}int itemHeadingLevel;string itemHeadingBody;if(MarkdownPlainText.AtxHeading(body,out itemHeadingLevel,out itemHeadingBody)){var itemParagraph=Para(itemHeadingBody,size,dark,file,imageLabel);itemParagraph.FontSize=size*HeadingScale(itemHeadingLevel);itemParagraph.FontWeight=FontWeights.Bold;itemParagraph.LineHeight=Double.NaN;itemParagraph.Margin=new Thickness(0,itemHeadingLevel==1?8:18,0,10);if(task)InsertFirst(itemParagraph,TaskBox(itemParagraph,check.Groups[1].Value!=" "));Add(doc,itemParagraph,lines,start,i,"list:"+prefix);continue;}var itemQuote=Regex.Match(body,@"^>[ \t]?(.*)$");if(itemQuote.Success){var itemSection=QuoteSection(itemQuote.Groups[1].Value,size,family,foreground,dark,file,imageLabel);if(task){var itemFirst=itemSection.Blocks.FirstBlock as Paragraph;if(itemFirst!=null)InsertFirst(itemFirst,TaskBox(itemFirst,check.Groups[1].Value!=" ",QuoteTaskBoxWidth));}Add(doc,itemSection,lines,start,i,"listquote:"+prefix);continue;}var p=Para(body,size,dark,file,imageLabel);Inline marker;if(check.Success)marker=TaskBox(p,check.Groups[1].Value!=" ");else marker=new Run(bullet){Tag="marker"};InsertFirst(p,marker);p.Margin=new Thickness(12+Math.Min(100,list.Groups[1].Length*5),2,0,4);Add(doc,p,lines,start,i,"list:"+prefix);continue;}
             Add(doc,Para(line,size,dark,file,imageLabel),lines,start,i,"");
-        }Stage("nest-start",lines.Length);NestLists(doc);Stage("parse-complete",lines.Length);return doc;
+        }Stage("nest-start",lines.Length);NestLists(doc,new ParseContext {Size=size,Family=family,Foreground=foreground,Dark=dark,File=file,ImageLabel=imageLabel});Stage("parse-complete",lines.Length);return doc;
     }
     // Printing only: a list's marker slot sits in its margin, so list content starts at the item
     // text x and FlowDocument draws the marker left of it (the live projection's own rule).
@@ -117,14 +117,112 @@ public static partial class Markdown {
     // line after the end of the list stays where it is and the block below clears the levels,
     // which keeps an unchanged list's original text for copy and save.
     sealed class ListLevel {internal int Indent;internal int Content;internal System.Windows.Documents.List List;internal ListItem Last;internal bool Ordered,Task;}
-    static void NestLists(FlowDocument document){
+    sealed class ParseContext {internal double Size;internal string Family;internal Brush Foreground;internal bool Dark;internal string File;internal string ImageLabel;}
+    static void NestLists(FlowDocument document,ParseContext context){
         var blocks=new List<Block>();foreach(Block block in document.Blocks)blocks.Add(block);var levels=new List<ListLevel>();var originals=new Dictionary<System.Windows.Documents.List,List<string>>();System.Windows.Documents.List rootList=null;var pending=new List<Block>();
-        foreach(Block block in blocks){var paragraph=block as Paragraph;var section=block as Section;var meta=block.Tag as BlockMeta;string kind=meta==null?"":meta.Kind;bool listParagraph=paragraph!=null&&kind.StartsWith("list:");bool listQuote=section!=null&&kind.StartsWith("listquote:");if(!listParagraph&&!listQuote){if((kind=="blank"||kind.StartsWith("unlisted-indent:"))&&MarkdownPlainText.BlankLine(meta.Original)&&levels.Count>0){/* a U+3000-only line is content for the live view and TXT, so it ends the list there */pending.Add(block);continue;}pending.Clear();levels.Clear();continue;}if(pending.Count>0){if(levels.Count>0&&levels[levels.Count-1].Last!=null)foreach(Block blank in pending){document.Blocks.Remove(blank);levels[levels.Count-1].Last.Blocks.Add(blank);var blankMeta=blank.Tag as BlockMeta;if(blankMeta!=null&&rootList!=null)originals[rootList].Add(blankMeta.Original);}pending.Clear();}string prefix=listParagraph?kind.Substring(5):kind.Substring(10);var marker=Regex.Match(prefix,@"^(\s*)(?:(\d+)\. |- )(\[[ xX]\] )?");if(!marker.Success){levels.Clear();continue;}int indent=marker.Groups[1].Value.Replace("\t","    ").Length;bool ordered=marker.Groups[2].Success,task=marker.Groups[3].Success;int content;if(!MarkdownPlainText.ListContentColumn(meta.Original,out content))content=indent+(ordered?marker.Groups[2].Value.Length+2:2);
+        foreach(Block block in blocks){var paragraph=block as Paragraph;var section=block as Section;var meta=block.Tag as BlockMeta;string kind=meta==null?"":meta.Kind;bool listParagraph=paragraph!=null&&kind.StartsWith("list:");bool listQuote=section!=null&&kind.StartsWith("listquote:");if(!listParagraph&&!listQuote){if((kind=="blank"||kind.StartsWith("unlisted-indent:"))&&MarkdownPlainText.BlankLine(meta.Original)&&levels.Count>0){/* a U+3000-only line is content for the live view and TXT, so it ends the list there */pending.Add(block);continue;}if(paragraph!=null&&kind==""&&meta!=null&&levels.Count>0&&rootList!=null&&ContinueItem(document,paragraph,meta,levels,pending,originals[rootList]))continue;if(paragraph!=null&&kind.StartsWith("h:")&&meta!=null&&levels.Count>0&&rootList!=null&&ContinueSetext(document,paragraph,meta,levels,pending,originals[rootList]))continue;if(section!=null&&kind=="quote"&&meta!=null&&levels.Count>0&&rootList!=null&&ContinueQuote(document,section,meta,levels,pending,originals[rootList],context))continue;pending.Clear();levels.Clear();continue;}if(pending.Count>0){if(levels.Count>0&&levels[levels.Count-1].Last!=null)foreach(Block blank in pending){document.Blocks.Remove(blank);levels[levels.Count-1].Last.Blocks.Add(blank);var blankMeta=blank.Tag as BlockMeta;if(blankMeta!=null&&rootList!=null)originals[rootList].Add(blankMeta.Original);}pending.Clear();}string prefix=listParagraph?kind.Substring(5):kind.Substring(10);var marker=Regex.Match(prefix,@"^(\s*)(?:(\d+)\. |- )(\[[ xX]\] )?");if(!marker.Success){levels.Clear();continue;}int indent=marker.Groups[1].Value.Replace("\t","    ").Length;bool ordered=marker.Groups[2].Success,task=marker.Groups[3].Success;int content;if(!MarkdownPlainText.ListContentColumn(meta.Original,out content))content=indent+(ordered?marker.Groups[2].Value.Length+2:2);
             while(levels.Count>0&&(levels[levels.Count-1].Indent>indent||(levels[levels.Count-1].Indent==indent&&(levels[levels.Count-1].Ordered!=ordered||levels[levels.Count-1].Task!=task))||(levels[levels.Count-1].Indent<indent&&indent<levels[levels.Count-1].Content)))levels.RemoveAt(levels.Count-1);
             ListLevel level=levels.Count==0?null:levels[levels.Count-1];if(level==null||level.Indent<indent){var list=new System.Windows.Documents.List {MarkerStyle=task?TextMarkerStyle.None:ordered?TextMarkerStyle.Decimal:TextMarkerStyle.Disc,Margin=new Thickness(18,2,0,5),Padding=new Thickness(0)};MarkHistoryReferences(list);if(ordered){int first;list.StartIndex=Int32.TryParse(marker.Groups[2].Value,out first)&&first>0&&first<1000000?first:1;}if(level==null){document.Blocks.InsertBefore(block,list);rootList=list;originals[list]=new List<string>();}else if(level.Last!=null)level.Last.Blocks.Add(list);SetListIndent(list);level=new ListLevel {Indent=indent,List=list,Ordered=ordered,Task=task};levels.Add(level);}
             level.Content=content; // each item is its own container for the next marker
             originals[rootList].Add(meta.Original);document.Blocks.Remove(block);string body=meta.Original.Length>=prefix.Length?meta.Original.Substring(prefix.Length):"";string tag=task?(prefix.Contains("[x]")?"task:x":"task: "):null;if(listQuote){section.Margin=new Thickness(0,2,0,4);MarkdownWriter.Track(section,"quote",body);var quoteItem=new ListItem();quoteItem.Blocks.Add(section);if(tag!=null)quoteItem.Tag=tag;level.List.ListItems.Add(quoteItem);level.Last=quoteItem;}else{if(!task&&paragraph.Inlines.FirstInline!=null&&Object.Equals(paragraph.Inlines.FirstInline.Tag,"marker"))paragraph.Inlines.Remove(paragraph.Inlines.FirstInline);paragraph.Margin=new Thickness(0,2,0,4);MarkdownWriter.Track(paragraph,"",body);var item=new ListItem(paragraph);if(tag!=null)item.Tag=tag;level.List.ListItems.Add(item);level.Last=item;}
         }foreach(var original in originals)MarkdownWriter.Track(original.Key,"listblock",String.Join("\n",original.Value));
+    }
+    // A plain paragraph line indented to an open item's content column is that item's continuation
+    // paragraph (CommonMark), so it joins the item and the list stays open. Items deeper than the one
+    // it continues are closed (dropped from levels), and the blank lines held back since the last
+    // item go in first, as they do for a marker. The line keeps its own indentation, so the TXT
+    // conversion, the writer's original text and the live view read the same line.
+    // MarkdownPlainText.Render and MarkdownLivePreview.ContinuationList apply the same rule.
+    static bool ContinueItem(FlowDocument document,Paragraph paragraph,BlockMeta meta,List<ListLevel> levels,List<Block> pending,List<string> original){
+        string line=meta.Original;int column=0;
+        for(int at=0;at<line.Length&&(line[at]==' '||line[at]=='\t');at++)column+=line[at]=='\t'?4:1;
+        int keep=-1;
+        for(int k=levels.Count-1;k>=0&&keep<0;k--)if(column>=levels[k].Content)keep=k;
+        if(keep<0||levels[keep].Last==null)return false;
+        ListItem holder=levels[levels.Count-1].Last;
+        if(holder!=null)foreach(Block blank in pending){document.Blocks.Remove(blank);holder.Blocks.Add(blank);var blankMeta=blank.Tag as BlockMeta;if(blankMeta!=null)original.Add(blankMeta.Original);}
+        pending.Clear();
+        if(levels.Count>keep+1)levels.RemoveRange(keep+1,levels.Count-keep-1);
+        document.Blocks.Remove(paragraph);paragraph.Margin=new Thickness(0,2,0,4);levels[keep].Last.Blocks.Add(paragraph);original.Add(line);
+        return true;
+    }
+    // A quote indented to an open item's content column ("  > text" under "- > text" or "- text") is a quote
+    // inside that item (CommonMark). Right after a quote the item's own line opened it joins that quote, so
+    // both lines are one Section (one bar); after a blank line, a nested list or a paragraph it is a quote of
+    // its own in the item. The item's blank lines held back since its last block go in first, as for a marker.
+    // The quote's own text drops the indentation; the list's original keeps every source line, so a list
+    // that was not edited is written back unchanged. MarkdownLivePreview.QuoteContinuationList and
+    // MarkdownPlainText.ItemQuoteLine apply the same rule.
+    static bool ContinueQuote(FlowDocument document,Section section,BlockMeta meta,List<ListLevel> levels,List<Block> pending,List<string> original,ParseContext context){
+        string source=meta.Original;int lineEnd=source.IndexOf('\n');string first=lineEnd<0?source:source.Substring(0,lineEnd);
+        int keep=-1;
+        for(int k=levels.Count-1;k>=0&&keep<0;k--)if(MarkdownPlainText.ItemQuoteLine(first,levels[k].Content))keep=k;
+        if(keep<0||levels[keep].Last==null)return false;
+        var trimmed=new StringBuilder();bool firstLine=true;
+        foreach(string quoteLine in source.Split('\n')){if(!firstLine)trimmed.Append('\n');firstLine=false;trimmed.Append(quoteLine.TrimStart(' ','\t'));}
+        ListItem target=levels[keep].Last;
+        Section joined=null;
+        if(pending.Count==0&&keep==levels.Count-1)joined=target.Blocks.LastBlock as Section;
+        BlockMeta joinedMeta=null;
+        if(joined!=null)joinedMeta=joined.Tag as BlockMeta;
+        if(joinedMeta==null||joinedMeta.Kind!="quote")joined=null;
+        ListItem holder=levels[levels.Count-1].Last;
+        if(holder!=null)foreach(Block blank in pending){document.Blocks.Remove(blank);holder.Blocks.Add(blank);var blankMeta=blank.Tag as BlockMeta;if(blankMeta!=null)original.Add(blankMeta.Original);}
+        pending.Clear();
+        if(levels.Count>keep+1)levels.RemoveRange(keep+1,levels.Count-keep-1);
+        document.Blocks.Remove(section);
+        if(joined!=null){
+            // A "[!NOTE]" on a line joined to the item's open quote is plain text of that quote (the live view reads it the same way): the
+            // incoming section was parsed as a quote of its own, so an alert there is parsed again without the alert reading.
+            Section incoming=section;
+            var incomingTitle=section.Blocks.FirstBlock as Paragraph;var incomingMeta=incomingTitle==null?null:incomingTitle.Tag as BlockMeta;
+            if(incomingMeta!=null&&incomingMeta.Kind.StartsWith("alert:")&&context!=null)incoming=QuoteSection(QuoteBodyOf(trimmed.ToString()),context.Size,context.Family,context.Foreground,context.Dark,context.File,context.ImageLabel,false);
+            // A task item keeps its box inside the first quote line, so the later lines indent by the box and its gap and their text starts where line 1's text does.
+            string taskTag=target.Tag as string;bool task=taskTag!=null&&taskTag.StartsWith("task:");
+            while(incoming.Blocks.FirstBlock!=null){Block moved=incoming.Blocks.FirstBlock;incoming.Blocks.Remove(moved);if(task)moved.Margin=new Thickness(moved.Margin.Left+QuoteTaskBoxWidth+QuoteTaskBoxGap,moved.Margin.Top,moved.Margin.Right,moved.Margin.Bottom);joined.Blocks.Add(moved);}
+            MarkdownWriter.Track(joined,"quote",joinedMeta.Original+"\n"+trimmed.ToString());
+        }else{
+            section.Margin=new Thickness(0,2,0,4);
+            MarkdownWriter.Track(section,"quote",trimmed.ToString());
+            target.Blocks.Add(section);
+        }
+        original.Add(source);
+        return true;
+    }
+    // The text of a quote after one level of markers: two lines "> a" and "> [!NOTE]" give "a" and "[!NOTE]". A line without a marker (a lazy line) stays as it is.
+    static string QuoteBodyOf(string quoteLines){
+        var result=new StringBuilder();bool first=true;
+        foreach(string line in quoteLines.Split('\n')){
+            if(!first)result.Append('\n');first=false;
+            string text=line.TrimStart(' ','\t');
+            if(text.StartsWith(">")){text=text.Substring(1);if(text.Length>0&&(text[0]==' '||text[0]=='\t'))text=text.Substring(1);}
+            result.Append(text);
+        }
+        return result.ToString();
+    }
+    static int ColumnOf(string line){int column=0;for(int at=0;at<line.Length&&(line[at]==' '||line[at]=='\t');at++)column+=line[at]=='\t'?4:1;return column;}
+    // A setext heading ("b" over "===") whose text line is indented to an open item's content column is a heading inside that item
+    // (CommonMark), and the list stays open: the live view reads the pair the same way (MarkdownLivePreview.ContinuationList keeps the
+    // list open on both lines). The item the heading sits in is the deepest one its text line reaches; the underline line then closes the
+    // items deeper than the deepest one it reaches itself. When the underline reaches none the list ends there, as before.
+    // MarkdownPlainText.Render and HtmlExport.BlockWriter apply the same rule.
+    static bool ContinueSetext(FlowDocument document,Paragraph paragraph,BlockMeta meta,List<ListLevel> levels,List<Block> pending,List<string> original){
+        string[] pair=meta.Original.Split('\n');
+        if(pair.Length!=2||MarkdownPlainText.HorizontalRuleLine(pair[0]))return false;
+        int firstColumn=ColumnOf(pair[0]),underlineColumn=ColumnOf(pair[1]);
+        int keep=-1;
+        for(int k=levels.Count-1;k>=0&&keep<0;k--)if(firstColumn>=levels[k].Content)keep=k;
+        if(keep<0||levels[keep].Last==null)return false;
+        int close=-1;
+        for(int k=keep;k>=0&&close<0;k--)if(underlineColumn>=levels[k].Content)close=k;
+        if(close<0)return false;
+        ListItem target=levels[keep].Last;
+        ListItem holder=levels[levels.Count-1].Last;
+        if(holder!=null)foreach(Block blank in pending){document.Blocks.Remove(blank);holder.Blocks.Add(blank);var blankMeta=blank.Tag as BlockMeta;if(blankMeta!=null)original.Add(blankMeta.Original);}
+        pending.Clear();
+        if(levels.Count>close+1)levels.RemoveRange(close+1,levels.Count-close-1);
+        document.Blocks.Remove(paragraph);target.Blocks.Add(paragraph);original.Add(meta.Original);
+        return true;
     }
     static void Add(FlowDocument doc,Block block,string[] lines,int from,int to,string kind){MarkHistoryReferences(block);doc.Blocks.Add(block);MarkdownWriter.Track(block,kind,String.Join("\n",lines,from,Math.Min(to,lines.Length-1)-from+1));}
     // Keep the global-reference dependency on roots too: responsive parsing moves roots out of
@@ -132,9 +230,44 @@ public static partial class Markdown {
     static readonly DependencyProperty historyGlobalReferencesProperty=DependencyProperty.RegisterAttached("HistoryGlobalReferences",typeof(bool),typeof(Markdown),new PropertyMetadata(false));
     internal static bool HistoryHasGlobalReferences(Block block){return (bool)block.GetValue(historyGlobalReferencesProperty);}
     static void MarkHistoryReferences(FrameworkContentElement element){if(referenceContext!=null&&(referenceContext.Links.Count>0||referenceContext.Notes.Count>0))element.SetValue(historyGlobalReferencesProperty,true);}
-    static Inline TaskBox(Paragraph paragraph,bool done){var box=new CheckBox {IsChecked=done,VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(0,0,6,0),ToolTip=new ToolTip {Content="체크/해제 | 저장 필요",Padding=new Thickness(6,3,6,3),MinHeight=0,Height=Double.NaN}};var marker=new InlineUIContainer(box){Tag="marker",BaselineAlignment=BaselineAlignment.Center};box.ToolTipOpening+=delegate{var owner=Window.GetWindow(box) as MainWindow;if(owner!=null)((ToolTip)box.ToolTip).Content=new TextBlock {Text=owner.TaskTooltip(),FontSize=12,LineHeight=Double.NaN,LineStackingStrategy=LineStackingStrategy.MaxHeight,Margin=new Thickness(0)};};return marker;}
+    // A task item whose text is a quote ("- [ ] > a") keeps its box inside the quote's first paragraph. The box gets this fixed
+    // width so the quote's later lines (ContinueQuote) can indent by exactly box + gap and start their text where line 1's text starts.
+    const double QuoteTaskBoxWidth=16;
+    const double QuoteTaskBoxGap=6;
+    static Inline TaskBox(Paragraph paragraph,bool done){return TaskBox(paragraph,done,0);}
+    static Inline TaskBox(Paragraph paragraph,bool done,double width){var box=new CheckBox {IsChecked=done,VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(0,0,QuoteTaskBoxGap,0),ToolTip=new ToolTip {Content="체크/해제 | 저장 필요",Padding=new Thickness(6,3,6,3),MinHeight=0,Height=Double.NaN}};if(width>0)box.Width=width;var marker=new InlineUIContainer(box){Tag="marker",BaselineAlignment=BaselineAlignment.Center};box.ToolTipOpening+=delegate{var owner=Window.GetWindow(box) as MainWindow;if(owner!=null)((ToolTip)box.ToolTip).Content=new TextBlock {Text=owner.TaskTooltip(),FontSize=12,LineHeight=Double.NaN,LineStackingStrategy=LineStackingStrategy.MaxHeight,Margin=new Thickness(0)};};return marker;}
     static void InsertFirst(Paragraph paragraph,Inline inline){if(paragraph.Inlines.FirstInline==null)paragraph.Inlines.Add(inline);else paragraph.Inlines.InsertBefore(paragraph.Inlines.FirstInline,inline);}
-    static Section QuoteSection(string body,double size,string family,Brush foreground,bool dark,string file,string imageLabel){var child=Parse(body,size,family,foreground,dark,file,imageLabel);var section=new Section {BorderThickness=new Thickness(3,0,0,0),BorderBrush=dark?Brush(152,162,181):Brush(130,140,160),Padding=new Thickness(14,5,8,5),Margin=new Thickness(0,5,0,10),Foreground=dark?Brush(194,200,210):Brush(95,103,116)};while(child.Blocks.FirstBlock!=null){var block=child.Blocks.FirstBlock;child.Blocks.Remove(block);section.Blocks.Add(block);}return section;}
+    // A GitHub alert / Obsidian callout is a quote whose first line is "[!TYPE]" (MarkdownPlainText.AlertMarker):
+    // the section gets a 4 px bar in the type's colour and a title paragraph (icon plus the text after the
+    // marker, else the default English title) in front of the body. A quote without the marker is unchanged.
+    static Section QuoteSection(string body,double size,string family,Brush foreground,bool dark,string file,string imageLabel){return QuoteSection(body,size,family,foreground,dark,file,imageLabel,true);}
+    // alerts false: the first line is plain quote text even when it reads "[!NOTE]" (a line joined to an item's open quote
+    // is not the first line of a quote, so it opens no alert; ContinueQuote).
+    static Section QuoteSection(string body,double size,string family,Brush foreground,bool dark,string file,string imageLabel,bool alerts){
+        int alertEnd=0,alertTitle=0;string alertWord=null;int newline=body.IndexOf('\n');
+        string firstLine=newline<0?body:body.Substring(0,newline);
+        AlertKind alert=alerts?MarkdownPlainText.AlertMarker(firstLine,0,out alertEnd,out alertTitle,out alertWord):AlertKind.None;
+        FlowDocument child=alert==AlertKind.None?Parse(body,size,family,foreground,dark,file,imageLabel):newline<0?null:Parse(body.Substring(newline+1),size,family,foreground,dark,file,imageLabel);
+        var section=new Section {BorderThickness=new Thickness(alert==AlertKind.None?3:4,0,0,0),BorderBrush=alert==AlertKind.None?(dark?Brush(152,162,181):Brush(130,140,160)):AlertBrush(alert,dark),Padding=new Thickness(14,5,8,5),Margin=new Thickness(0,5,0,10),Foreground=dark?Brush(194,200,210):Brush(95,103,116)};
+        if(alert!=AlertKind.None)section.Blocks.Add(AlertTitle(alert,alertWord,alertTitle<firstLine.Length?firstLine.Substring(alertTitle).TrimEnd(' ','\t'):null,firstLine,size,dark,file,imageLabel));
+        while(child!=null&&child.Blocks.FirstBlock!=null){var block=child.Blocks.FirstBlock;child.Blocks.Remove(block);section.Blocks.Add(block);}return section;}
+    static SolidColorBrush AlertBrush(AlertKind kind,bool dark){var brush=new SolidColorBrush((Color)ColorConverter.ConvertFromString(AlertArt.Hex(kind,dark)));brush.Freeze();return brush;}
+    // The alert's title line: the type's icon (a tagged "marker" inline, so rich copy skips it) and the title
+    // in the type's colour, semi-bold. A title typed after the marker keeps its inline markup; the paragraph
+    // is tracked with the marker line as its source, so saving and copying write "[!TYPE] title" back.
+    static Paragraph AlertTitle(AlertKind kind,string word,string own,string source,double size,bool dark,string file,string imageLabel){
+        var title=own!=null?Para(own,size,dark,file,imageLabel):new Paragraph(new Run(MarkdownPlainText.AlertDefaultTitle(kind,word))){Margin=new Thickness(0),LineHeight=Double.NaN};
+        SolidColorBrush color=AlertBrush(kind,dark);
+        title.Foreground=color;title.FontWeight=FontWeights.SemiBold;title.Margin=new Thickness(0,0,0,4);
+        var canvas=new Canvas {Width=16,Height=16};
+        canvas.Children.Add(new System.Windows.Shapes.Path {Data=AlertIcons.Stroke(kind),Stroke=color,StrokeThickness=1.5,StrokeStartLineCap=PenLineCap.Round,StrokeEndLineCap=PenLineCap.Round,StrokeLineJoin=PenLineJoin.Round});
+        Geometry dots=AlertIcons.Dots(kind);
+        if(dots!=null)canvas.Children.Add(new System.Windows.Shapes.Path {Data=dots,Fill=color});
+        var box=new Viewbox {Width=Math.Round(size*.85),Height=Math.Round(size*.85),Child=canvas,Margin=new Thickness(0,0,6,0)};
+        InsertFirst(title,new InlineUIContainer(box) {Tag="marker",BaselineAlignment=BaselineAlignment.Center});
+        MarkdownWriter.Track(title,"alert:"+source,source);
+        return title;
+    }
     static bool IsBlock(string[] lines,int i){return Regex.IsMatch(lines[i],@"^[ \t]{0,3}(#{1,6}[ \t]|>|`{3,}|~{3,}|[-+*][ \t]|\d+[.)][ \t]|([-*_])(?:\s*\2){2,}\s*$)")||(i+1<lines.Length&&(Regex.IsMatch(lines[i+1],@"^[ \t]*(=+|-{2,})[ \t]*$")||MarkdownPlainText.TableStart(lines[i],lines[i+1])));}
     // A table's second line as MarkdownPlainText.TableDelimiter reads it: the same GFM row the live
     // renderer and the TXT converter accept, so "---" under "이름 | 나이" is a setext underline here

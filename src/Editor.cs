@@ -97,7 +97,7 @@ public partial class MainWindow : Window {
         Ui.BalanceDivider(divider,saveArrow,quickFind,top);Ui.BalanceDivider(toggleDivider,quickReplace,editButton,top);Ui.BalanceDivider(menuDivider,quickDark,(FrameworkElement)menu.Items[0],top);Ui.NormalizeBarIcons(commands);BuildRibbon();BuildTabs(view);BuildRecent(file);BuildOpenEncodingMenu(file);BuildOutline(top);if(outlineButton!=null){outlineButton.Content=null;outlineButton.Content=Ui.GridIcon("menu");Ui.TopSquare(outlineButton);outlineButton.Margin=new Thickness(1,0,1,0);}
         var statusRow=new DockPanel {LastChildFill=true};textBadge=new Border {Child=new TextBlock {Text="TXT",FontSize=10.5,FontWeight=FontWeights.Bold,VerticalAlignment=VerticalAlignment.Center},Padding=new Thickness(6,0,6,0),CornerRadius=new CornerRadius(3),Margin=new Thickness(0,0,10,0),Visibility=Visibility.Collapsed};textBadge.SetResourceReference(Border.BackgroundProperty,"Accent");((TextBlock)textBadge.Child).SetResourceReference(TextBlock.ForegroundProperty,"Paper");DockPanel.SetDock(textBadge,Dock.Left);statusRow.Children.Add(textBadge);statusRow.Children.Add(status);var bar=statusBar=new Border {Child=statusRow,Padding=new Thickness(14,4,14,4),BorderThickness=new Thickness(0,1,0,0)};bar.SetResourceReference(Border.BorderBrushProperty,"Line");DockPanel.SetDock(bar,Dock.Bottom);root.Children.Add(bar);
         BuildSearchBar();BuildTableTools();CompactTableToolbar();
-        area.SetResourceReference(Grid.BackgroundProperty,"Canvas");root.Children.Add(new AdornerDecorator {Child=area});
+        area.SetResourceReference(Grid.BackgroundProperty,"Canvas");root.Children.Add(new AdornerDecorator {Child=area,UseLayoutRounding=true,SnapsToDevicePixels=true});
         SetupSurfaces();surfacesReady=true;SetupInteractionLayout();SetupRecovery(file);SetupAutoUpdateCheck();
         CommandManager.AddPreviewExecutedHandler(this,delegate(object sender,ExecutedRoutedEventArgs args){if(source.IsKeyboardFocusWithin&&(args.Command==ApplicationCommands.Undo||args.Command==ApplicationCommands.Redo)){RestoreEditorHistory(args.Command==ApplicationCommands.Redo);args.Handled=true;}else if(source!=null&&(Object.ReferenceEquals(args.Source,source.TextArea)||source.IsKeyboardFocusWithin)&&(args.Command==EditingCommands.MoveDownByPage||args.Command==EditingCommands.MoveUpByPage)){/* the page handler reveals the caret from the height tree's estimates; verify once after the frame's layout (QueueCaretRowVisible). args.Source is the command's target, so a probe or a menu that executes it without keyboard focus is covered too. */QueueCaretRowVisible();}});CommandManager.AddPreviewCanExecuteHandler(this,delegate(object sender,CanExecuteRoutedEventArgs args){if(source.IsKeyboardFocusWithin&&(args.Command==ApplicationCommands.Undo||args.Command==ApplicationCommands.Redo)){args.CanExecute=editing&&(args.Command==ApplicationCommands.Undo?History.CanUndo:History.CanRedo);args.Handled=true;}});PreviewMouseDown+=PreviewCommitComposition;PreviewKeyDown+=Keys;PreviewKeyDown+=MenuKeyCommitComposition;PreviewMouseWheel+=delegate(object s,MouseWheelEventArgs e){if((Keyboard.Modifiers&ModifierKeys.Control)!=0){Zoom(e.Delta>0?1:-1);e.Handled=true;}};
         SetupCompositionDeactivation();StateChanged+=delegate{if(WindowState!=WindowState.Minimized)lastRestorableState=WindowState;else CommitCompositionBeforeDeactivation();};Deactivated+=delegate{CommitCompositionBeforeDeactivation();};SizeChanged+=delegate{ApplyPageInsets();};Closing+=OnWindowClosing;SetupSaveDialogActivation();SetupMinimizedClosePriority();AllowDrop=true;
@@ -133,10 +133,10 @@ public partial class MainWindow : Window {
     internal const double EditorScrollInset=4;
     void SetupSurfaces(){
         // One editing surface: the AvalonEdit source, with the live preview drawn over it.
-        TextOptions.SetTextFormattingMode(source,TextFormattingMode.Display);TextOptions.SetTextRenderingMode(source,TextRenderingMode.Auto);RenderOptions.SetClearTypeHint(source,ClearTypeHint.Enabled);
+        /* Pin every text-rendering switch the editor could change on its own: Display formatting, ClearType (not Auto) and Fixed hinting (Auto lets WPF drop to Animated hinting, a different glyph weight, whenever it sees motion above the text), on a pixel-aligned host (UseLayoutRounding) so Display-mode text never sits on a fractional origin. */TextOptions.SetTextFormattingMode(source,TextFormattingMode.Display);TextOptions.SetTextRenderingMode(source,TextRenderingMode.ClearType);TextOptions.SetTextHintingMode(source,TextHintingMode.Fixed);RenderOptions.SetClearTypeHint(source,ClearTypeHint.Enabled);area.UseLayoutRounding=true;area.SnapsToDevicePixels=true;
         source.AcceptsReturn=true;source.AcceptsTab=true;source.FontFamily=new FontFamily("Consolas, Malgun Gothic");source.FontSize=15;source.BorderThickness=new Thickness(0,EditorScrollInset,0,EditorScrollInset);source.Padding=new Thickness(8,0,16,0);source.Loaded+=delegate(object sender,RoutedEventArgs args){ApplySourceInset((SourceEditor)sender);};source.TextArea.PreviewKeyDown+=SourceStructuralKeys;DataObject.AddCopyingHandler(source.TextArea,SourceCopying);DataObject.AddSettingDataHandler(source.TextArea,SourceSettingData);source.TextArea.PreviewDrop+=SourcePreviewDrop;source.TextArea.TextEntering+=SourceTextEntering;source.TextArea.TextEntering+=SourceNewlineEntering;source.AddHandler(ScrollViewer.ScrollChangedEvent,new ScrollChangedEventHandler(delegate(object sender,ScrollChangedEventArgs args){/* The inset margin is part of TextView's viewport, so the ScrollViewer clamps the offset and raises this event for its own clamp (VerticalChange == -ViewportHeightChange); recomputing the inset there ping-pongs forever. A real resize near the document end can carry that same signature, so the echo still skips the inset here but posts one re-check after the frame's layout (QueueSourceInsetRecheck); FollowDocumentEnd stays skipped for every echo. */var editor=(SourceEditor)sender;/* The inset is measured from TextView's own extent and viewport, and those only mean something once this frame's measure and arrange are valid; read earlier (during a layout, a document swap or a mode switch) they describe the previous frame, so the margin below is computed from stale numbers. That case gets the same single re-check the echo below gets (QueueSourceInsetRecheck), posted to run after the frame's layout. */if(!SourceInsetGeometryReady(editor)){insetRecheckSpent=false;QueueSourceInsetRecheck(editor);return;}if(args.VerticalChange!=0&&Math.Abs(args.VerticalChange+args.ViewportHeightChange)<=0.5&&Math.Abs(args.ViewportHeightChange)<=24.5){QueueSourceInsetRecheck(editor);return;}insetRecheckSpent=false;ApplySourceInset(editor);FollowDocumentEnd(editor,args);}));source.VerticalScrollBarVisibility=ScrollBarVisibility.Auto;
         area.Children.Add(source);/* a surface that comes back from Collapsed re-applies the current wrap setting (Editor.cs:SurfaceShown) */source.IsVisibleChanged+=delegate(object shownSender,System.Windows.DependencyPropertyChangedEventArgs shownArgs){if(shownArgs.NewValue is bool&&(bool)shownArgs.NewValue&&Object.ReferenceEquals(shownSender,source))SurfaceShown();};source.PreviewMouseWheel+=FastScroll;
-        var sourceSurface=source;source.ContentDelta+=delegate(object sender,ICSharpCode.AvalonEdit.Document.DocumentChangeEventArgs change){/* a line break moves the caret's line through the height tree; verify the caret row once after the layout. Commands apply their edits with loading=true, so this check stays outside that guard (History below does not). */if(LineStructureChanged(change,sourceSurface.Document.TextLength))QueueCaretRowVisible();if(!loading&&CodeMode&&Object.ReferenceEquals(sourceSurface,source)){History.RecordDelta(change.Offset,change.RemovedText.Text,change.InsertedText.Text);sourceSnapshotDirty=true;if(!sourceOutlineDirty&&!PlainText)sourceOutlineDirty=OutlineMayChange(source.Document,change);}};source.TextChanged+=delegate{if(!loading&&CodeMode&&Object.ReferenceEquals(sourceSurface,source)){UpdateTitle();if(sourceOutlineDirty)RefreshOutline();}};source.SelectionChanged+=delegate{if(!loading){RefreshSearch();RefreshCaretStatus();if(LiveFormat)UpdateTools();}};EventHandler sourceLayout=delegate{if(Object.ReferenceEquals(sourceSurface,source)){/* a new tab or document must recompute the insets even when its gutter bucket matches the old one */if(!Object.ReferenceEquals(insetSurface,source)||!Object.ReferenceEquals(insetDocument,source.Document)){insetSurface=source;insetDocument=source.Document;insetBucket=-1;insetRecheckPending=false;insetRecheckSpent=false;}textGutter.InvalidateIfChanged();/* insets depend only on the gutter width class and visibility; recompute on change, not every layout pass */double dpiKey=VisualTreeHelper.GetDpi(this).PixelsPerDip;int bucket=(source.Document.LineCount>99999?2:0)+(textGutter.Visibility==Visibility.Visible?1:0);if(bucket!=insetBucket||dpiKey!=insetDpi){insetBucket=bucket;insetDpi=dpiKey;ApplyPageInsets();}}};source.LayoutUpdated+=sourceLayout;if(activeDocument!=null)activeDocument.SourceLayout=sourceLayout;source.DocumentChanged+=delegate{if(Object.ReferenceEquals(sourceSurface,source)){pendingViewSettings=null;if(!Object.ReferenceEquals(insetDocument,source.Document)){insetDocument=source.Document;insetBucket=-1;}}};
+        var sourceSurface=source;source.TextArea.Caret.PositionChanged+=delegate{if(!loading&&Object.ReferenceEquals(sourceSurface,source)){caretClearanceTries=0;QueueCaretClearance();}};source.ContentDelta+=delegate(object sender,ICSharpCode.AvalonEdit.Document.DocumentChangeEventArgs change){/* a line break moves the caret's line through the height tree; verify the caret row once after the layout. Commands apply their edits with loading=true, so this check stays outside that guard (History below does not). */if(LineStructureChanged(change,sourceSurface.Document.TextLength))QueueCaretRowVisible();if(!loading&&CodeMode&&Object.ReferenceEquals(sourceSurface,source)){History.RecordDelta(change.Offset,change.RemovedText.Text,change.InsertedText.Text);sourceSnapshotDirty=true;if(!sourceOutlineDirty&&!PlainText)sourceOutlineDirty=OutlineMayChange(source.Document,change);}};source.TextChanged+=delegate{if(!loading&&CodeMode&&Object.ReferenceEquals(sourceSurface,source)){UpdateTitle();if(sourceOutlineDirty)RefreshOutline();}};source.SelectionChanged+=delegate{if(!loading){RefreshSearch();RefreshCaretStatus();if(LiveFormat)UpdateTools();}};EventHandler sourceLayout=delegate{if(Object.ReferenceEquals(sourceSurface,source)){/* a new tab or document must recompute the insets even when its gutter bucket matches the old one */if(!Object.ReferenceEquals(insetSurface,source)||!Object.ReferenceEquals(insetDocument,source.Document)){insetSurface=source;insetDocument=source.Document;insetBucket=-1;insetRecheckPending=false;insetRecheckSpent=false;}textGutter.InvalidateIfChanged();/* insets depend only on the gutter width class and visibility; recompute on change, not every layout pass */double dpiKey=VisualTreeHelper.GetDpi(this).PixelsPerDip;int bucket=(source.Document.LineCount>99999?2:0)+(textGutter.Visibility==Visibility.Visible?1:0);if(bucket!=insetBucket||dpiKey!=insetDpi){insetBucket=bucket;insetDpi=dpiKey;ApplyPageInsets();}}};source.LayoutUpdated+=sourceLayout;if(activeDocument!=null)activeDocument.SourceLayout=sourceLayout;source.DocumentChanged+=delegate{if(Object.ReferenceEquals(sourceSurface,source)){pendingViewSettings=null;if(!Object.ReferenceEquals(insetDocument,source.Document)){insetDocument=source.Document;insetBucket=-1;}}};
         DataObject.AddPastingHandler(source,delegate(object sender,DataObjectPastingEventArgs e){bool present=false;ClipboardRetry.Try(delegate{present=e.SourceDataObject.GetDataPresent(DataFormats.UnicodeText);});if(present)e.FormatToApply=DataFormats.UnicodeText;else e.CancelCommand();});
     }
     // N8: a live IME syllable must commit at the pre-click caret. The window's tunnelling handler
@@ -340,8 +340,14 @@ public partial class MainWindow : Window {
        the old fold's bottom (24K px away). Like the mode switch above, verify once at Background -
        after the frame's own layout - and let the editor reveal the caret. Only the caret's own row is
        measured, and the check is posted once per action, never from a scroll or viewport change. */
-    System.Windows.Threading.DispatcherOperation caretRowCheck;
+    /* One reveal can still miss: the rows it scrolls into view are measured at their real heights only afterwards, which moves
+       the caret row again (probe: PageDown in a 300K table document left the delimiter row 14 px below the edge). A reveal
+       that had to scroll therefore queues the next verification (3 rounds at most per command, so it cannot ping-pong). */
+    System.Windows.Threading.DispatcherOperation caretRowCheck;int caretRowRounds;
     void QueueCaretRowVisible(){
+        caretRowRounds=0;QueueCaretRowVisibleRound();
+    }
+    void QueueCaretRowVisibleRound(){
         var editor=source;var surface=editor==null?null:editor.Document;var document=activeDocument;
         if(editor==null||surface==null)return;
         if(caretRowCheck!=null&&caretRowCheck.Status==System.Windows.Threading.DispatcherOperationStatus.Pending)return;
@@ -349,8 +355,54 @@ public partial class MainWindow : Window {
             caretRowCheck=null;
             if(loading||applyingLoadedFile)return;
             if(!Object.ReferenceEquals(document,activeDocument)||!Object.ReferenceEquals(editor,source)||surface==null||!Object.ReferenceEquals(surface,source.Document))return;
-            if(!CaretRowOnScreenNow())MarkdownLivePreview.Session.SafeBringCaretToView(source.TextArea);
+            if(!CaretRowOnScreenNow()){MarkdownLivePreview.Session.SafeBringCaretToView(source.TextArea);if(++caretRowRounds<3)QueueCaretRowVisibleRound();}
         }));
+    }
+    /* The bottom margin slides in over the last 24 px of scrolling (ApplySourceInset): each step shrinks the
+       TextView's viewport, and the row the caret is on near the document end stays cut off at that edge until the
+       follow-up scroll (grewAtEnd, FollowDocumentEnd) lands - and stays cut off when one of those is skipped as an
+       echo or runs before the new margin is laid out (user, 2.2.1: the last wrapped row hidden at the status bar).
+       After a caret move near the document end this verifies once, after the frame's layout, that the caret row
+       lies inside the viewport and scrolls the missing pixels; a margin step that cuts it again re-queues the check
+       (at most 4 rounds per caret move, so it cannot ping-pong with the margin). */
+    System.Windows.Threading.DispatcherOperation caretClearanceCheck;int caretClearanceTries;
+    void QueueCaretClearance(){
+        var editor=source;
+        if(editor==null||editor.Document==null)return;
+        if(caretClearanceCheck!=null&&caretClearanceCheck.Status==System.Windows.Threading.DispatcherOperationStatus.Pending)return;
+        caretClearanceCheck=Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded,new Action(delegate{
+            caretClearanceCheck=null;
+            if(loading||applyingLoadedFile||!Object.ReferenceEquals(editor,source)||editor.Document==null)return;
+            if(EnsureCaretRowClear(editor)&&++caretClearanceTries<4)QueueCaretClearance();
+        }));
+    }
+    /* True when it scrolled (the caller then checks again after the resulting layout).
+       Coordinates: Caret.CalculateCaretRectangle() is in document space (0 = top of the document, no top inset),
+       the same space as TextView.ScrollOffset/VerticalOffset and the ScrollViewer's Extent/Viewport (TextView is
+       the IScrollInfo; its Margin - the top inset and the sliding bottom margin - is already taken out of its
+       viewport). So the caret row's distance below the visible bottom is caret.Bottom-offset-visibleHeight, where
+       the visible height is what TextView actually shows (ActualHeight, margins excluded). The sliding margin only
+       exists while the viewport bottom is within 24 px of the extent end (ApplySourceInset keeps it at exactly
+       24 px), so anything farther from the end is not this check's business (BringCaretToView's own 30 px border
+       applies there). It also only acts for a user who is working in the editor (keyboard focus inside it). */
+    static bool EnsureCaretRowClear(SourceEditor editor){
+        if(!editor.IsLoaded||editor.ViewportHeight<=0||!SourceInsetGeometryReady(editor))return false;
+        if(Mouse.LeftButton==MouseButtonState.Pressed||!editor.TextArea.IsKeyboardFocusWithin)return false;
+        var view=editor.TextArea.TextView;
+        double visible=view.ActualHeight,offset=view.ScrollOffset.Y,extent=editor.ExtentHeight;
+        /* layout not settled (viewport and what TextView shows disagree), or the document fits: nothing to clear */
+        if(visible<=0||Math.Abs(visible-editor.ViewportHeight)>1.5||extent<=visible+0.5)return false;
+        double remaining=extent-offset-visible;
+        if(remaining<-1||remaining>25)return false;
+        Rect caret;
+        try{caret=editor.TextArea.Caret.CalculateCaretRectangle();}
+        catch(InvalidOperationException){return false;}
+        catch(ICSharpCode.AvalonEdit.Rendering.VisualLinesInvalidException){return false;}
+        if(caret.IsEmpty||Double.IsNaN(caret.Bottom)||Double.IsInfinity(caret.Bottom)||caret.Bottom>extent+1)return false;
+        double clip=caret.Bottom-offset-visible;
+        if(clip<=0.5)return false;
+        editor.ScrollToVerticalOffset(offset+Math.Ceiling(clip));
+        return true;
     }
     bool CaretRowOnScreenNow(){
         if(source==null||source.Document==null||!IsLoaded||source.ViewportHeight<=0)return true;
@@ -543,7 +595,9 @@ public partial class MainWindow : Window {
     // Moving the render surface keeps the TextBox formatting cache intact during scrolling.
     // #11: a 24px end margin slides in over the last 24px of scrolling. It is computed from the
     // viewport without the bottom margin, so changing the margin cannot feed back into itself.
-    static void ApplySourceInset(SourceEditor editor){var view=editor.TextArea.TextView;if(view==null)return;double inset=SourceInset(editor);/* #11: a document that fits the viewport (top of the scroll range, content no taller than the viewport) keeps no end margin and is never scrolled to the end */bool fits=editor.ExtentHeight<=editor.ViewportHeight+view.Margin.Bottom&&editor.VerticalOffset<=0;if(fits){if(Math.Abs(view.Margin.Top-inset)>.1||Math.Abs(view.Margin.Bottom)>.1)view.Margin=new Thickness(0,inset,0,0);return;}double remaining=editor.ExtentHeight-(editor.ViewportHeight+view.Margin.Bottom)-editor.VerticalOffset;double bottom=Math.Max(0,Math.Min(24,24-remaining));bool grewAtEnd=bottom>view.Margin.Bottom+.1&&remaining<=.5;if(Math.Abs(view.Margin.Top-inset)>.1||Math.Abs(view.Margin.Bottom-bottom)>.1)view.Margin=new Thickness(0,inset,0,bottom);if(grewAtEnd)editor.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded,new Action(delegate{editor.ScrollToVerticalOffset(editor.ExtentHeight);}));}
+    /* The margins move the TextView itself (top) and its clip edge (bottom); a fractional value puts Display-mode text on a half-pixel origin for as long as the margin is in its slide-in range, so both are kept on whole device pixels. */
+    static double WholePixels(SourceEditor editor,double value){double scale=VisualTreeHelper.GetDpi(editor).PixelsPerDip;return scale>0?Math.Round(value*scale)/scale:value;}
+    static void ApplySourceInset(SourceEditor editor){var view=editor.TextArea.TextView;if(view==null)return;double inset=WholePixels(editor,SourceInset(editor));/* #11: a document that fits the viewport (top of the scroll range, content no taller than the viewport) keeps no end margin and is never scrolled to the end */bool fits=editor.ExtentHeight<=editor.ViewportHeight+view.Margin.Bottom&&editor.VerticalOffset<=0;if(fits){if(Math.Abs(view.Margin.Top-inset)>.1||Math.Abs(view.Margin.Bottom)>.1)view.Margin=new Thickness(0,inset,0,0);return;}double remaining=editor.ExtentHeight-(editor.ViewportHeight+view.Margin.Bottom)-editor.VerticalOffset;double bottom=WholePixels(editor,Math.Max(0,Math.Min(24,24-remaining)));bool grewAtEnd=bottom>view.Margin.Bottom+.1&&remaining<=.5;if(Math.Abs(view.Margin.Top-inset)>.1||Math.Abs(view.Margin.Bottom-bottom)>.1)view.Margin=new Thickness(0,inset,0,bottom);if(grewAtEnd)editor.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded,new Action(delegate{editor.ScrollToVerticalOffset(editor.ExtentHeight);}));}
     // TextView is only measurable at a point where its last measure and arrange belong to the
     // document on screen (a fresh document, a surface that just became visible, a zoom or wrap
     // change all invalidate them).

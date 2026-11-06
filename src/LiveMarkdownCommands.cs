@@ -755,7 +755,10 @@ public partial class MainWindow {
         // the hidden prefix deletion in the command path takes the same position.
         int lead=HiddenLeadStart();
         if(lead>=0)return MarkdownStructuralInput.Backspace(source.Document,lead);
-        return MarkdownStructuralInput.Backspace(source.Document,source.CaretIndex);
+        CommandResult structural=MarkdownStructuralInput.Backspace(source.Document,source.CaretIndex);
+        if(structural!=null)return structural;
+        // Backspace at the start of a line joins it to the ordered item above: the items after it are renumbered.
+        return MarkdownStructuralInput.JoinOrdered(source.Document,source.CaretIndex,true);
     }
     // Source offset of the caret line's structural prefix end when the caret sits past it inside
     // the hidden inline markers that start right there; -1 anywhere else. Only while the markers
@@ -780,14 +783,21 @@ public partial class MainWindow {
         // row or eat one of its dashes, so the key writes nothing.
         if(DelimiterLineAtCaret())return StayTab();
         // A fence line is structure too: Delete would join it with the next line or shorten its
-        // marker run, changing what the block covers (the Backspace side lives in
-        // MarkdownStructuralInput.Backspace).
-        if(MarkdownStructuralInput.DeleteAtFenceBoundary(source.Document,source.CaretIndex))return StayTab();
+        // marker run. The pair is one unit (11-06 user: the closing ``` must be deletable):
+        // breaking either fence removes both fence lines and keeps the block's text, and a fence
+        // still being typed (no closer) answers null so the ordinary character delete runs.
+        if(MarkdownStructuralInput.DeleteAtFenceBoundary(source.Document,source.CaretIndex)){
+            CommandResult fence=MarkdownCommands.DeleteFenceBlock(source.Document,source.CaretIndex);
+            if(fence!=null)return fence;
+        }
         CommandResult cell=MarkdownTableCommands.DeleteInCell(source.Document,source.CaretIndex,SourceRowCells(source.CaretIndex));
         if(cell!=null)return cell;
         // A line whose next non-blank line is a table header never merges the header row; the
         // caret steps to the first cell instead.
-        return MarkdownTableCommands.DeleteBeforeTable(source.Document,source.CaretIndex);
+        CommandResult beforeTable=MarkdownTableCommands.DeleteBeforeTable(source.Document,source.CaretIndex);
+        if(beforeTable!=null)return beforeTable;
+        // Delete at the end of an ordered item joins the next line into it: the items after it are renumbered.
+        return MarkdownStructuralInput.JoinOrdered(source.Document,source.CaretIndex,false);
     }
     // Backspace/Delete over a selection that reaches across a cell boundary: only the selected
     // text inside the cells goes, so the row keeps its "|" and its shape. A selection inside one
@@ -801,10 +811,11 @@ public partial class MainWindow {
         // row's line end into the last cell, which turns the whole-table rule into a cell clear.
         CommandResult whole=MarkdownTableCommands.DeleteWholeTableSelection(source.Document,source.SelectionStart,source.SelectionLength);
         if(whole!=null){
-            // Basic view: a hidden fence line is structure, and the editor's own delete rule
-            // swallows a selection that holds only one fence of a block. Taking the key here
-            // must keep that answer instead of deleting the fence with the table.
-            if(livePreview!=null&&livePreview.SelectionBreaksFence())return KeepSelection();
+            // A selection that also touches a fence line takes both fence lines of that block with
+            // it (MarkdownCommands.RemoveSelectionWithFences, run by the editor's own delete path in
+            // both views); answering null here hands the key to that path instead of deleting the
+            // tables and leaving the partner fence behind.
+            if(MarkdownCommands.RemoveSelectionWithFences(source.Document,source.SelectionStart,source.SelectionLength)!=null)return null;
             return whole;
         }
         // A selection whose first or last line is the delimiter row is structure (basic mode

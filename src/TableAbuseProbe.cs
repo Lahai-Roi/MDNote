@@ -1301,6 +1301,14 @@ internal static class TableAbuseProbe {
             if (change.Removed <= 0 || String.IsNullOrEmpty(change.RemovedText)) continue;
             if (change.RemovedText.IndexOf(delimiter, StringComparison.Ordinal) >= 0) return true;
         }
+        // Net effect (walk D2): a run of Delete presses can take the delimiter row one character per
+        // change (each press is a separate change whose removed text holds only a piece of it), so no
+        // single change carries the whole row. The step's offset map says where the row went: when
+        // its first character and its end (line break included) map to the same post offset, every
+        // character of the row is gone, which is the same "header and delimiter go together" outcome.
+        int rowStart = ctx.PreDoc.Starts[table.Delimiter];
+        int rowEnd = LineEnd(ctx.PreDoc, table.Delimiter);
+        if (rowEnd > rowStart && Mapped(ctx, rowStart) == Mapped(ctx, rowEnd)) return true;
         return false;
     }
     static bool CheckTable(StepContext ctx, TableInfo table) {

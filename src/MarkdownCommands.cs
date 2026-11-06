@@ -854,6 +854,30 @@ internal static class MarkdownCommands {
         // The opening fence may be more than 400 lines above; the brief treats a
         // limited scan as "not inside code" rather than guessing.
         if (current != null) return false;
+        return SimulateFences(fences, fenceLines, out open, out openLine);
+    }
+
+    // The same answer read from the whole document above the line, with no 400-line bound. A key
+    // that takes a fence pair apart needs the true partner (a block longer than the bound, or one
+    // that starts far above, must not pair its closing fence with the next block's opener), and
+    // it runs only at a fence boundary, so the longer read is paid rarely. Lines that cannot start
+    // a fence are skipped without reading their text.
+    static bool OpenFenceAbove(TextDocument document, DocumentLine line, out FenceMark open, out DocumentLine openLine) {
+        List<FenceMark> fences = new List<FenceMark>();
+        List<DocumentLine> fenceLines = new List<DocumentLine>();
+        for (DocumentLine current = line.PreviousLine; current != null; current = current.PreviousLine) {
+            if (!MayStartFence(document, current)) continue;
+            FenceMark mark;
+            if (TryFenceMark(LineText(document, current), out mark)) { fences.Add(mark); fenceLines.Add(current); }
+        }
+        return SimulateFences(fences, fenceLines, out open, out openLine);
+    }
+
+    // `fences` lists the fence lines above a line nearest first. Reads them top down, as the
+    // parser does, and answers whether a block is still open at the line and which one.
+    static bool SimulateFences(List<FenceMark> fences, List<DocumentLine> fenceLines, out FenceMark open, out DocumentLine openLine) {
+        open = new FenceMark();
+        openLine = null;
         bool inside = false;
         FenceMark opened = new FenceMark();
         DocumentLine openedLine = null;
@@ -2152,6 +2176,41 @@ internal static class MarkdownCommands {
         return result;
     }
 
+    // The block a fence line belongs to: the opener it is (or the opener above it) and the
+    // matching closing fence below. False when the line is not inside any block and is no fence,
+    // when it is only a code line that starts with a marker run inside some other block, or when
+    // no closer follows (a fence still being typed). The fence grammar is RemoveCodeBlock's own;
+    // the reads are not bounded, so the partner is the true one (see OpenFenceAbove).
+    static bool FindFencePair(TextDocument document, DocumentLine line, out DocumentLine opener, out FenceMark open, out DocumentLine closer) {
+        opener = null;
+        closer = null;
+        open = new FenceMark();
+        DocumentLine openLine;
+        FenceMark above;
+        bool inside = OpenFenceAbove(document, line, out above, out openLine);
+        if (inside) {
+            open = above;
+            opener = openLine;
+        } else if (IsFenceLine(document, line)) {
+            // A fence line outside any block is an opener.
+            opener = line;
+            TryFenceMark(LineText(document, line), out open);
+        } else {
+            return false;
+        }
+        if (opener == null) return false;
+        for (DocumentLine current = opener.NextLine; current != null; current = current.NextLine) {
+            if (!MayStartFence(document, current)) continue;
+            FenceMark mark;
+            if (TryFenceMark(LineText(document, current), out mark)
+                && mark.Character == open.Character && mark.Length >= open.Length && mark.TailBlank) {
+                closer = current;
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Toggle-off for the code button: one complete fenced block around the caret or selection
     // loses its two fence lines (with their own line endings) and keeps every content line
     // byte for byte, as one command. A caret or selection that reaches outside the block, or a
@@ -2169,33 +2228,11 @@ internal static class MarkdownCommands {
             if (trimEnd > trimStart) { selectionStart = trimStart; selectionEnd = trimEnd; }
         }
         DocumentLine first = document.GetLineByOffset(selectionStart);
-        DocumentLine opener = null;
-        FenceMark open = new FenceMark();
-        if (IsFenceLine(document, first) && !OpenFenceBefore(document, first, out open)) {
-            // A fence line outside any block is an opener (a stray closer above has no partner
-            // and is not a block this command may take apart).
-            opener = first;
-            TryFenceMark(LineText(document, first), out open);
-        } else {
-            DocumentLine openLine;
-            if (!OpenFenceBefore(document, first, out open, out openLine)) return null;
-            opener = openLine;
-        }
-        if (opener == null || selectionStart < opener.Offset) return null;
-        DocumentLine closer = null;
-        DocumentLine current = opener.NextLine;
-        int scanned = 0;
-        while (current != null && scanned < 400) {
-            FenceMark mark;
-            if (TryFenceMark(LineText(document, current), out mark)
-                && mark.Character == open.Character && mark.Length >= open.Length && mark.TailBlank) {
-                closer = current;
-                break;
-            }
-            current = current.NextLine;
-            scanned++;
-        }
-        if (closer == null) return null;
+        DocumentLine opener;
+        FenceMark open;
+        DocumentLine closer;
+        if (!FindFencePair(document, first, out opener, out open, out closer)) return null;
+        if (selectionStart < opener.Offset) return null;
         int blockEnd = closer.Offset + closer.TotalLength;
         if (selectionEnd > blockEnd) return null;
         int openerEnd = opener.Offset + opener.TotalLength;
@@ -2217,6 +2254,159 @@ internal static class MarkdownCommands {
         }
         FinishSelection(result, contentStart, contentEnd);
         return result;
+    }
+
+    // The key-side rule (11-06 forum report: the closing ``` could not be deleted): a fence pair
+    // is one structure, so a Backspace/Delete that would join a fence line with its neighbour or
+    // shorten its marker run takes BOTH fence lines and keeps every other line as ordinary text
+    // (the same text change the toolbar toggle-off makes). No lone fence is left behind to turn
+    // the rest of the document into code, and no key is silently swallowed. Null when the fence
+    // near the caret has no partner (an opening fence still being typed, shown as source), so the
+    // ordinary character delete runs there.
+    internal static CommandResult DeleteFenceBlock(TextDocument document, int offset) {
+        if (document == null || offset < 0 || offset > document.TextLength) return null;
+        DocumentLine line = document.GetLineByOffset(offset);
+        int column = offset - line.Offset;
+        // The line the key would damage: Backspace at a line start writes the line into the one
+        // above, Delete at a line end folds the next line into this one, and a delete inside the
+        // marker run shortens this line's own run.
+        DocumentLine fence = null;
+        if (column == 0) {
+            if (IsFenceEnd(document, line.PreviousLine)) fence = line.PreviousLine;
+            else if (IsFenceEnd(document, line)) fence = line;
+        } else if (column >= line.Length) {
+            if (IsFenceEnd(document, line)) fence = line;
+            else if (line.NextLine != null && IsFenceEnd(document, line.NextLine)) fence = line.NextLine;
+        } else {
+            if (IsFenceEnd(document, line)) fence = line;
+        }
+        if (fence == null) return null;
+        DocumentLine opener;
+        FenceMark open;
+        DocumentLine closer;
+        if (!FindFencePair(document, fence, out opener, out open, out closer)) return null;
+        CommandResult result = new CommandResult();
+        AddFencePairRemoval(document, opener, closer, result);
+        result.SelectionStart = MapCaretAfterEdits(result.Edits, offset);
+        result.SelectionLength = 0;
+        result.SortEdits();
+        return result;
+    }
+
+    // True when this line is one end (opener or closer) of a closed block. A code line inside a
+    // block may start with "```" too; it is not structure and a key may edit it freely.
+    static bool IsFenceEnd(TextDocument document, DocumentLine line) {
+        if (line == null || !IsFenceLine(document, line)) return false;
+        DocumentLine opener;
+        FenceMark open;
+        DocumentLine closer;
+        if (!FindFencePair(document, line, out opener, out open, out closer)) return false;
+        return Object.ReferenceEquals(line, opener) || Object.ReferenceEquals(line, closer);
+    }
+
+    // The two fence lines of a pair as one removal: each line takes its own line break. A closer
+    // that is the document's last line owns the break in front of it instead, so no empty line is
+    // left behind. Adjacent fences (an empty block) become one edit, as the host requires.
+    static void AddFencePairRemoval(TextDocument document, DocumentLine opener, DocumentLine closer, CommandResult result) {
+        int openerEnd = opener.Offset + opener.TotalLength;
+        int closeStart = closer.Offset;
+        if (closer.DelimiterLength == 0 && closer.PreviousLine != null) closeStart = closer.PreviousLine.EndOffset;
+        if (closeStart <= openerEnd) {
+            result.Add(opener.Offset, closer.Offset + closer.TotalLength - opener.Offset, string.Empty);
+        } else {
+            result.Add(opener.Offset, opener.TotalLength, string.Empty);
+            result.Add(closeStart, closer.Offset + closer.TotalLength - closeStart, string.Empty);
+        }
+    }
+
+    // A Delete/Backspace over a selection that holds only part of a fenced block: the selected
+    // text goes and both fence lines of every block it touches go with it, so the selection never
+    // leaves one fence behind to turn the rest of the document into code. Lines of the block
+    // outside the selection stay as ordinary text. Null when the selection touches no fence end,
+    // so the editor's own delete runs unchanged; a whole-block selection is ordinary text too,
+    // because both fences are already inside it.
+    internal static CommandResult RemoveSelectionWithFences(TextDocument document, int selectionStart, int selectionLength) {
+        if (!Validate(document, selectionStart, selectionLength) || selectionLength <= 0) return null;
+        int start = selectionStart;
+        int end = selectionStart + selectionLength;
+        // Ctrl+A and any other whole-document selection already hold every fence.
+        if (start == 0 && end >= document.TextLength) return null;
+        List<SourceEdit> removals = new List<SourceEdit>();
+        DocumentLine first = document.GetLineByOffset(start);
+        DocumentLine last = document.GetLineByOffset(end - 1);
+        for (DocumentLine line = first; line != null; line = line.NextLine) {
+            // The line's text, not its line break: the selection has to hold the marker
+            // characters, and a selection that ends at a line's start is not on that line.
+            if (end > line.Offset && start < line.EndOffset && MayStartFence(document, line)) {
+                DocumentLine opener;
+                FenceMark open;
+                DocumentLine closer;
+                if (FindFencePair(document, line, out opener, out open, out closer)
+                    && (Object.ReferenceEquals(line, opener) || Object.ReferenceEquals(line, closer))
+                    && !(opener.Offset >= start && closer.EndOffset <= end)) {
+                    AddFenceLineRemoval(document, opener, removals);
+                    AddFenceLineRemoval(document, closer, removals);
+                }
+            }
+            if (Object.ReferenceEquals(line, last)) break;
+        }
+        if (removals.Count == 0) return null;
+        removals.Add(new SourceEdit(start, selectionLength, string.Empty));
+        removals.Sort(delegate(SourceEdit a, SourceEdit b) { return a.Offset.CompareTo(b.Offset); });
+        CommandResult result = new CommandResult();
+        SourceEdit merged = removals[0];
+        for (int i = 1; i < removals.Count; i++) {
+            SourceEdit edit = removals[i];
+            if (edit.Offset <= merged.Offset + merged.Length) {
+                int mergedEnd = Math.Max(merged.Offset + merged.Length, edit.Offset + edit.Length);
+                merged = new SourceEdit(merged.Offset, mergedEnd - merged.Offset, string.Empty);
+            } else {
+                result.Add(merged.Offset, merged.Length, string.Empty);
+                merged = edit;
+            }
+        }
+        result.Add(merged.Offset, merged.Length, string.Empty);
+        result.SelectionStart = MapCaretAfterEdits(result.Edits, start);
+        result.SelectionLength = 0;
+        result.SortEdits();
+        return result;
+    }
+
+    // Only lines that can begin with a fence marker read their text for the pair scan: a large
+    // selection asks this cheap question of every line and materializes almost none of them.
+    static bool MayStartFence(TextDocument document, DocumentLine line) {
+        int at = line.Offset;
+        int end = line.EndOffset;
+        int spaces = 0;
+        while (at < end && spaces < 3 && document.GetCharAt(at) == ' ') { at++; spaces++; }
+        if (at >= end) return false;
+        char c = document.GetCharAt(at);
+        return c == '`' || c == '~';
+    }
+
+    static void AddFenceLineRemoval(TextDocument document, DocumentLine line, List<SourceEdit> removals) {
+        int start = line.Offset;
+        // The document's last line has no break of its own: the break in front of it belongs to
+        // the removal, or a blank line would stay behind.
+        if (line.DelimiterLength == 0 && line.PreviousLine != null) start = line.PreviousLine.EndOffset;
+        removals.Add(new SourceEdit(start, line.Offset + line.TotalLength - start, string.Empty));
+    }
+
+    // Post-edit position of the key's own offset when only text is removed (edits may still be in
+    // any order): a point inside a removed range goes to that range's start, and every range that
+    // ends at or before it shifts it left.
+    static int MapCaretAfterEdits(List<SourceEdit> edits, int position) {
+        int target = position;
+        for (int i = 0; i < edits.Count; i++) {
+            SourceEdit edit = edits[i];
+            if (edit.Offset < target && edit.Offset + edit.Length >= target) target = edit.Offset;
+        }
+        int shift = 0;
+        for (int i = 0; i < edits.Count; i++) {
+            SourceEdit edit = edits[i];
+            if (edit.Offset + edit.Length <= target) shift += edit.Length - edit.Text.Length;
+        }
+        return target - shift;
     }
     #endregion
 

@@ -776,8 +776,11 @@ internal static class ImeAbuseProbe {
         Deliver(c,clause);
         End(c);
         Pump();
-        int caret=clicked>=at?clicked+clause.Length:clicked;
-        CheckCommitted(c,c.Before.Insert(at,clause),caret,clause);
+        // 11-05 rule: a result at the outer edge of a closed bold/italic/strike run lands inside the pair on this route too
+        // (seed 2 live step 4 click:ja), so the write point is the same InsidePoint the plain commit expects.
+        int landed=InsidePoint(c.Before,at,clause);
+        int caret=clicked>=landed?clicked+clause.Length:clicked;
+        CheckCommitted(c,c.Before.Insert(landed,clause),caret,clause);
         CheckHistory(c,1);
     }
     // A key the IME does not consume (an arrow, Home/End) commits first and then acts; only the
@@ -883,7 +886,7 @@ internal static class ImeAbuseProbe {
         Pump();
         if(away)Check(c,"focus loss adopts the result at the remembered caret",adopted,"AcceptLateImeCommit declined the counted result");
         else Skipped("focus","keyboard focus could not be cleared in this run");
-        CheckCommitted(c,ExpectedText(c,clause),ExpectedCaret(c,clause.Length),clause);
+        CheckCommitted(c,ExpectedText(c,clause),ExpectedCaret(c,clause),clause);
         try{c.Editor.TextArea.Focus();Pump();}catch(Exception){}
         CheckHistory(c,1);
     }
@@ -1062,11 +1065,59 @@ internal static class ImeAbuseProbe {
             return c.Before.Remove(start,length).Insert(start,insert);
         }
         int at=Math.Max(0,Math.Min(c.Point,c.Before.Length));
-        return c.Before.Insert(at,insert);
+        return c.Before.Insert(InsidePoint(c.Before,at,insert),insert);
     }
-    static int ExpectedCaret(StepContext c,int insertLength) {
+    // 11-05 rule (HANDOFF.md:115, MarkdownLivePreview.InsertCommitInsideRun): a result written at the
+    // outer edge of a closed inline style's closing run (bold, italic, strikethrough) lands inside
+    // the pair, exactly like a typed character. The caret expectation is landed point+length
+    // (ExpectedCaret): the caret stays inside the pair. This reads only the line: the run
+    // of marker characters ending at `at`, with its mirrored opener earlier on the same line,
+    // content between, and no whitespace against either marker. Table rows and fenced lines keep
+    // the plain point (a cell end is declined by the product; a fence has no styles). A stack the
+    // line cannot mirror (a closer that ends several differently-opened pairs) stays plain here.
+    static int InsidePoint(string before,int at,string insert) {
+        if(String.IsNullOrEmpty(insert)||String.IsNullOrWhiteSpace(insert)||insert.IndexOf('\r')>=0||insert.IndexOf('\n')>=0)return at;
+        if(at<=0||at>before.Length)return at;
+        int lineStart=before.LastIndexOf('\n',at-1)+1;
+        int lineEnd=before.IndexOf('\n',at);
+        if(lineEnd<0)lineEnd=before.Length;
+        string text=before.Substring(lineStart,lineEnd-lineStart).TrimEnd('\r');
+        string trimmed=text.TrimStart();
+        if(trimmed.StartsWith("|",StringComparison.Ordinal)||trimmed.StartsWith("```",StringComparison.Ordinal)||trimmed.StartsWith("~~~",StringComparison.Ordinal))return at;
+        int fences=0,scan=0;
+        while(scan<lineStart){
+            int next=before.IndexOf('\n',scan);
+            if(next<0||next>=lineStart)break;
+            string above=before.Substring(scan,next-scan).TrimStart();
+            if(above.StartsWith("```",StringComparison.Ordinal)||above.StartsWith("~~~",StringComparison.Ordinal))fences++;
+            scan=next+1;
+        }
+        if((fences&1)==1)return at;
+        int run=0;
+        while(at-run-1>=lineStart&&run<6&&IsStyleMarker(before[at-run-1]))run++;
+        if(run==0||run>=6)return at;
+        if(at<before.Length&&IsStyleMarker(before[at]))return at;
+        string closers=before.Substring(at-run,run);
+        if(closers=="~")return at;
+        char[] mirror=closers.ToCharArray();
+        Array.Reverse(mirror);
+        string opener=new string(mirror);
+        string head=before.Substring(lineStart,at-run-lineStart);
+        int found=head.LastIndexOf(opener,StringComparison.Ordinal);
+        if(found<0||head.Length-(found+run)<1)return at;
+        if(char.IsWhiteSpace(head[found+run])||char.IsWhiteSpace(head[head.Length-1]))return at;
+        return at-run;
+    }
+    static bool IsStyleMarker(char ch) {
+        return ch=='*'||ch=='_'||ch=='~';
+    }
+    // 11-06: a result written inside the closing run keeps the caret inside the pair too
+    // (Point - run + length), so the next syllable continues the style.
+    static int ExpectedCaret(StepContext c,string insert) {
+        int insertLength=insert==null?0:insert.Length;
         if(c.SelectionLength>0)return c.SelectionStart+insertLength;
-        return c.Point+insertLength;
+        int at=c.Before==null?c.Point:Math.Max(0,Math.Min(c.Point,c.Before.Length));
+        return (c.Before==null?at:InsidePoint(c.Before,at,insert))+insertLength;
     }
     static bool CheckCommitted(StepContext c,string expectedText,int expectedCaret,string insert) {
         string text=DocText(c.Editor);

@@ -8,7 +8,7 @@ NSIS 3.13 Modern UI 2를 사용한다. 언어 선택(한국어/영어/일본어/
 powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\build-setup.ps1 -NsisDirectory C:\Tools\nsis-3.13
 ```
 
-이 명령은 부모 폴더에 `MDNote-Setup-2.0.exe`를 만든다. 설치 폴더에는 실행 파일·AvalonEdit DLL·LICENSE·THIRD_PARTY_NOTICES.txt만, 도움말 문서와 그림은 `help` 폴더에 설치한다(payload의 `app` 폴더). 소스와 빌드 스크립트는 설치하지 않는다(소스는 GitHub). `legacy-files.txt`에 다음 판에서 빠지거나 이름이 바뀌는 파일을 적으면 업데이트·제거 때 지운다(`\`로 끝나는 줄은 빈 폴더 제거). 2.0 기준으로는 비어 있다. 설치 소스를 변경하면 설치 EXE를 다시 빌드해야 한다.
+이 명령은 부모 폴더에 `MDNote-Setup-<버전>.exe`를 만든다(파일 이름의 버전은 `build-setup.ps1`의 기본값에 있다). 설치 폴더에는 실행 파일·AvalonEdit DLL·LICENSE·THIRD_PARTY_NOTICES.txt만, 도움말 문서와 그림은 `help` 폴더에 설치한다(payload의 `app` 폴더). 소스와 빌드 스크립트는 설치하지 않는다(소스는 GitHub). `legacy-files.txt`에 다음 판에서 빠지거나 이름이 바뀌는 파일을 적으면 업데이트·제거 때 지운다(`\`로 끝나는 줄은 빈 폴더 제거). 지금(2.2.1)은 비어 있다. 설치 소스를 변경하면 설치 EXE를 다시 빌드해야 한다.
 
 도구: [NSIS 공식 다운로드](https://nsis.sourceforge.io/Download), [Modern UI 2 문서](https://nsis.sourceforge.io/Docs/Modern%20UI%202/Readme.html). 포터블 ZIP을 작업 도구 폴더에 풀어 사용하면 NSIS 자체를 Windows에 설치할 필요가 없다. 이번에 사용한 공식 ZIP의 SHA-256은 `BA63DFFC4410EE89193E1CB5A41989991BD77C61068DA17E3156D136B7B0B3D8`이다.
 

@@ -556,6 +556,35 @@ internal static class LivePreviewProbe {
             Check(ref all, report, "q list numbering across blank lines and content-column nesting", qBlank && qSibling && qNest,
                 "labels=" + qLabels + " sibling=" + qSibling + " x=" + N(qShallowX) + "/" + N(qSiblingX) + " nest=" + qNest);
 
+            // q2. A body line indented to the item's content column is that item's continuation, so it
+            // does not end the list: the next, deeper marker nests under it (depth 1, 2) and the
+            // ordered and task items after the bullets are back at depth 0. A lazy (unindented) line
+            // still ends the list.
+            editor.Text = "본문 첫 줄입니다.\n\n- 목록 첫째 항목\n- ## 목록 안 2단계 제목\n  목록 안 본문 한 줄.\n" +
+                "  - ### 한 단계 들어간 목록 안 3단계 제목\n    더 들어간 목록 본문.\n" +
+                "    - #### 두 단계 들어간 4단계 제목\n      가장 깊은 목록 본문.\n" +
+                "1. ### 번호 목록 안 3단계 제목\n   번호 목록 본문.\n- [ ] ## 할 일 안 2단계 제목\n";
+            editor.TextArea.Caret.Line = 1;
+            editor.TextArea.Caret.Column = 1;
+            Pump(editor);
+            MarkdownLivePreview.LineInfo q2Top = session.Info(editor.Document.GetLineByNumber(4));
+            MarkdownLivePreview.LineInfo q2Child = session.Info(editor.Document.GetLineByNumber(6));
+            MarkdownLivePreview.LineInfo q2Grand = session.Info(editor.Document.GetLineByNumber(8));
+            MarkdownLivePreview.LineInfo q2Ordered = session.Info(editor.Document.GetLineByNumber(10));
+            MarkdownLivePreview.LineInfo q2Task = session.Info(editor.Document.GetLineByNumber(12));
+            bool q2Depth = q2Top.List != null && q2Top.List.Depth == 0 && q2Child.List != null && q2Child.List.Depth == 1 &&
+                q2Grand.List != null && q2Grand.List.Depth == 2 && q2Ordered.List != null && q2Ordered.List.Ordered && q2Ordered.List.Depth == 0 &&
+                q2Task.List != null && q2Task.List.Task && q2Task.List.Depth == 0;
+            editor.Text = "- 하나\n  본문\n- 둘\n게으른 줄\n  - 셋\n";
+            editor.TextArea.Caret.Line = 1;
+            editor.TextArea.Caret.Column = 1;
+            Pump(editor);
+            MarkdownLivePreview.LineInfo q2Lazy = session.Info(editor.Document.GetLineByNumber(5));
+            bool q2LazyEnds = q2Lazy.List != null && q2Lazy.List.Depth == 0;
+            Check(ref all, report, "q2 indented body line keeps the list open for the next nested item", q2Depth && q2LazyEnds,
+                "depths=" + (q2Top.List == null ? -1 : q2Top.List.Depth) + "/" + (q2Child.List == null ? -1 : q2Child.List.Depth) + "/" + (q2Grand.List == null ? -1 : q2Grand.List.Depth) +
+                " ordered=" + (q2Ordered.List == null ? -1 : q2Ordered.List.Depth) + " task=" + (q2Task.List == null ? -1 : q2Task.List.Depth) + " lazyEnds=" + q2LazyEnds);
+
             // r. The live "#anchor" click rule (MainWindow.OpenLiveAnchor): the fragment lands on the
             // heading line it names - ATX, setext, list and quote headings alike - and a fragment
             // that names nothing resolves to -1, which is the click's "move nothing". The scan picks
@@ -991,6 +1020,21 @@ internal static class NoRevealProbe {
             Check(ref all, report, "basic caret: Shift+Left extends by visible characters",
                 editor.SelectionStart == 4 && editor.SelectionLength == 3,
                 "selection=" + editor.SelectionStart + "," + editor.SelectionLength + " expected 4,3, text='" + Flat(editor.Text) + "'");
+            editor.Select(0, 0);
+            Pump(editor);
+
+            // GitHub alerts / Obsidian callouts: the marker is hidden on screen only, the quote's lines
+            // carry the type, the first line shows the icon and title.
+            AlertChecks(ref all, report, editor, session);
+            editor.Select(0, 0);
+            Pump(editor);
+
+            // A quote line indented to an item's content column continues the item's quote: same bar x,
+            // same text x, the list stays open (basic and live).
+            ListQuoteChecks(ref all, report, editor, session, settings);
+            // An alert opened inside an item colours the item's later quote lines; a marker on a joined line is plain text;
+            // a setext heading in an item keeps the list open (basic and live).
+            ItemAlertChecks(ref all, report, editor, session, settings);
             editor.Select(0, 0);
             Pump(editor);
 
@@ -2465,6 +2509,291 @@ internal static class NoRevealProbe {
         editor.TextArea.TextView.EnsureVisualLines();
     }
 
+    // ---- GitHub alerts / Obsidian callouts in the basic (no-reveal) view ----
+    // The line's parse after the editor holds `text` (the file text is never touched by the look).
+    static MarkdownLivePreview.LineInfo AlertLine(SourceEditor editor, MarkdownLivePreview.Session session, string text, int number) {
+        editor.Text = text;
+        Pump(editor);
+        return session.Info(editor.Document.GetLineByNumber(number));
+    }
+    static bool AlertMarkerOf(MarkdownLivePreview.LineInfo info, out MarkdownLivePreview.Replacement found) {
+        found = default(MarkdownLivePreview.Replacement);
+        foreach (MarkdownLivePreview.Replacement replacement in info.Replacements)
+            if (replacement.Kind == MarkdownLivePreview.ReplacementKind.Alert) { found = replacement; return true; }
+        return false;
+    }
+    static bool HasAlertElement(SourceEditor editor, int number) {
+        ICSharpCode.AvalonEdit.Rendering.TextView view = editor.TextArea.TextView;
+        view.EnsureVisualLines();
+        VisualLine visual = view.GetOrConstructVisualLine(editor.Document.GetLineByNumber(number));
+        foreach (VisualLineElement element in visual.Elements) if (element is MarkdownLivePreview.AlertElement) return true;
+        return false;
+    }
+    static string AlertDetail(MarkdownLivePreview.LineInfo info) {
+        MarkdownLivePreview.Replacement marker;
+        bool found = AlertMarkerOf(info, out marker);
+        return "alert=" + info.Alert + " level=" + info.AlertLevel + " head=" + info.AlertHead + " quote=" + info.Quote + " lazy=" + info.LazyQuote +
+            (found ? " marker=" + marker.Start + "+" + marker.Length + " label='" + marker.Label + "'" : " no marker");
+    }
+    static void AlertChecks(ref bool all, StringBuilder report, SourceEditor editor, MarkdownLivePreview.Session session) {
+        string[] types = { "NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION" };
+        string[] titles = { "Note", "Tip", "Important", "Warning", "Caution" };
+        for (int t = 0; t < types.Length; t++) {
+            string source = "> [!" + types[t] + "]\n> body";
+            MarkdownLivePreview.LineInfo head = AlertLine(editor, session, source, 1);
+            MarkdownLivePreview.LineInfo body = session.Info(editor.Document.GetLineByNumber(2));
+            MarkdownLivePreview.Replacement marker;
+            bool found = AlertMarkerOf(head, out marker);
+            bool shown = HasAlertElement(editor, 1);
+            Check(ref all, report, "alert " + types[t] + ": marker hidden, title line, bar state",
+                head.AlertHead && head.Alert == (AlertKind)(t + 1) && head.AlertLevel == 1 && found && marker.Start == 2 && marker.Length == head.Text.Length - 2 &&
+                marker.Label == titles[t] && shown && body.Alert == head.Alert && body.AlertLevel == 1 && !body.AlertHead && editor.Text == source,
+                AlertDetail(head) + " shown=" + shown + " | body " + AlertDetail(body));
+        }
+        MarkdownLivePreview.LineInfo lower = AlertLine(editor, session, "> [!tip]\n> a", 1);
+        Check(ref all, report, "alert: lowercase type keyword", lower.AlertHead && lower.Alert == AlertKind.Tip, AlertDetail(lower));
+        // A title typed after the marker stays ordinary text (semi-bold, the type's colour); only the marker is the label.
+        MarkdownLivePreview.LineInfo custom = AlertLine(editor, session, "> [!tip] good\n> a", 1);
+        MarkdownLivePreview.Replacement customMarker;
+        bool customFound = AlertMarkerOf(custom, out customMarker);
+        bool customStyled = false;
+        foreach (MarkdownLivePreview.StyledPart part in custom.Styles)
+            if (part.Start == 9 && part.Length == 4 && (part.Style & MarkdownLivePreview.Style.SemiBold) != 0 && part.Color != null) customStyled = true;
+        Check(ref all, report, "alert: custom title after the marker",
+            custom.AlertHead && custom.Alert == AlertKind.Tip && customFound && customMarker.Start == 2 && customMarker.Length == 7 && customMarker.Label == "" && customStyled,
+            AlertDetail(custom) + " styled=" + customStyled);
+        MarkdownLivePreview.LineInfo alias = AlertLine(editor, session, "> [!info]\n> a", 1);
+        MarkdownLivePreview.Replacement aliasMarker;
+        bool aliasFound = AlertMarkerOf(alias, out aliasMarker);
+        Check(ref all, report, "alert: Obsidian alias maps to the note colour with a capitalised title",
+            alias.Alert == AlertKind.Note && aliasFound && aliasMarker.Label == "Info", AlertDetail(alias));
+        MarkdownLivePreview.LineInfo unknown = AlertLine(editor, session, "> [!foo]\n> a", 1);
+        MarkdownLivePreview.Replacement unknownMarker;
+        bool unknownFound = AlertMarkerOf(unknown, out unknownMarker);
+        Check(ref all, report, "alert: unknown type is a note titled with the word",
+            unknown.Alert == AlertKind.Note && unknownFound && unknownMarker.Label == "Foo", AlertDetail(unknown));
+        MarkdownLivePreview.LineInfo fold = AlertLine(editor, session, "> [!tip]-\n> a", 1);
+        MarkdownLivePreview.Replacement foldMarker;
+        bool foldFound = AlertMarkerOf(fold, out foldMarker);
+        Check(ref all, report, "alert: fold sign is hidden with the marker",
+            fold.Alert == AlertKind.Tip && foldFound && foldMarker.Start == 2 && foldMarker.Length == 7 && foldMarker.Label == "Tip", AlertDetail(fold));
+        // Nested quote: only the level whose first line has the marker is the alert.
+        MarkdownLivePreview.LineInfo outer = AlertLine(editor, session, "> a\n> > [!NOTE]\n> > b\n> c", 1);
+        MarkdownLivePreview.LineInfo innerHead = session.Info(editor.Document.GetLineByNumber(2));
+        MarkdownLivePreview.LineInfo innerBody = session.Info(editor.Document.GetLineByNumber(3));
+        MarkdownLivePreview.LineInfo outerAgain = session.Info(editor.Document.GetLineByNumber(4));
+        Check(ref all, report, "alert: nested quote, the inner level only",
+            outer.Alert == AlertKind.None && innerHead.AlertHead && innerHead.Alert == AlertKind.Note && innerHead.AlertLevel == 2 &&
+            innerBody.Alert == AlertKind.Note && innerBody.AlertLevel == 2 && outerAgain.Alert == AlertKind.None,
+            AlertDetail(outer) + " | " + AlertDetail(innerHead) + " | " + AlertDetail(innerBody) + " | " + AlertDetail(outerAgain));
+        MarkdownLivePreview.LineInfo outerAlert = AlertLine(editor, session, "> [!WARNING]\n> > inner", 1);
+        MarkdownLivePreview.LineInfo innerOfAlert = session.Info(editor.Document.GetLineByNumber(2));
+        Check(ref all, report, "alert: a quote inside an alert keeps the alert's bar at level 1",
+            outerAlert.AlertLevel == 1 && innerOfAlert.Alert == AlertKind.Warning && innerOfAlert.AlertLevel == 1 && innerOfAlert.QuoteLevels == 2,
+            AlertDetail(outerAlert) + " | " + AlertDetail(innerOfAlert));
+        // Lazy continuation line: no ">" of its own, still inside the alert.
+        MarkdownLivePreview.LineInfo lazyHead = AlertLine(editor, session, "> [!NOTE]\n> a\nlazy", 1);
+        MarkdownLivePreview.LineInfo lazyLine = session.Info(editor.Document.GetLineByNumber(3));
+        Check(ref all, report, "alert: lazy continuation line takes the alert bar",
+            lazyHead.AlertHead && lazyLine.LazyQuote && lazyLine.Alert == AlertKind.Note && lazyLine.AlertLevel == 1 && !lazyLine.AlertHead,
+            AlertDetail(lazyLine));
+        // A normal quote is untouched, and a marker that is not on the quote's first line stays text.
+        MarkdownLivePreview.LineInfo plain = AlertLine(editor, session, "> hello\n> world", 1);
+        MarkdownLivePreview.LineInfo plainSecond = session.Info(editor.Document.GetLineByNumber(2));
+        Check(ref all, report, "alert: normal quote unchanged", plain.Alert == AlertKind.None && plainSecond.Alert == AlertKind.None && plain.Quote && !HasAlertElement(editor, 1),
+            AlertDetail(plain) + " | " + AlertDetail(plainSecond));
+        MarkdownLivePreview.LineInfo late = AlertLine(editor, session, "> a\n> [!NOTE]", 2);
+        MarkdownLivePreview.Replacement lateMarker;
+        Check(ref all, report, "alert: marker not on the first line stays text", late.Alert == AlertKind.None && !AlertMarkerOf(late, out lateMarker), AlertDetail(late));
+        MarkdownLivePreview.LineInfo glued = AlertLine(editor, session, "> [!NOTE]text", 1);
+        Check(ref all, report, "alert: marker glued to text stays a quote", glued.Alert == AlertKind.None, AlertDetail(glued));
+        // A quote inside a list item: at least the marker line.
+        MarkdownLivePreview.LineInfo listed = AlertLine(editor, session, "- > [!TIP]", 1);
+        Check(ref all, report, "alert: quote inside a list item", listed.AlertHead && listed.Alert == AlertKind.Tip && listed.AlertLevel == 1 && HasAlertElement(editor, 1), AlertDetail(listed));
+        // Editing the marker line re-parses the lines below it (the cache compares the alert state).
+        editor.Text = "> [!NOTE]\n> body";
+        Pump(editor);
+        session.Info(editor.Document.GetLineByNumber(2));
+        editor.Document.Replace(3, 1, "");   // "[!NOTE]" -> "[NOTE]": no longer a marker
+        Pump(editor);
+        MarkdownLivePreview.LineInfo brokenHead = session.Info(editor.Document.GetLineByNumber(1));
+        MarkdownLivePreview.LineInfo brokenBody = session.Info(editor.Document.GetLineByNumber(2));
+        Check(ref all, report, "alert: breaking the marker clears the alert below it", !brokenHead.AlertHead && brokenBody.Alert == AlertKind.None && editor.Text == "> [NOTE]\n> body",
+            "text='" + Flat(editor.Text) + "' " + AlertDetail(brokenHead) + " | " + AlertDetail(brokenBody));
+        editor.Document.Replace(3, 0, "!");   // "[NOTE]" -> "[!NOTE]" again
+        Pump(editor);
+        MarkdownLivePreview.LineInfo mendedHead = session.Info(editor.Document.GetLineByNumber(1));
+        MarkdownLivePreview.LineInfo mendedBody = session.Info(editor.Document.GetLineByNumber(2));
+        Check(ref all, report, "alert: restoring the marker brings the alert back", mendedHead.AlertHead && mendedBody.Alert == AlertKind.Note && editor.Text == "> [!NOTE]\n> body" && HasAlertElement(editor, 1),
+            "text='" + Flat(editor.Text) + "' " + AlertDetail(mendedHead) + " | " + AlertDetail(mendedBody));
+    }
+
+    // ---- a quote line that continues an item's quote ("  > text" under "- > text") ----
+    // The x of the character at `offset` on line `number`, read from that line's own visual line.
+    static double ItemQuoteX(SourceEditor editor, int number, int offset) {
+        ICSharpCode.AvalonEdit.Rendering.TextView view = editor.TextArea.TextView;
+        view.EnsureVisualLines();
+        VisualLine visual = view.GetOrConstructVisualLine(editor.Document.GetLineByNumber(number));
+        return visual.GetVisualPosition(visual.GetVisualColumn(offset), VisualYPosition.LineTop).X;
+    }
+    static string ItemQuoteN(double value) { return value.ToString("0.##", CultureInfo.InvariantCulture); }
+    // Quote bar x and text x of line 2 equal line 1's (the ">" marker element is where the bar is drawn), the item
+    // keeps its list across the line, and the cases that are not an item's quote stay what they were. Basic and live.
+    static void ListQuoteChecks(ref bool all, StringBuilder report, SourceEditor editor, MarkdownLivePreview.Session session, MarkdownLivePreview.Settings settings) {
+        string[] sources = { "- > a\n  > b\n- c", "1. > a\n   > b\n1. c", "- x\n  - > a\n    > b\n  - c", "- > ### 목록 안 인용 3단계 제목\n  > 목록 안 인용 본문.\n\n> - ##### 인용 안 목록 5단계 제목\n>   인용 안 목록 본문.\n", "- [ ] > a\n      > b\n- c" };
+        int[] firstLine = { 1, 1, 2, 1, 1 };
+        int[] markerAt = { 2, 3, 4, 2, 6 };
+        int[] textAt = { 4, 5, 6, -1, 8 };
+        bool previousHide = settings.HideMarkers;
+        foreach (bool hide in new[] { true, false }) {
+            settings.HideMarkers = hide;
+            session.Update(settings);
+            string mode = hide ? "basic" : "live";
+            for (int c = 0; c < sources.Length; c++) {
+                editor.Text = sources[c];
+                editor.Select(editor.Text.Length, 0);
+                Pump(editor);
+                MarkdownLivePreview.LineInfo head = session.Info(editor.Document.GetLineByNumber(firstLine[c]));
+                MarkdownLivePreview.LineInfo next = session.Info(editor.Document.GetLineByNumber(firstLine[c] + 1));
+                double headBar = ItemQuoteX(editor, firstLine[c], markerAt[c]), nextBar = ItemQuoteX(editor, firstLine[c] + 1, markerAt[c]);
+                bool barOk = headBar > 1 && Math.Abs(headBar - nextBar) <= 0.75;
+                double headText = textAt[c] < 0 ? 0 : ItemQuoteX(editor, firstLine[c], textAt[c]), nextText = textAt[c] < 0 ? 0 : ItemQuoteX(editor, firstLine[c] + 1, textAt[c]);
+                bool textOk = textAt[c] < 0 || Math.Abs(headText - nextText) <= 0.75;
+                MarkdownLivePreview.LineInfo after = session.Info(editor.Document.GetLineByNumber(firstLine[c] + 2));
+                bool listOk = c == 3 || (after.List != null && (c != 1 || after.List.Number == 2));
+                Check(ref all, report, "list quote " + mode + " case " + c + ": the second quote line sits in the item's quote",
+                    head.Quote && head.List != null && next.Quote && next.QuoteLevels == 1 && next.ItemList != null && next.List == null && barOk && textOk && listOk,
+                    "bar " + ItemQuoteN(headBar) + "/" + ItemQuoteN(nextBar) + " text " + ItemQuoteN(headText) + "/" + ItemQuoteN(nextText) + " itemList=" + (next.ItemList != null) + " nextList=" + (next.List != null) + " after.Number=" + (after.List == null ? "none" : after.List.Number.ToString(CultureInfo.InvariantCulture)));
+            }
+            // The second example of the report (a quote that holds a list) keeps its reading: no item quote.
+            editor.Text = sources[3];
+            Pump(editor);
+            MarkdownLivePreview.LineInfo quoteList = session.Info(editor.Document.GetLineByNumber(4));
+            MarkdownLivePreview.LineInfo quoteListBody = session.Info(editor.Document.GetLineByNumber(5));
+            Check(ref all, report, "list quote " + mode + ": a quote holding a list is unchanged",
+                quoteList.Quote && quoteList.List != null && quoteList.ItemList == null && quoteListBody.ItemList == null,
+                "list=" + (quoteList.List != null) + " item=" + (quoteList.ItemList != null) + "/" + (quoteListBody.ItemList != null));
+            // Not an item's quote: column 0, left of the content column, no item above, a list marker as the quote body.
+            string[] outside = { "- a\n> q", "1. a\n  > q", "a\n  > q", "- a\n  > - q" };
+            for (int o = 0; o < outside.Length; o++) {
+                editor.Text = outside[o];
+                Pump(editor);
+                MarkdownLivePreview.LineInfo second = session.Info(editor.Document.GetLineByNumber(2));
+                Check(ref all, report, "list quote " + mode + ": " + Flat(outside[o]) + " is not an item's quote", second.ItemList == null && second.Quote, "item=" + (second.ItemList != null) + " quote=" + second.Quote);
+            }
+            // The cache follows the item above: breaking the item's marker drops the second line's item, mending it brings it back.
+            editor.Text = "- > a\n  > b";
+            Pump(editor);
+            session.Info(editor.Document.GetLineByNumber(2));
+            editor.Document.Replace(0, 1, "x");
+            Pump(editor);
+            bool dropped = session.Info(editor.Document.GetLineByNumber(2)).ItemList == null;
+            editor.Document.Replace(0, 1, "-");
+            Pump(editor);
+            bool mended = session.Info(editor.Document.GetLineByNumber(2)).ItemList != null && editor.Text == "- > a\n  > b";
+            Check(ref all, report, "list quote " + mode + ": editing the item above updates the quote line below", dropped && mended, "dropped=" + dropped + " mended=" + mended);
+        }
+        settings.HideMarkers = previousHide;
+        session.Update(settings);
+        Pump(editor);
+    }
+
+    // "- > [!NOTE]" / "  > [!NOTE]" under an item open an alert inside the item and the item's later quote lines inherit it (the
+    // block cache's ItemQuote / ItemAlert state), while the same marker on a line right under another quote line of that item is
+    // plain text and any other line (blank, a new item, a paragraph) starts a quote of its own. "- a" / "  b" / "  ===" keeps the
+    // list open on all three lines, the "---" underline too (it used to end the list there as a thematic break).
+    static void ItemAlertChecks(ref bool all, StringBuilder report, SourceEditor editor, MarkdownLivePreview.Session session, MarkdownLivePreview.Settings settings) {
+        bool previousHide = settings.HideMarkers;
+        foreach (bool hide in new[] { true, false }) {
+            settings.HideMarkers = hide;
+            session.Update(settings);
+            string mode = hide ? "basic" : "live";
+            editor.Text = "- > [!NOTE]\n  > body\n- c\n  > plain";
+            editor.Select(editor.Text.Length, 0);
+            Pump(editor);
+            MarkdownLivePreview.LineInfo head = session.Info(editor.Document.GetLineByNumber(1));
+            MarkdownLivePreview.LineInfo body = session.Info(editor.Document.GetLineByNumber(2));
+            MarkdownLivePreview.LineInfo sibling = session.Info(editor.Document.GetLineByNumber(3));
+            MarkdownLivePreview.LineInfo own = session.Info(editor.Document.GetLineByNumber(4));
+            Check(ref all, report, "item alert " + mode + ": '- > [!NOTE]' then '  > body' is one alert in the item",
+                head.Alert == AlertKind.Note && head.AlertHead && body.Alert == AlertKind.Note && !body.AlertHead && body.ItemList != null && body.Quote &&
+                sibling.Alert == AlertKind.None && own.Alert == AlertKind.None && own.ItemList != null,
+                "head=" + head.Alert + "/" + head.AlertHead + " body=" + body.Alert + "/" + body.AlertHead + " item=" + (body.ItemList != null) + " sibling=" + sibling.Alert + " own=" + own.Alert);
+            editor.Text = "- a\n  > [!TIP]\n  > body\n  > > deeper";
+            editor.Select(editor.Text.Length, 0);
+            Pump(editor);
+            MarkdownLivePreview.LineInfo tip = session.Info(editor.Document.GetLineByNumber(2));
+            MarkdownLivePreview.LineInfo tipBody = session.Info(editor.Document.GetLineByNumber(3));
+            MarkdownLivePreview.LineInfo tipDeeper = session.Info(editor.Document.GetLineByNumber(4));
+            Check(ref all, report, "item alert " + mode + ": '  > [!TIP]' under a plain item opens an alert and the next quote lines inherit it",
+                tip.Alert == AlertKind.Tip && tip.AlertHead && tipBody.Alert == AlertKind.Tip && !tipBody.AlertHead && tipDeeper.Alert == AlertKind.Tip,
+                "tip=" + tip.Alert + "/" + tip.AlertHead + " body=" + tipBody.Alert + "/" + tipBody.AlertHead + " deeper=" + tipDeeper.Alert);
+            editor.Text = "- > x\n  > [!NOTE]\n  > y";
+            editor.Select(editor.Text.Length, 0);
+            Pump(editor);
+            MarkdownLivePreview.LineInfo joined = session.Info(editor.Document.GetLineByNumber(2));
+            MarkdownLivePreview.LineInfo joinedBody = session.Info(editor.Document.GetLineByNumber(3));
+            Check(ref all, report, "item alert " + mode + ": '[!NOTE]' joined to the item's open quote is plain text",
+                joined.Alert == AlertKind.None && !joined.AlertHead && joinedBody.Alert == AlertKind.None && joined.Quote && joined.ItemList != null,
+                "joined=" + joined.Alert + "/" + joined.AlertHead + " body=" + joinedBody.Alert);
+            editor.Text = "- > x\n\n  > [!NOTE]\n  > y";
+            editor.Select(editor.Text.Length, 0);
+            Pump(editor);
+            MarkdownLivePreview.LineInfo afterBlank = session.Info(editor.Document.GetLineByNumber(3));
+            MarkdownLivePreview.LineInfo afterBlankBody = session.Info(editor.Document.GetLineByNumber(4));
+            Check(ref all, report, "item alert " + mode + ": after a blank line '  > [!NOTE]' opens a quote of its own",
+                afterBlank.Alert == AlertKind.Note && afterBlank.AlertHead && afterBlankBody.Alert == AlertKind.Note,
+                "line3=" + afterBlank.Alert + "/" + afterBlank.AlertHead + " line4=" + afterBlankBody.Alert);
+            // Editing the marker line below updates the quote lines under it (the cache follows ItemAlert).
+            editor.Text = "- > x\n  > y";
+            editor.Select(editor.Text.Length, 0);
+            Pump(editor);
+            session.Info(editor.Document.GetLineByNumber(2));
+            editor.Document.Replace(4, 1, "[!NOTE]");
+            Pump(editor);
+            MarkdownLivePreview.LineInfo typed = session.Info(editor.Document.GetLineByNumber(1));
+            MarkdownLivePreview.LineInfo typedBody = session.Info(editor.Document.GetLineByNumber(2));
+            bool typedOk = typed.Alert == AlertKind.Note && typedBody.Alert == AlertKind.Note;
+            editor.Document.Replace(4, 7, "x");
+            Pump(editor);
+            bool typedBack = session.Info(editor.Document.GetLineByNumber(2)).Alert == AlertKind.None && session.Info(editor.Document.GetLineByNumber(1)).Alert == AlertKind.None;
+            Check(ref all, report, "item alert " + mode + ": typing and removing the marker on the item's first line recolours the line below", typedOk && typedBack,
+                "typed=" + typed.Alert + "/" + typedBody.Alert + " back=" + typedBack);
+            // A space typed strictly between the characters of a run that pairs with nothing ("**2." with no closer) lands before the
+            // run, like the space typed inside a real pair's opener: the run stays one run (FormatAbuseProbe f: "* *2." was left behind).
+            string[] lone = { "    1. **2. 둘째", "a __b", "~~ 취소선 없음" };
+            string[] loneWant = { "    1.  **2. 둘째", "a  __b", " ~~ 취소선 없음" };
+            int[] loneAt = { 8, 3, 1 };
+            int[] loneCaret = { 8, 3, 1 };
+            for (int s = 0; s < lone.Length; s++) {
+                editor.Text = lone[s];
+                editor.Select(loneAt[s], 0);
+                Pump(editor);
+                editor.TextArea.PerformTextInput(" ");
+                Pump(editor);
+                Check(ref all, report, "lone marker run " + mode + " case " + s + ": a space typed inside the run goes before it",
+                    editor.Document.Text == loneWant[s] && editor.CaretOffset == loneCaret[s],
+                    "text=[" + Flat(editor.Document.Text) + "] caret=" + editor.CaretOffset);
+            }
+            // A setext heading inside an item: the heading is line 2, its underline folds, and the list goes on.
+            string[] setext = { "- a\n  b\n  ===\n- c", "1. a\n   b\n   ---\n1. c" };
+            for (int s = 0; s < setext.Length; s++) {
+                editor.Text = setext[s];
+                editor.Select(editor.Text.Length, 0);
+                Pump(editor);
+                MarkdownLivePreview.LineInfo title = session.Info(editor.Document.GetLineByNumber(2));
+                MarkdownLivePreview.LineInfo underline = session.Info(editor.Document.GetLineByNumber(3));
+                MarkdownLivePreview.LineInfo next = session.Info(editor.Document.GetLineByNumber(4));
+                Check(ref all, report, "item setext " + mode + " case " + s + ": the heading line and its underline stay in the item and the list goes on",
+                    title.Setext && title.Heading > 0 && underline.SetextUnderline == title.Heading && next.List != null && next.List.Depth == 0 && (s == 0 || next.List.Number == 2),
+                    "setext=" + title.Setext + " heading=" + title.Heading + " underline=" + underline.SetextUnderline + " next=" + (next.List == null ? "none" : next.List.Depth + "/" + next.List.Number));
+            }
+        }
+        settings.HideMarkers = previousHide;
+        session.Update(settings);
+        Pump(editor);
+    }
+
     // The centre of a formatted table row's cell box must place the caret inside that cell;
     // the cell range and the placement are reported so a failure names both.
     static string TableCellClick(SourceEditor editor, MarkdownLivePreview.Session session, int number, int cell, out int placedAt) {
@@ -2492,22 +2821,31 @@ internal static class NoRevealProbe {
     // carries the text, and Paste runs through the command the editor itself binds.
     static void PasteCase(ref bool all, StringBuilder report, SourceEditor editor,
         string name, string text, int start, int length, string paste, string expected) {
-        editor.Text = text;
-        Pump(editor);
-        editor.Select(start, length);
-        editor.TextArea.Caret.Offset = start + length;
-        Pump(editor);
-        if (!SetClipboard(paste)) {
-            report.Append("FAIL ").Append(name).Append(": clipboard unavailable\n");
-            all = false;
-            return;
+        // The paste command reads the system clipboard once and gives up silently when another program holds it for a moment
+        // (AvalonEdit's OnPaste returns without inserting), so an untouched document is retried a few times with the clipboard set
+        // again; a paste the editor really refuses stays untouched on every attempt and still fails. The attempt count is reported.
+        string actual = null;
+        int attempts = 0;
+        for (; attempts < 4; attempts++) {
+            editor.Text = text;
+            Pump(editor);
+            editor.Select(start, length);
+            editor.TextArea.Caret.Offset = start + length;
+            Pump(editor);
+            if (!SetClipboard(paste)) {
+                report.Append("FAIL ").Append(name).Append(": clipboard unavailable\n");
+                all = false;
+                return;
+            }
+            try { ApplicationCommands.Paste.Execute(null, editor.TextArea); }
+            catch (Exception ex) { report.Append("FAIL ").Append(name).Append(" threw ").Append(ex.GetType().Name).Append('\n'); all = false; return; }
+            Pump(editor);
+            actual = editor.Document.Text;
+            if (actual != text || expected == text) break;
+            System.Threading.Thread.Sleep(150);
         }
-        try { ApplicationCommands.Paste.Execute(null, editor.TextArea); }
-        catch (Exception ex) { report.Append("FAIL ").Append(name).Append(" threw ").Append(ex.GetType().Name).Append('\n'); all = false; return; }
-        Pump(editor);
-        string actual = editor.Document.Text;
         bool ok = actual == expected;
-        report.Append(ok ? "PASS " : "FAIL ").Append(name).Append(": '").Append(text).Append("' -> '").Append(actual).Append("' expected '").Append(expected).Append("'\n");
+        report.Append(ok ? "PASS " : "FAIL ").Append(name).Append(": '").Append(text).Append("' -> '").Append(actual).Append("' expected '").Append(expected).Append(attempts > 0 ? "' (attempt " + Math.Min(attempts + 1, 4) + ")\n" : "'\n");
         if (!ok) all = false;
     }
 

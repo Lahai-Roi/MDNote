@@ -291,6 +291,9 @@ public partial class MainWindow {
         {"취소",new[]{"Cancel","キャンセル","取消","取消"}},
 {"HTML로 내보내기…",new[]{"Export as HTML…","HTMLとしてエクスポート…","导出为 HTML…","匯出為 HTML…"}},
 {"집중 모드",new[]{"Focus mode","フォーカスモード","专注模式","專注模式"}},
+{"제목 단계 표시",new[]{"Heading level marks","見出しレベルの表示","显示标题级别","顯示標題層級"}},
+{"슬래시 막대",new[]{"Slash bars","スラッシュバー","斜线条","斜線條"}},
+{"# 기호",new[]{"# symbols","# 記号","# 符号","# 符號"}},
 {"타자기 모드",new[]{"Typewriter mode","タイプライターモード","打字机模式","打字機模式"}},
 {"집중 모드: 끄기",new[]{"Off","オフ","关闭","關閉"}},
 {"집중 모드: 문단",new[]{"Paragraph","段落","段落","段落"}},
@@ -386,7 +389,7 @@ public partial class MainWindow {
     string T(string key){return TranslatedText(language,key);}
     /* Stateless lookup for a caller with no window: the second instance reports a failed file forward
        (DocumentActivation.Run) before any MainWindow exists. Same rules as T. */
-    internal static string TranslatedText(string code,string key){if(key.StartsWith("제목 ",StringComparison.Ordinal))return TranslatedText(code,"제목")+key.Substring(2).Replace("적용",TranslatedText(code,"적용"));if(key.Contains(" · ")){int split=key.IndexOf(" · ",StringComparison.Ordinal);return TranslatedText(code,key.Substring(0,split))+key.Substring(split);}int index=Array.IndexOf(languageCodes,code)-1;string[] values;return index>=0&&translations.TryGetValue(key,out values)?values[index]:key;}
+    internal static string TranslatedText(string code,string key){int exact=Array.IndexOf(languageCodes,code)-1;string[] whole;if(exact>=0&&translations.TryGetValue(key,out whole))return whole[exact];/* a whole key first: "제목 단계 표시" must not become "Heading 단계 표시" */if(key.StartsWith("제목 ",StringComparison.Ordinal))return TranslatedText(code,"제목")+key.Substring(2).Replace("적용",TranslatedText(code,"적용"));if(key.Contains(" · ")){int split=key.IndexOf(" · ",StringComparison.Ordinal);return TranslatedText(code,key.Substring(0,split))+key.Substring(split);}int index=Array.IndexOf(languageCodes,code)-1;string[] values;return index>=0&&translations.TryGetValue(key,out values)?values[index]:key;}
     internal static string SavedLanguage(){try{bool unreadable;return ViewPreferences.Load(PreferencesPath,out unreadable).Language;}catch(Exception){return "ko";}}
     void BuildLanguages(Menu menu,MenuItem help){
         var languages=new MenuItem {Header="언어"};menu.Items.Insert(menu.Items.IndexOf(help),languages);

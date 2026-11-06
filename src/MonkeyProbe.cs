@@ -176,6 +176,7 @@ internal static class MonkeyProbe {
         string surface = "(not opened)";
         string finalText = "";
         int actions = 0, undoChecks = 0, deepestUndo = 0;
+        long foldGuards = MarkdownLivePreview.DiagFoldGuards, foldRecoveries = MarkdownLivePreview.DiagFoldRecoveries;
         currentSeed = seed;
         currentStep = 0;
         currentAction = "seed " + seed.ToString(CultureInfo.InvariantCulture);
@@ -204,6 +205,11 @@ internal static class MonkeyProbe {
             Invoke(window, "FlushDocumentChanges");
             string text = Prop<string>(window, "text");
             finalText = text == null ? "" : text;
+            // The fold repairs (visual line guard, layout recovery) keep the app from crashing, but a run
+            // that needed one still has a hole in the fold bookkeeping: report it instead of hiding it.
+            if (MarkdownLivePreview.DiagFoldGuards != foldGuards || MarkdownLivePreview.DiagFoldRecoveries != foldRecoveries)
+                AddFailure(failures, actions, "fold.guard", "a collapsed-line repair ran: guards=" + (MarkdownLivePreview.DiagFoldGuards - foldGuards) +
+                    ", recoveries=" + (MarkdownLivePreview.DiagFoldRecoveries - foldRecoveries));
         } catch (Exception ex) {
             AddFailure(failures, actions, "seed", OneLine(ex.ToString()));
         } finally {
@@ -528,7 +534,17 @@ internal static class MonkeyProbe {
         int offset = Math.Max(0, Math.Min(source.CaretIndex, document.TextLength));
         DocumentLine line = document.GetLineByOffset(offset);
         if (session.Raw(line)) {
-            AddFailure(failures, step, "invariant:reveal", "the caret line draws raw markup in the Basic view");
+            // Two documented exceptions draw source in the Basic view: a display-math block under the
+            // caret or a broken one (2.2.0 rule), and the caret's own unclosed opening fence
+            // (EditableFence, 11-05). Anything else is a stale caret line.
+            MarkdownLivePreview.LineInfo rawInfo = session.Info(line);
+            bool math = rawInfo != null && (rawInfo.MathCount > 0 || rawInfo.MathRemaining > 0 || rawInfo.MathOne);
+            bool editableFence = session.EditableFence(line);
+            if (!math && !editableFence) {
+                AddFailure(failures, step, "invariant:reveal", "the caret line " + line.LineNumber + " draws raw markup in the Basic view: [" + OneLine(document.GetText(line)) + "]" +
+                    (rawInfo == null ? " (no line info)" : " fenceLine=" + rawInfo.FenceLine + " table=" + rawInfo.Table + " code=" + rawInfo.Code +
+                    " mathCount=" + rawInfo.MathCount + " mathRemaining=" + rawInfo.MathRemaining + " mathOne=" + rawInfo.MathOne));
+            }
             return;
         }
         MarkdownLivePreview.LineInfo info = session.Info(line);
@@ -572,12 +588,17 @@ internal static class MonkeyProbe {
             int undoSteps = 0, stalls = 0;
             string previous = beforeUndo;
             while (history.CanUndo && undoSteps < UndoCap) {
+                // A mode step (the TXT toggle's own entry) flips the text mode and may leave the
+                // text as it was: the app keeps it as a step of its own on purpose, so it is
+                // progress, not a stall. Only an ordinary entry that applies nothing is one.
+                bool modeStep = history.UndoMode.HasValue;
+                string top = DescribeTopEntry(history, false);
                 Invoke(window, "Undo");
                 undoSteps++;
                 string now = Prop<string>(window, "text");
-                if (String.Equals(now, previous, StringComparison.Ordinal)) {
+                if (!modeStep && String.Equals(now, previous, StringComparison.Ordinal)) {
                     stalls++;
-                    if (stalls >= 3) { AddFailure(failures, step, "undo.stall", "undo did not change the text " + stalls + " times at step " + undoSteps); break; }
+                    if (stalls >= 3) { AddFailure(failures, step, "undo.stall", "undo did not change the text " + stalls + " times at step " + undoSteps + "; top entry " + top + ", can undo=" + history.CanUndo); break; }
                 } else stalls = 0;
                 previous = now;
             }
@@ -587,12 +608,14 @@ internal static class MonkeyProbe {
             stalls = 0;
             string beforeRedo = undone;
             while (redoSteps < undoSteps && redoSteps < UndoCap) {
+                bool modeStep = history.RedoMode.HasValue;
+                string top = DescribeTopEntry(history, true);
                 Invoke(window, "Redo");
                 redoSteps++;
                 string now = Prop<string>(window, "text");
-                if (String.Equals(now, beforeRedo, StringComparison.Ordinal)) {
+                if (!modeStep && String.Equals(now, beforeRedo, StringComparison.Ordinal)) {
                     stalls++;
-                    if (stalls >= 3) { AddFailure(failures, step, "redo.stall", "redo did not change the text " + stalls + " times at step " + redoSteps); break; }
+                    if (stalls >= 3) { AddFailure(failures, step, "redo.stall", "redo did not change the text " + stalls + " times at step " + redoSteps + "; top entry " + top + ", can redo=" + history.CanRedo); break; }
                 } else stalls = 0;
                 beforeRedo = now;
             }
@@ -606,6 +629,21 @@ internal static class MonkeyProbe {
         } catch (Exception ex) {
             AddFailure(failures, step, "undo.exception", OneLine(ex.ToString()));
         }
+    }
+    // The newest entry of the undo (or redo) stack as a short text, so a stall names what the history
+    // kept: a mode step, a compound entry or a plain replacement of the given lengths.
+    static string DescribeTopEntry(DocumentHistory history, bool redo) {
+        try {
+            FieldInfo field = typeof(DocumentHistory).GetField(redo ? "redo" : "undo", BindingFlags.Instance | BindingFlags.NonPublic);
+            System.Collections.IList list = field == null ? null : field.GetValue(history) as System.Collections.IList;
+            if (list == null || list.Count == 0) return "(empty)";
+            DocumentHistory.Edit edit = list[list.Count - 1] as DocumentHistory.Edit;
+            if (edit == null) return "(unknown)";
+            if (edit.BeforeMode.HasValue || edit.AfterMode.HasValue) return "mode";
+            if (edit.Parts != null) return "parts=" + edit.Parts.Count;
+            return "text at=" + edit.At + " removed=" + (edit.Removed == null ? -1 : edit.Removed.Length) + " inserted=" + (edit.Inserted == null ? -1 : edit.Inserted.Length) +
+                (edit.Removed != null && String.Equals(edit.Removed, edit.Inserted, StringComparison.Ordinal) ? " (same text)" : "");
+        } catch (Exception) { return "(unreadable)"; }
     }
     // ---------------------------------------------------------------- failure and report helpers
     static void CapturePreAction(MainWindow window) {

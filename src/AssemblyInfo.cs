@@ -1,7 +1,7 @@
 ﻿using System.Reflection;
 [assembly: AssemblyTitle("MDNote")]
 [assembly: AssemblyProduct("MDNote")]
-[assembly: AssemblyVersion("2.2.1.0")]
-[assembly: AssemblyFileVersion("2.2.1.0")]
-[assembly: AssemblyInformationalVersion("2.2.1")]
+[assembly: AssemblyVersion("2.3.0.0")]
+[assembly: AssemblyFileVersion("2.3.0.0")]
+[assembly: AssemblyInformationalVersion("2.3.0")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Lahai-Roi(shs7034)")]
