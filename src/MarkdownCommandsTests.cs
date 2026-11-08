@@ -441,6 +441,34 @@ internal static class MarkdownCommandsProbe {
         Add(cases, "bold multi-line CRLF removes", "«**a**\r\n**b**»", "«a\r\nb»", Inline("**"));
         Add(cases, "bold inside fence returns null", "```\n«x»\n```", null, Inline("**"));
 
+        // ToggleInline on a whole link: a style already active in the label is removed (pair and
+        // all) instead of wrapped again; otherwise the link is wrapped and the label's own pairs
+        // of that style go, so the two never nest.
+        Add(cases, "bold caret in a bold link label removes the pair", "m [**a‸b**](#x) n", "m [a‸b](#x) n", Inline("**"));
+        Add(cases, "italic caret in an italic link label removes the pair", "m [*a‸b*](#x) n", "m [a‸b](#x) n", Inline("*"));
+        Add(cases, "bold caret in a bold link label keeps a span", "m [**<span style=\"color:#FF0000\">a‸b</span>**](#x) n",
+            "m [<span style=\"color:#FF0000\">a‸b</span>](#x) n", Inline("**"));
+        Add(cases, "bold caret on a bold word edge in a link label removes the pair", "m [a **b‸** c](#x) n", "m [a b‸ c](#x) n", Inline("**"));
+        Add(cases, "bold caret on a plain word wraps the link and drops inner pairs", "m [‸a **b** c](#x) n", "m **«[a b c](#x)»** n", Inline("**"));
+        Add(cases, "italic keeps an inner bold pair when wrapping the link", "m [‸a **b** c](#x) n", "m *«[a **b** c](#x)»* n", Inline("*"));
+        Add(cases, "bold on an outer-bold link with a bold label removes both", "m **[**a‸b**](#x)** n", "m [a‸b](#x) n", Inline("**"));
+        Add(cases, "bold selection of the text of a bold link label removes the pair", "m [**«ab»**](#x) n", "m [«ab»](#x) n", Inline("**"));
+        // A selection that covers the pair's own markers (all of them or one side) is still inside
+        // that styled pair, so the style comes off instead of wrapping the link a second time.
+        Add(cases, "bold selection with its stars in a bold link label removes the pair", "m [«**ab**»](#x) n", "m [«ab»](#x) n", Inline("**"));
+        Add(cases, "italic selection with its stars in an italic link label removes the pair", "m [«*ab*»](#x) n", "m [«ab»](#x) n", Inline("*"));
+        Add(cases, "bold selection with only the opening stars removes the pair", "m [«**ab»**](#x) n", "m [«ab»](#x) n", Inline("**"));
+        Add(cases, "bold selection with only the closing stars removes the pair", "m [**a«b**»](#x) n", "m [a«b»](#x) n", Inline("**"));
+        // A caret on a space or punctuation in the label (no word character beside it) stays a
+        // plain caret after the link is wrapped or unwrapped, like the caret inside a word.
+        Add(cases, "bold caret on a label space wraps the link and keeps a plain caret", "m [**a**‸ - b](#x) n", "m **[a‸ - b](#x)** n", Inline("**"));
+        Add(cases, "bold caret on a label dash wraps the link and keeps a plain caret", "m [**a** ‸- b](#x) n", "m **[a ‸- b](#x)** n", Inline("**"));
+        Add(cases, "bold caret on a label dash of an outer-bold link removes both and keeps a plain caret", "m **[**a** ‸- b](#x)** n", "m [a ‸- b](#x) n", Inline("**"));
+        Add(cases, "bold caret in a bold link label in a table cell removes the pair",
+            "| h | h | h |\n|---|---|---|\n| l | m [**a‸b**](#x) n | r |", "| h | h | h |\n|---|---|---|\n| l | m [a‸b](#x) n | r |", Inline("**"));
+        Add(cases, "bold caret on a plain link word in a table cell wraps the link",
+            "| h | h | h |\n|---|---|---|\n| l | m [‸a **b** c](#x) n | r |", "| h | h | h |\n|---|---|---|\n| l | m **«[a b c](#x)»** n | r |", Inline("**"));
+
         // ToggleInline: a caret-only toggle at an edge arms the style for the text typed next
         // (no empty pair in the source), and an inside-word toggle keeps the word but never
         // leaves it selected (Hangul input).
@@ -499,6 +527,11 @@ internal static class MarkdownCommandsProbe {
         Add(cases, "code removes single fence", "`«x»`", "«x»", Inline("`"));
         Add(cases, "code removes long fence with padding", "`` «a`b» ``", "«a`b»", Inline("`"));
         Add(cases, "code removes long fence selected whole", "«`` a`b ``»", "«a`b»", Inline("`"));
+        // 11-08 user video: "`코드`" pasted from a page whose code showed the backticks ("`` `코드` ``"), then the code button on it split the markers.
+        Add(cases, "code removes a long fence around backticked text (visible text selected)", "`` «`코드`» ``", "«`코드`»", Inline("`"));
+        Add(cases, "code removes a long fence around backticked text (selected whole)", "«`` `코드` ``»", "«`코드`»", Inline("`"));
+        Add(cases, "code removes a long fence around backticked text (word inside selected)", "`` `«코드»` ``", "«`코드`»", Inline("`"));
+        Add(cases, "code twice on backticked text comes back", "«`코드`»", "`«코드»`", Inline("`"), 2);
         AddArm(cases, "code caret with no word arms the style", "‸", "`", "`", Inline("`"));
         AddArm(cases, "code caret with no word wraps the first input", "‸", "`", "`", "x", "`x‸`", Inline("`"));
         AddArm(cases, "code caret at word end wraps the first input", "가나다‸", "`", "`", "a", "가나다`a‸`", Inline("`"));

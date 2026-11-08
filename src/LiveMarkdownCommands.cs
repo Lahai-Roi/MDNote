@@ -47,7 +47,7 @@ public partial class MainWindow {
             return source.SelectionLength==0&&source.SelectionStart==typingAt;
         }
     }
-    void ClearTypingStyle(){typingOpen=null;typingClose=null;typingMarker=null;typingAt=-1;typingDocument=null;typingVersion=null;UnhookTypingStyleCaret();}
+    void ClearTypingStyle(){typingOpen=null;typingClose=null;typingMarker=null;typingAt=-1;typingDocument=null;typingVersion=null;UnhookTypingStyleCaret();if(source!=null)source.TextArea.Caret.Refresh();}
     // Arming the same pair again on a live arm is the toggle being switched off before any input.
     void ArmTypingStyle(CommandResult result){
         if(TypingStyleArmed&&String.Equals(typingOpen,result.TypingOpen,StringComparison.Ordinal)&&String.Equals(typingClose,result.TypingClose,StringComparison.Ordinal)){ClearTypingStyle();return;}
@@ -55,6 +55,30 @@ public partial class MainWindow {
         typingAt=Math.Max(0,Math.Min(result.SelectionStart,source.Document.TextLength));
         typingDocument=source.Document;typingVersion=source.Document.Version;
         HookTypingStyleCaret();
+        source.PendingImeStyle=PendingImeStyleNow;
+        // 11-08 user: a size picked before typing left the caret at the old height until the first syllable composed.
+        source.TextArea.Caret.PendingEmSize=PendingTypingSize;source.TextArea.Caret.Refresh();
+    }
+    // 11-08 user: a syllable composed right after B / I / S / code / colour was drawn plain until it committed (the pair is written with the commit).
+    // The armed style for the composition string, read from the same marker and opening tag the commit writes; null when nothing is armed.
+    ImePendingStyle PendingImeStyleNow(){
+        if(!TypingStyleArmed||typingOpen==null)return null;
+        var style=new ImePendingStyle();
+        if(typingMarker=="**")style.Bold=true;
+        else if(typingMarker=="*")style.Italic=true;
+        else if(typingMarker=="~~")style.Strike=true;
+        else if(typingMarker=="`")style.Code=true;
+        style.Size=PendingTypingSize();
+        const string colorPrefix="color:";
+        int at=typingOpen.IndexOf(colorPrefix,StringComparison.OrdinalIgnoreCase);
+        if(at>=0){
+            int start=at+colorPrefix.Length,end=start;
+            while(end<typingOpen.Length&&typingOpen[end]!=';'&&typingOpen[end]!='"'&&typingOpen[end]!='\'')end++;
+            try{var brush=new BrushConverter().ConvertFromString(typingOpen.Substring(start,end-start).Trim()) as Brush;if(brush!=null){brush.Freeze();style.Color=brush;}}catch(FormatException){}catch(NotSupportedException){}
+        }
+        if(style.Code){style.CodeFamily=MarkdownLivePreview.InlineCodeFamily;if(LivePreviewAttached)style.CodeBackground=livePreview.Colors.InlineCode;}
+        if(!style.Bold&&!style.Italic&&!style.Strike&&!style.Code&&style.Color==null&&style.Size<=0)return null;
+        return style;
     }
     // A caret that leaves the armed spot (a click, Home/End, an arrow, a selection) cancels the
     // style at once, like Word; the offset alone cannot tell that the caret came back, so the
@@ -198,9 +222,13 @@ public partial class MainWindow {
            selection before it inserts. When the snap moved a caret that is a valid position in the
            cell's own text, put it back so the paste lands on the spot the user's caret was on. */
         int pasteStart=source.SelectionStart,pasteLength=source.SelectionLength;
-        /* Ctrl+V does not go through ApplicationCommands.Paste, so the hidden-marker widening runs here: a paste over a selection that cuts a hidden marker takes whole pairs. */
-        if(LivePreviewAttached&&livePreview!=null)livePreview.PrepareHiddenPaste();
-        if(pasteLength==0&&source.SelectionLength==0&&source.SelectionStart!=pasteStart&&CaretInCellText(source.Document,pasteStart))source.Select(pasteStart,0);
+        /* Ctrl+V does not go through ApplicationCommands.Paste, so the hidden-marker step runs here: an endpoint inside a marker moves to its edge. The pairs the selection cuts are not widened any more (2.3.1 D1); the markers it cut off are written back with the paste (RebalancedReplace). */
+        if(LivePreviewAttached&&livePreview!=null)livePreview.PrepareHiddenPasteSelection();
+        /* 2.3.1: a caret on a closing run's outer edge pastes like the paragraph does, inside the pair (the snap above), cell or not: a text put between two stacked closers broke "_" pairs and drew bold-italic after the pair. Any other snapped caret that is a valid cell position still goes back. */
+        bool snappedInCell=pasteLength==0&&source.SelectionLength==0&&source.SelectionStart!=pasteStart&&CaretInCellText(source.Document,pasteStart);
+        if(snappedInCell&&!PasteOnCloserEdge(pasteStart))source.Select(pasteStart,0);
+        /* A paragraph follows the same closing-backtick exception (HANDOFF: after the closing backtick is outside code): the snap moved the caret into the span, so it goes back. */
+        else if(!snappedInCell&&pasteLength==0&&source.SelectionLength==0&&source.SelectionStart!=pasteStart&&PasteAfterClosingBacktick(pasteStart))source.Select(pasteStart,0);
         string markdown=plain?null:MarkdownClipboard.Get(data);
         if(markdown!=null)markdown=NormalizeLineEndings(markdown,documentNewline);
         bool code=LivePreviewAttached&&livePreview.InCode(source.SelectionStart);
@@ -239,6 +267,8 @@ public partial class MainWindow {
         else if(markdown==null)markdown=value==null?null:NormalizeLineEndings(value,documentNewline);
         else markdown=NormalizeLineEndings(markdown,documentNewline);
         if(markdown==null)return true;
+        /* A pasted text that is one complete span of its own ("**`a`**", "`a`") is not a character typed next to a closer: in a cell it goes where the caret was (the cell text's end after the closer), as its own span, like the "`a`X" exemption above. The snap into the pair would make StripEnclosingStyles drop its markers and merge it into the old pair. Plain text and partial markup keep the snap. */
+        if(snappedInCell&&!code&&source.SelectionLength==0&&source.SelectionStart!=pasteStart&&PasteIsOwnSpan(markdown))source.Select(pasteStart,0);
         // A selection that covers whole tables is ordinary text: the paste replaces the whole block
         // below (pipes included) instead of landing in its first cell.
         bool wholeTables=LivePreviewAttached&&source.SelectionLength>0&&MarkdownTableCommands.SelectionCoversWholeTables(source.Document,source.SelectionStart,source.SelectionLength);
@@ -260,11 +290,13 @@ public partial class MainWindow {
         // would rewrite or remove the row and end the table, so the paste is swallowed. The
         // caret-only case above moves into the header's last cell instead of refusing the paste.
         if(LivePreviewAttached&&!wholeTables&&SelectionTouchesDelimiter())return true;
+        /* 2.3.1: a formatted paste lands inside the caret line's emphasis pairs; the markers of the kinds that already enclose it would collide with the pair's own, so they are dropped from the pasted text (both views, point and selection, table cells too). */
+        if(!plain&&!code)markdown=StripEnclosingStyles(markdown,source.SelectionStart);
         // Stage 4: pasting into a table cell follows the basic view - the pasted lines become the
         // cell's paragraphs, saved as "<br>", and a cell-spanning selection keeps the "|"s.
         if(LivePreviewAttached&&!wholeTables){
             CommandResult cell=MarkdownTableCommands.PasteInCell(source.Document,source.SelectionStart,source.SelectionLength,markdown,PasteRowCells(source.Document,source.SelectionStart));
-            if(cell!=null){ApplyCommandResult(cell);source.Focus();return true;}
+            if(cell!=null){ApplyCommandResult(RebalancedCellPaste(cell));source.Focus();return true;}
             // fix13: a paste on the blank separator line under a table row (or above a header row)
             // would join the table the way typed text would, so it writes the same newline; the
             // paste and the newline are one command, hence one undo step.
@@ -286,8 +318,171 @@ public partial class MainWindow {
             CommandResult belowTable=PasteBelowTable(markdown);
             if(belowTable!=null){ApplyCommandResult(belowTable);source.Focus();return true;}
         }
+        /* 2.3.1 D1: a paste over a selection that cut a hidden marker writes the markers back next to the pasted text, in the same command result (one undo step). */
+        /* The history entry keeps the selection the paste replaced, so one Ctrl+Z puts the text and the selection back like the plain replacement below. */
+        int balancedSelectionStart=source.SelectionStart,balancedSelectionLength=source.SelectionLength;
+        CommandResult balanced=RebalancedReplace(markdown);
+        if(balanced!=null){ApplyCommandResult(balanced,balancedSelectionStart,balancedSelectionLength);source.Focus();return true;}
         int at=source.SelectionStart;source.SelectedText=markdown;source.Select(at+markdown.Length,0);source.Focus();
         return true;
+    }
+    // The same rule as the toolbar's "inner same style of a link label is removed": a paste that lands
+    // inside bold, italic or strike pairs of the caret line (the caret, or the start of a selection) does
+    // not repeat those kinds, because "**번**굵게**글자**" closes the outer pair early and pairs the stars
+    // wrongly. Only the markers MarkdownLivePreview.ParseInlineText pairs in the pasted FIRST line are
+    // dropped; its other styles and literal stars stay. A later pasted line cannot join the caret line's
+    // pairs (a pair never crosses a line), so lines after the first are left alone. O(caret line + first
+    // pasted line), from the line cache.
+    string StripEnclosingStyles(string markdown,int at){
+        if(String.IsNullOrEmpty(markdown)||!LivePreviewAttached||livePreview==null||source==null||source.Document==null)return markdown;
+        var document=source.Document;
+        if(at<0||at>document.TextLength)return markdown;
+        int stop=markdown.IndexOfAny(new char[]{'\r','\n'});
+        string head=stop<0?markdown:markdown.Substring(0,stop);
+        if(head.IndexOfAny(new char[]{'*','_','~'})<0)return markdown;
+        var line=document.GetLineByOffset(at);
+        var info=livePreview.Info(line);
+        if(info==null||info.Text==null||info.Text.Length!=line.Length||info.Code||info.FenceLine||info.Delimiter||info.SetextUnderline>0)return markdown;
+        bool selected=source.SelectionLength>0;
+        /* A selection that leaves a table row is not one cell's text: the cell rules own that paste. */
+        if(selected&&info.Table&&source.SelectionStart+source.SelectionLength>line.EndOffset)return markdown;
+        int relative=at-line.Offset;
+        bool bold=false,italic=false,strike=false;
+        foreach(MarkdownInlineSpans.Span span in MarkdownInlineSpans.Build(info,info.Text)){
+            if(span.Kind!=MarkdownInlineSpans.SpanKind.Emphasis)continue;
+            /* Inside the pair: after its opener and before its closer; a selection that starts on the closer replaces the closer's side, not the pair's text. */
+            if(relative<span.OpenStart+span.OpenLen||relative>span.CloseStart||(selected&&relative==span.CloseStart))continue;
+            if(span.OpenText=="**"||span.OpenText=="__")bold=true;
+            else if(span.OpenText=="*"||span.OpenText=="_")italic=true;
+            else if(span.OpenText=="~~")strike=true;
+        }
+        if(!bold&&!italic&&!strike)return markdown;
+        string stripped=StripPastedPairs(head,bold,italic,strike);
+        return String.Equals(stripped,head,StringComparison.Ordinal)?markdown:stripped+markdown.Substring(head.Length);
+    }
+    // One pasted line without the markers of the pairs it parses as, for the kinds asked. The result must
+    // still parse as the other pairs (same count); if removing the markers re-pairs the rest, the line is
+    // returned unchanged.
+    static string StripPastedPairs(string pasted,bool bold,bool italic,bool strike){
+        MarkdownLivePreview.LineInfo parsed=MarkdownLivePreview.ParseInlineText(pasted,false);
+        var drop=new bool[pasted.Length];
+        var kept=new List<MarkdownInlineSpans.Span>();
+        int removed=0;
+        foreach(MarkdownInlineSpans.Span span in MarkdownInlineSpans.Build(parsed,pasted)){
+            if(span.Kind!=MarkdownInlineSpans.SpanKind.Emphasis)continue;
+            string open=span.OpenText;
+            bool same=(bold&&(open=="**"||open=="__"))||(italic&&(open=="*"||open=="_"))||(strike&&open=="~~");
+            if(!same||span.OpenStart<0||span.CloseStart<0||span.OpenStart+span.OpenLen>pasted.Length||span.CloseStart+span.CloseLen>pasted.Length){kept.Add(span);continue;}
+            for(int i=0;i<span.OpenLen;i++)drop[span.OpenStart+i]=true;
+            for(int i=0;i<span.CloseLen;i++)drop[span.CloseStart+i]=true;
+            removed++;
+        }
+        if(removed==0)return pasted;
+        var result=new System.Text.StringBuilder(pasted.Length);
+        var shift=new int[pasted.Length+1];
+        for(int i=0;i<pasted.Length;i++){shift[i]=result.Length;if(!drop[i])result.Append(pasted[i]);}
+        shift[pasted.Length]=result.Length;
+        string text=result.ToString();
+        /* The other pairs must survive as the same pairs (same markers at the shifted offsets), not just as many: "**_a** *b_c*" without the bold re-pairs "_a *b_" and loses "*b_c*". */
+        var after=new List<MarkdownInlineSpans.Span>();
+        foreach(MarkdownInlineSpans.Span span in MarkdownInlineSpans.Build(MarkdownLivePreview.ParseInlineText(text,false),text))if(span.Kind==MarkdownInlineSpans.SpanKind.Emphasis)after.Add(span);
+        if(after.Count!=kept.Count)return pasted;
+        foreach(MarkdownInlineSpans.Span span in kept){
+            if(span.OpenStart<0||span.CloseStart<0||span.OpenStart>pasted.Length||span.CloseStart>pasted.Length)return pasted;
+            bool found=false;
+            foreach(MarkdownInlineSpans.Span now in after)if(now.OpenText==span.OpenText&&now.OpenStart==shift[span.OpenStart]&&now.CloseStart==shift[span.CloseStart]){found=true;break;}
+            if(!found)return pasted;
+        }
+        return text;
+    }
+    // True when the pasted text is one line that is a complete span of its own: its first characters are an
+    // opening marker and the parser pairs it with the closing marker that ends the text ("**`a`**", "*x*",
+    // "`a`"). Text with unpaired markers, plain text and several lines answer false. O(pasted line).
+    static bool PasteIsOwnSpan(string markdown){
+        if(String.IsNullOrEmpty(markdown)||markdown.Length>4096||markdown.IndexOfAny(new char[]{'\r','\n'})>=0)return false;
+        char first=markdown[0];
+        if(first!='*'&&first!='_'&&first!='~'&&first!='`')return false;
+        MarkdownLivePreview.LineInfo parsed=MarkdownLivePreview.ParseInlineText(markdown,false);
+        foreach(MarkdownInlineSpans.Span span in MarkdownInlineSpans.Build(parsed,markdown)){
+            if(span.Kind!=MarkdownInlineSpans.SpanKind.Emphasis&&span.Kind!=MarkdownInlineSpans.SpanKind.Code)continue;
+            if(span.OpenStart==0&&span.CloseStart>0&&span.CloseStart+span.CloseLen==markdown.Length)return true;
+        }
+        return false;
+    }
+    // A paste at a caret as one command result, only when it would leave an underscore pair against
+    // a word character (MarkdownLivePreview.PlanInsertRepair rewrites that pair with "*"). Null otherwise.
+    CommandResult RepairedInsert(int at,string markdown){
+        if(!LivePreviewAttached||livePreview==null||String.IsNullOrEmpty(markdown))return null;
+        int editStart,editLength,caret;string editText;
+        if(!livePreview.PlanInsertRepair(at,markdown,out editStart,out editLength,out editText,out caret))return null;
+        CommandResult result=new CommandResult();
+        if(editLength>0||editText.Length>0)result.Add(editStart,editLength,editText);
+        result.SelectionStart=caret;
+        result.SelectionLength=0;
+        return result;
+    }
+    // True when the offset lies right after a hidden closing backtick run (an inline code span's end).
+    bool PasteAfterClosingBacktick(int offset){
+        if(!LivePreviewAttached||livePreview==null||source==null||source.Document==null)return false;
+        var document=source.Document;
+        offset=Math.Max(0,Math.Min(offset,document.TextLength));
+        var line=document.GetLineByOffset(offset);
+        var info=livePreview.Info(line);
+        if(info==null||info.Text==null)return false;
+        int inside=MarkdownLivePreview.Session.HiddenCloseInside(info,offset-line.Offset);
+        return inside>=0&&inside<info.Text.Length&&info.Text[inside]=='`';
+    }
+    // True when the offset lies on a hidden closing run (the spot SnapInsertOffset moves inside the pair).
+    bool PasteOnCloserEdge(int offset){
+        if(!LivePreviewAttached||livePreview==null||source==null||source.Document==null)return false;
+        var document=source.Document;
+        offset=Math.Max(0,Math.Min(offset,document.TextLength));
+        var line=document.GetLineByOffset(offset);
+        var info=livePreview.Info(line);
+        if(info==null||info.Text==null)return false;
+        int inside=MarkdownLivePreview.Session.HiddenCloseInside(info,offset-line.Offset);
+        if(inside<0)return false;
+        /* A closing backtick run is the user's own "code ends here": text pasted after it stays outside the span (TableCaretProbe cell paste, "`a`X"). */
+        return !(inside<info.Text.Length&&info.Text[inside]=='`');
+    }
+    // The paste as one command result: the replaced selection, the restored markers and the caret
+    // after the pasted text (MarkdownLivePreview.PlanSelectionReplace). Null when there is no
+    // selection or the rule does not apply (live view, code, table selection across cells), so the
+    // ordinary replacement runs.
+    CommandResult RebalancedReplace(string markdown){
+        if(!LivePreviewAttached||livePreview==null||source==null||markdown==null)return null;
+        if(source.SelectionLength<=0)return RepairedInsert(source.SelectionStart,markdown);
+        int editStart,editLength,caret;string editText;
+        int selectionStart=source.SelectionStart;
+        if(!livePreview.PlanSelectionReplace(selectionStart,selectionStart+source.SelectionLength,markdown,out editStart,out editLength,out editText,out caret))return null;
+        CommandResult result=new CommandResult();
+        if(editLength>0||editText.Length>0)result.Add(editStart,editLength,editText);
+        result.SelectionStart=caret;
+        result.SelectionLength=0;
+        return result;
+    }
+    // A paste inside one table cell is the cell command's single replacement of the selection;
+    // the markers that selection cut off are written back through the same plan (the result keeps
+    // the cell command's own text, so pipes and <br> are already escaped). Any other shape of cell
+    // result (a selection across cells, several edits) is applied as the cell command made it.
+    CommandResult RebalancedCellPaste(CommandResult cell){
+        if(cell==null||!LivePreviewAttached||livePreview==null||source==null)return cell;
+        if(cell.Edits.Count!=1)return cell;
+        SourceEdit edit=cell.Edits[0];
+        if(source.SelectionLength<=0){
+            // A point paste in a cell: only an underscore pair the text would break changes the edit.
+            if(edit.Length!=0||edit.Text==null)return cell;
+            CommandResult point=RepairedInsert(edit.Offset,edit.Text);
+            return point==null?cell:point;
+        }
+        if(edit.Offset!=source.SelectionStart||edit.Length!=source.SelectionLength||edit.Text==null)return cell;
+        int editStart,editLength,caret;string editText;
+        if(!livePreview.PlanSelectionReplace(edit.Offset,edit.Offset+edit.Length,edit.Text,out editStart,out editLength,out editText,out caret))return cell;
+        CommandResult result=new CommandResult();
+        if(editLength>0||editText.Length>0)result.Add(editStart,editLength,editText);
+        result.SelectionStart=caret;
+        result.SelectionLength=0;
+        return result;
     }
     // The paste side of the line-under-a-table rule (TableGapMode keeps the blank separator for
     // typed text): text whose first line has a pipe written directly on the line under the last
@@ -432,7 +627,9 @@ public partial class MainWindow {
             if(table!=null)return table;
             // Stage 4: Enter/Shift+Enter inside a cell is the basic view's paragraph break, saved
             // as "<br>", never a new source line that would split the table row.
-            CommandResult cell=MarkdownTableCommands.EnterInCell(source.Document,source.SelectionStart,source.SelectionLength,SourceRowCells(source.SelectionStart));
+            // The <br> lands at the position the inline pair map settled (a caret on a marker's
+            // inner edge leaves the pair first); without a line parse EnterInCell keeps H9.
+            CommandResult cell=MarkdownTableCommands.EnterInCell(source.Document,source.SelectionStart,source.SelectionLength,SourceRowCells(source.SelectionStart),InlineEnterCellColumn());
             if(cell!=null)return cell;
             // Stage 6: Enter inside an inline pair's visible text closes and reopens every pair
             // that encloses the caret, so both lines keep the whole style set. Basic and live
@@ -440,7 +637,7 @@ public partial class MainWindow {
             // spot, and with them shown the split still keeps each pair whole instead of cutting
             // one in two. Literal marker text stays raw (InsideMarkerRun).
             if(source.SelectionLength==0&&!source.ImeBusy&&livePreview.Options!=null){
-                CommandResult inline=InlineEnter();
+                CommandResult inline=InlineEnter(keyEnter);
                 if(inline!=null)return inline;
             }
         }
@@ -473,35 +670,58 @@ public partial class MainWindow {
     // newline, the line's own continuation ("- ", "> ") and the same opening markers as one
     // command, so neither line shows raw markup. Null everywhere else, which hands the line
     // back to the ordinary rule.
-    CommandResult InlineEnter(){
+    // The pairs come from MarkdownInlineSpans (links and tags pair like emphasis, so a link's
+    // label splits into two links with the same address) and the settled caret is the break's
+    // position as is: the parser already told where the pairs are, so H9's raw marker-run snap
+    // does not run again (markerEdge false). A caret the parser did not place (plain text)
+    // returns null and keeps H9 in the ordinary rule.
+    CommandResult InlineEnter(bool keyEnter){
         var document=source.Document;
         int offset=Math.Max(0,Math.Min(source.CaretIndex,document.TextLength));
         var line=document.GetLineByOffset(offset);
         var info=livePreview.Info(line);
         if(info==null||info.Code||info.Table||info.Delimiter||info.SetextUnderline>0)return null;
+        /* a line cache one edit behind (StripEnclosingStyles and PasteRowCells check the same) leaves Enter to the plain newline */
+        if(info.Text==null||info.Text.Length!=line.Length)return null;
         int relative=offset-line.Offset;
         // With the markers drawn (live mode) the caret can sit between the characters of a marker
         // run; that spot is literal markup the user sees, so Enter there stays the plain newline
         // instead of writing closing and opening markers into the middle of a run.
         if(livePreview.Options!=null&&!livePreview.Options.HideMarkers&&InsideMarkerRun(info,relative))return null;
-        int settled=InlineEnterEdge(info,relative);
-        if(settled!=relative){
+        var spans=MarkdownInlineSpans.Build(info,info.Text);
+        int settled=MarkdownInlineSpans.StepOut(spans,relative);
+        bool moved=settled!=relative;
+        if(moved){
             offset=line.Offset+settled;
             relative=settled;
-            source.Select(offset,0);
         }
         string closing,opening;
-        if(!InlineEnterSplit(info,relative,out closing,out opening))return null;
-        // Markdown emphasis cannot open/close against whitespace. Keep adjacent spaces outside
-        // the split pairs, rather than leaving "**ab **" or "** cd**" as visible markers.
-        int left=relative,right=relative;
-        while(left>0&&(info.Text[left-1]==' '||info.Text[left-1]=='\t'))left--;
-        while(right<info.Text.Length&&(info.Text[right]==' '||info.Text[right]=='\t'))right++;
-        string leftSpace=info.Text.Substring(left,relative-left),rightSpace=info.Text.Substring(relative,right-relative);
+        // Markdown emphasis cannot open/close against whitespace. Split reports the adjacent
+        // spaces so they stay outside the split pairs, rather than leaving "**ab **" or
+        // "** cd**" as visible markers.
+        int left,right;
+        bool splitPairs=MarkdownInlineSpans.Split(spans,info.Text,relative,out left,out right,out closing,out opening);
+        if(!splitPairs){
+            // No pair encloses the settled caret. Away from every marker it is plain text and the
+            // ordinary Enter owns it; on a marker the parser placed (or moved to), the break goes
+            // exactly there, with the line's own continuation.
+            if(!moved&&!MarkdownInlineSpans.TouchesMarker(spans,relative))return null;
+            closing="";opening="";left=relative;right=relative;
+            while(right<info.Text.Length&&(info.Text[right]==' '||info.Text[right]=='\t'))right++;
+        }
+        /* The new line starts without the blanks that followed the break, as every Enter on the source surface writes it (AvalonEdit's indentation strategy, ImeProbe J4c "**ab**| cd" -> "**ab**\ncd"). */
+        string leftSpace=info.Text.Substring(left,relative-left),rightSpace="";
         int editOffset=line.Offset+left,editLength=right-left;
         // The list/quote continuation comes from the same rule the ordinary Enter uses, so a
         // split inside "- **ab|cd**" still opens the next line with "- ".
-        CommandResult inherited=MarkdownStructuralInput.Enter(document,offset,0);
+        CommandResult inherited=MarkdownStructuralInput.Enter(document,offset,0,keyEnter,false);
+        if(!splitPairs&&inherited!=null){
+            // Nothing to write around the break: take the structural result as it is when it is
+            // not the plain "newline + continuation" insertion at the caret (an empty-item exit).
+            bool insertion=false;
+            for(int i=0;i<inherited.Edits.Count;i++)if(inherited.Edits[i].Offset==offset&&inherited.Edits[i].Length==0)insertion=true;
+            if(!insertion)return inherited;
+        }
         if(inherited!=null){
             for(int i=0;i<inherited.Edits.Count;i++){
                 SourceEdit edit=inherited.Edits[i];
@@ -523,6 +743,25 @@ public partial class MainWindow {
         result.SortEdits();
         return result;
     }
+    // The settled Enter column (relative to the line) for a table cell's "<br>", or -1 when the
+    // preview has no say: no table row parse, a selection, an IME composition, or a caret that
+    // plain text owns (EnterInCell then keeps H9's marker-run snap). Same rule as InlineEnter: a
+    // caret on a pair's inner edge steps to the outside, and a caret the parser placed on a
+    // marker stays; live mode's caret inside a drawn marker run is literal and stays H9's.
+    int InlineEnterCellColumn(){
+        if(!LivePreviewAttached||livePreview==null||source==null||source.SelectionLength>0||source.ImeBusy)return -1;
+        var document=source.Document;
+        int offset=Math.Max(0,Math.Min(source.CaretIndex,document.TextLength));
+        var line=document.GetLineByOffset(offset);
+        var info=livePreview.Info(line);
+        if(info==null||!info.Table||info.Delimiter||info.Code||info.Text==null)return -1;
+        int relative=offset-line.Offset;
+        if(livePreview.Options!=null&&!livePreview.Options.HideMarkers&&InsideMarkerRun(info,relative))return -1;
+        var spans=MarkdownInlineSpans.Build(info,info.Text);
+        int settled=MarkdownInlineSpans.StepOut(spans,relative);
+        if(settled!=relative||MarkdownInlineSpans.TouchesMarker(spans,relative))return settled;
+        return -1;
+    }
     // True when the caret lies strictly between the characters of one hidden marker run (an
     // emphasis marker, a tag, ...). Prefix runs are skipped: they are never split, and no pair
     // encloses a caret inside them.
@@ -532,49 +771,6 @@ public partial class MainWindow {
             if(marker.Start<relative&&relative<marker.Start+marker.Length)return true;
         }
         return false;
-    }
-    // The caret moved to the outer side of every pair whose marker's inner edge it stands on:
-    // "**|ab**" (after the opening markers) goes before them and "**ab|**" (before the closing
-    // markers) goes after them. Nested runs ("***x***") step through each pair in turn.
-    static int InlineEnterEdge(MarkdownLivePreview.LineInfo info,int relative){
-        int direction=0;
-        for(int pass=0;pass<8;pass++){
-            int moved=-1;
-            foreach(MarkdownLivePreview.Replacement marker in info.Replacements){
-                if(marker.Kind!=MarkdownLivePreview.ReplacementKind.Hidden||marker.Length<=0||marker.Prefix)continue;
-                if(marker.Start==relative&&direction>=0){
-                    if(MarkdownLivePreview.Session.PairOf(info,marker,false).HasValue){moved=marker.Start+marker.Length;direction=1;break;}
-                }else if(marker.Start+marker.Length==relative&&direction<=0){
-                    if(MarkdownLivePreview.Session.PairOf(info,marker,true).HasValue){moved=marker.Start;direction=-1;break;}
-                }
-            }
-            if(moved<0||moved==relative)break;
-            relative=moved;
-        }
-        return relative;
-    }
-    // The exact closing and opening source text of every pair whose markers strictly enclose
-    // the caret, in source order: "**~~ab|cd~~**" closes "~~" then "**" and reopens "**" then
-    // "~~" on the next line. False when no pair encloses the caret.
-    static bool InlineEnterSplit(MarkdownLivePreview.LineInfo info,int relative,out string closing,out string opening){
-        closing=null;opening=null;
-        var opens=new List<MarkdownLivePreview.Replacement>();
-        var closes=new List<MarkdownLivePreview.Replacement>();
-        foreach(MarkdownLivePreview.Replacement marker in info.Replacements){
-            if(marker.Kind!=MarkdownLivePreview.ReplacementKind.Hidden||marker.Length<=0||marker.Prefix)continue;
-            MarkdownLivePreview.Replacement? pair=MarkdownLivePreview.Session.PairOf(info,marker,true);
-            if(!pair.HasValue)continue;
-            if(!(marker.Start<relative&&pair.Value.Start>relative))continue;
-            opens.Add(marker);closes.Add(pair.Value);
-        }
-        if(opens.Count==0)return false;
-        opens.Sort(delegate(MarkdownLivePreview.Replacement a,MarkdownLivePreview.Replacement b){return a.Start.CompareTo(b.Start);});
-        closes.Sort(delegate(MarkdownLivePreview.Replacement a,MarkdownLivePreview.Replacement b){return a.Start.CompareTo(b.Start);});
-        string open="",close="";
-        foreach(MarkdownLivePreview.Replacement marker in opens)open+=info.Text.Substring(marker.Start,marker.Length);
-        foreach(MarkdownLivePreview.Replacement marker in closes)close+=info.Text.Substring(marker.Start,marker.Length);
-        opening=open;closing=close;
-        return true;
     }
     // The line's own line ending: its delimiter, else the nearest earlier one; the same rule
     // MarkdownStructuralInput uses for its continuation, so a split keeps the document's CRLF.
@@ -802,6 +998,13 @@ public partial class MainWindow {
     // Backspace/Delete over a selection that reaches across a cell boundary: only the selected
     // text inside the cells goes, so the row keeps its "|" and its shape. A selection inside one
     // cell is text only and keeps the editor's own deletion.
+    // True when the line at the offset is a table row or a delimiter row (the caret-line parse).
+    bool SourceEdgeInTable(int offset){
+        if(!LivePreviewAttached||livePreview==null||source==null||source.Document==null)return true;
+        var document=source.Document;
+        var info=livePreview.Info(document.GetLineByOffset(Math.Max(0,Math.Min(offset,document.TextLength))));
+        return info==null||info.Table||info.Delimiter;
+    }
     CommandResult SourceCellSelectionDelete(){
         if(!LivePreviewAttached)return null;
         // A selection that covers whole tables is ordinary text: Delete/Backspace removes those
@@ -811,12 +1014,15 @@ public partial class MainWindow {
         // row's line end into the last cell, which turns the whole-table rule into a cell clear.
         CommandResult whole=MarkdownTableCommands.DeleteWholeTableSelection(source.Document,source.SelectionStart,source.SelectionLength);
         if(whole!=null){
+            /* SelectionCoversWholeTables also answers true when neither end lies in a table (a plain selection inside a paragraph). That is not a table delete: the editor's own command runs the hidden-marker rules (HiddenMarkerDelete / RebalanceSelection in the basic view), so a selection with no table at either end goes there instead of being removed here as plain text ("**a b**" minus "b" left "**a **"). */
+            if(!SourceEdgeInTable(source.SelectionStart)&&!SourceEdgeInTable(source.SelectionStart+source.SelectionLength))return null;
             // A selection that also touches a fence line takes both fence lines of that block with
             // it (MarkdownCommands.RemoveSelectionWithFences, run by the editor's own delete path in
             // both views); answering null here hands the key to that path instead of deleting the
             // tables and leaving the partner fence behind.
             if(MarkdownCommands.RemoveSelectionWithFences(source.Document,source.SelectionStart,source.SelectionLength)!=null)return null;
-            return whole;
+            CommandResult edge=TableEdgeRebalance();
+            return edge!=null?edge:whole;
         }
         // A selection whose first or last line is the delimiter row is structure (basic mode
         // folds it, live mode reveals it): the row keeps its text and its line break, and the
@@ -826,6 +1032,37 @@ public partial class MainWindow {
         var cells=SourceRowCells(offset);
         if(cells==null||!MarkdownTableCommands.SpansCellBoundary(source.Document,offset,source.SelectionLength,cells))return null;
         return MarkdownTableCommands.ClearCellSelection(source.Document,offset,source.SelectionLength,cells);
+    }
+    // A whole-table selection that ends (or starts) inside a paragraph: the raw removal would cut a
+    // pair of that paragraph in half ("**a b**" minus "**a " left "b**"). The paragraph's part goes
+    // through the rebalance the editor uses for any selection delete (PlanSelectionReplace, basic view
+    // only; the live view edits that line as source), and the table lines go with it in one edit.
+    // Null when the rule does not apply, which keeps the raw removal.
+    CommandResult TableEdgeRebalance(){
+        if(!LivePreviewAttached||livePreview==null||source==null)return null;
+        var document=source.Document;
+        int start=source.SelectionStart,end=start+source.SelectionLength;
+        bool startIn=SourceEdgeInTable(start),endIn=SourceEdgeInTable(end);
+        int editStart,editLength,caret;string editText;
+        CommandResult result=new CommandResult();
+        if(startIn&&!endIn){
+            var last=document.GetLineByOffset(end);
+            if(end<=last.Offset)return null;
+            if(!livePreview.PlanSelectionReplace(last.Offset,end,string.Empty,out editStart,out editLength,out editText,out caret))return null;
+            if(editStart<last.Offset||editStart+editLength>last.EndOffset)return null;
+            result.Add(start,editStart+editLength-start,document.GetText(last.Offset,editStart-last.Offset)+editText);
+            result.SelectionStart=start+(caret-last.Offset);
+        }else if(!startIn&&endIn){
+            var first=document.GetLineByOffset(start);
+            if(start>=first.EndOffset)return null;
+            if(!livePreview.PlanSelectionReplace(start,first.EndOffset,string.Empty,out editStart,out editLength,out editText,out caret))return null;
+            int kept=editStart+editLength;
+            if(editStart<first.Offset||kept>first.EndOffset)return null;
+            result.Add(editStart,end-editStart,editText+document.GetText(kept,first.EndOffset-kept));
+            result.SelectionStart=caret;
+        }else return null;
+        result.SelectionLength=0;
+        return result;
     }
     // A no-edit result that keeps the current selection (the host reselects it instead of
     // handing the key to the editor).
@@ -1579,6 +1816,8 @@ public partial class MainWindow {
         // rule rides along with the code menu hooks (one preview-executed handler, removed again
         // on detach).
         HookLiveTableCut(area);
+        /* ApplicationCommands.Paste in the basic view (menu, API) takes the same path as Ctrl+V: LivePaste, so the markers a selection cut off are restored and table cells paste alike. */
+        if(livePreview!=null&&Object.ReferenceEquals(source==null?null:source.TextArea,area))livePreview.HostPaste=delegate{return PasteClipboard(false);};
     }
     void UnhookLiveCodeMenu(SourceEditor owner){
         if(owner==null||owner.TextArea==null)return;

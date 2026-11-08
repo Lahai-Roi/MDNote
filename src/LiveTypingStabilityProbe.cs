@@ -77,7 +77,9 @@ internal static class LiveTypingStabilityProbe {
             window=new Window {Content=editor,Width=1920,Height=1080,WindowStyle=WindowStyle.None,ShowInTaskbar=false,ShowActivated=false,Left=0,Top=0};
             window.Show();Pump();frames=new Frames(editor);
             // A pre-existing, ordinarily sized paragraph, and four independently wrapping
-            // cells. No resetting/trimming the buffer between keys or dropping slow keys.
+            // cells. No trimming between keys or dropping slow keys; the paragraph case restores
+            // its fixture outside the timed region every 100 keys so the compared windows start
+            // at the same paragraph length (11-07).
             string paragraph="before\n\n본문 시작 "+Repeat("가나다라마바사 아자차카타파하 ",12)+"\n\ntail\n";
             string table="before\n\n| 첫째 제목 | 둘째 제목 | 셋째 제목 | 넷째 제목 |\n|---|---|---|---|\n| "+
                 Repeat("가나다라마바사 아자차카타파하 ",5)+" | "+Repeat("이웃 셀 문장 ",12)+" | "+Repeat("셋째 칸 내용 ",12)+" | "+Repeat("넷째 칸 내용 ",12)+" |\n| 아래 | 행 | 유지 | 확인 |\n\nafter\n";
@@ -110,9 +112,20 @@ internal static class LiveTypingStabilityProbe {
                 // build count of ~1000 and hides that the row is built about once per key.
                 int maxBuilds=0;
                 int badFrames=0,missingFrames=0,badGeometryKeys=0,badInput=0,maxCallbacks=0,maxSlots=0,totalFrames=0;
-                double worstDelta=0,maxTime=0,firstHeight=Capture(editor).Height;bool wrapped=false;
+                double worstDelta=0,maxTime=0,firstHeight=Capture(editor).Height,tallest=firstHeight;bool wrapped=false;
                 long nativeBefore=LiveCompositionGeometry.NativeWrites;
                 for (int key=0;key<Keys;key++) {
+                    // Equal-size windows: typing into one growing paragraph made the first 100 keys
+                    // format 2-3 wrapped rows and the last 100 format ~11, so the ratio measured
+                    // paragraph growth, not a slowdown (11-07). Restore the fixture (outside the
+                    // timed region, drained like the warm-up) every 100 keys: both ends then type
+                    // into the same 198-char paragraph. The wrap check below stays valid because
+                    // every window starts at this height and the line wraps again inside it.
+                    if (test==0 && key>0 && key%100==0) {
+                        editor.Text=fixtures[test];editor.CaretIndex=0;Pump();
+                        target=editor.Document.GetLineByNumber(3);at=target.EndOffset;
+                        editor.Select(at,0);editor.TextArea.Caret.BringCaretToView();Pump();
+                    }
                     frames.Samples.Clear();frames.Total=0;frames.Enabled=true;
                     int length=editor.Document.TextLength,offset=editor.CaretIndex;
                     long callbacks=session.CompositionCallbacks;
@@ -140,7 +153,7 @@ internal static class LiveTypingStabilityProbe {
                     }
                     if (!same && badGeometryKeys++<4) report.Append("FRAME ").Append(names[test]).Append(" key=").Append(key).Append(" final=").Append(Describe(final)).Append(" worst=").Append(Number(delta)).Append('\n');
                     if (frames.Total==0) missingFrames++;
-                    totalFrames+=frames.Total;worstDelta=Math.Max(worstDelta,delta);wrapped|=final.Height>firstHeight+.01;
+                    totalFrames+=frames.Total;worstDelta=Math.Max(worstDelta,delta);wrapped|=final.Height>firstHeight+.01;tallest=Math.Max(tallest,final.Height);
                     int callbackCount=(int)(session.CompositionCallbacks-callbacks);maxCallbacks=Math.Max(maxCallbacks,callbackCount);
                     int[] current=Counts(editor,session);counts.Add(current);maxSlots=Math.Max(maxSlots,current[11]);
                     timings.Append(names[test]).Append('\t').Append(key).Append('\t').Append(Number(elapsed[key])).Append('\t').Append(frames.Total)
@@ -169,7 +182,7 @@ internal static class LiveTypingStabilityProbe {
                     "mean over last 100="+Number(builds/100.0)+", max in last 100="+maxBuildsLast+", max overall="+maxBuilds);
                 check(names[test]+" coalesced composition callbacks",maxCallbacks<=8 && maxSlots<=1,"max callbacks/key="+maxCallbacks+", idle slots="+maxSlots+", native writes="+(LiveCompositionGeometry.NativeWrites-nativeBefore));
                 VerifyCounts(names[test],counts,check);
-                check(names[test]+" line wraps during sustained input",wrapped,"initial height="+Number(firstHeight)+", final="+Number(Capture(editor).Height));
+                check(names[test]+" line wraps during sustained input",wrapped,"initial height="+Number(firstHeight)+", tallest="+Number(tallest)+", final="+Number(Capture(editor).Height));
                 if (elapsed.Length>0) {
                     worstHandler=Math.Max(worstHandler,maxTime);worstFrameDelta=Math.Max(worstFrameDelta,worstDelta);
                     worstFrameCount=Math.Max(worstFrameCount,totalFrames);worstKeys=Math.Max(worstKeys,counts.Count);

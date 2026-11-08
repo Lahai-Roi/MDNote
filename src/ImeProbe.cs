@@ -1106,9 +1106,9 @@ internal static class ImeProbeRunner {
             Point update;bool updateRead=CompositionFormPoint(hwnd,out update);
             SendMessage(hwnd,WM_IME_ENDCOMPOSITION,IntPtr.Zero,IntPtr.Zero);Pump();
             if(!formRead||!updateRead){check(names[test]+" composition window target",0,"no IME context to read the form");continue;}
-            /* Under a Korean layout the form is parked off screen while composing (11-01, SourceEditor.ParkImeForm):
-               the MS Korean IME would otherwise draw its own copy over the inline syllable. The caret placement
-               below is checked for the other layouts; here the parked form is the expected state. */
+            /* 11-07: the Korean form is no longer parked off screen (the Hanja list opened from the parked form at the
+               screen corner); the IME's own box is hidden by alpha instead, so every layout gets the caret checks below.
+               A parked form is still accepted here for builds that park. */
             bool koreanLayout=System.Windows.Input.InputLanguageManager.Current.CurrentInputLanguage!=null&&System.Windows.Input.InputLanguageManager.Current.CurrentInputLanguage.TwoLetterISOLanguageName=="ko";
             bool parked=koreanLayout&&start.X<-10000&&update.X<-10000;
             if(parked)check(names[test]+" composition form parked under the Korean layout",1,"form="+FormatPoint(start)+", update="+FormatPoint(update));

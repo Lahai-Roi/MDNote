@@ -648,6 +648,28 @@ internal static class MarkdownTableCommandsTests {
         AddCellSelection(cases, "enter with a multi-row selection clears the cells and keeps the pipes",
             "| a |\n|---|\n| ‸b |\n| c |", 8, null,
             "| a |\n|---|\n| <br>‸ |\n|  |");
+        // Enter inside inline code: "<br>" would draw as text inside the span, so the span closes
+        // before the break and reopens after it; at the span's inner edge the break goes outside.
+        AddCellSelection(cases, "enter inside inline code splits the code span around the break",
+            table + "| `a‸b` | e |", 0, null,
+            table + "| `a`<br>`‸b` | e |");
+        AddCellSelection(cases, "enter at the inner start of inline code breaks before the span",
+            table + "| x `‸ab` | e |", 0, null,
+            table + "| x <br>‸`ab` | e |");
+        // 2.3.1 review finds: a reopened run must not merge with a backtick of the content (a padding space
+        // separates them on both fences of the piece), and a selection or a multi-line paste inside a span splits it too.
+        AddCellSelection(cases, "enter before an inner backtick pads the reopened span",
+            table + "| ``a‸`b`` | e |", 0, null,
+            table + "| ``a``<br>`` ‸`b `` | e |");
+        AddCellSelection(cases, "enter after an inner backtick pads the closed span",
+            table + "| ``a`‸b`` | e |", 0, null,
+            table + "| `` a` ``<br>``‸b`` | e |");
+        AddCellSelection(cases, "enter over a selection inside inline code splits the span",
+            table + "| `a ‸b c` | e |", 1, null,
+            table + "| `a `<br>`‸ c` | e |");
+        AddCellSelection(cases, "paste lines into inline code splits the span at each break",
+            table + "| `a‸b` | e |", 0, "x\ny",
+            table + "| `ax`<br>`y‸b` | e |");
         AddCellSelection(cases, "paste a tab into a cell stays literal",
             table + "| c‸ | e |", 0, "a\tb",
             table + "| ca\tb‸ | e |");

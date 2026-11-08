@@ -597,6 +597,7 @@ public static class Program {
         if(args.Length==2&&args[0]=="--longline-bench"){IsSelfTest=true;return LongLineBench.Run(args[1]);}
         if(args.Length==4&&args[0]=="--livepreview-shot"){IsSelfTest=true;return MainWindow.CaptureLivePreview(args[1],args[2],int.Parse(args[3]));}
         if(args.Length==2&&args[0]=="--livepreview-probe"){IsSelfTest=true;return LivePreviewProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--inline-spans-probe"){IsSelfTest=true;return MarkdownInlineSpansTests.Run(args[1]);}
         if(args.Length==2&&args[0]=="--noreveal-probe"){IsSelfTest=true;return NoRevealProbe.Run(args[1]);}
         if(args.Length==2&&args[0]=="--livelayout-probe"){IsSelfTest=true;return MainWindow.VerifyLiveLayout(args[1]);}
         if(args.Length==2&&args[0]=="--live-host-probe"){IsSelfTest=true;return MainWindow.VerifyLiveHost(args[1]);}
@@ -614,6 +615,7 @@ public static class Program {
         if(args.Length==2&&args[0]=="--userfix-probe"){IsSelfTest=true;return MainWindow.VerifyUserFixes(args[1]);}
         if(args.Length==2&&args[0]=="--clipboard-probe"){IsSelfTest=true;return MainWindow.VerifyClipboard(args[1]);}
         if(args.Length==2&&args[0]=="--history-cap-probe"){IsSelfTest=true;return MainWindow.VerifyHistoryCap(args[1]);}
+        if(args.Length==2&&args[0]=="--undo-walk-probe"){IsSelfTest=true;return MainWindow.VerifyUndoWalk(args[1]);}
         if(args.Length==2&&args[0]=="--live-typing-probe"){IsSelfTest=true;return MainWindow.VerifyLiveTypingStability(args[1]);}
         if(args.Length==2&&args[0]=="--table-caret-probe"){IsSelfTest=true;return MainWindow.VerifyTableCaret(args[1]);}
         if(args.Length==2&&args[0]=="--settings-probe"){IsSelfTest=true;return MainWindow.RunSettingsMatrixProbe(args[1]);}
@@ -645,6 +647,7 @@ public static class Program {
         if(args.Length==2&&args[0]=="--longline-window-probe"){IsSelfTest=true;return MainWindow.VerifyLongLineWindow(args[1]);}
         if(args.Length==2&&args[0]=="--ime-probe"){IsSelfTest=true;return MainWindow.VerifyIme(args[1]);}
         if(args.Length==2&&args[0]=="--ime-click-hang-probe"){IsSelfTest=true;return ImeClickHangProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--ime-geometry-probe"){IsSelfTest=true;return ImeGeometryProbe.Run(args[1]);}
         if(args.Length==2&&args[0]=="--inputformat-probe"){IsSelfTest=true;return MainWindow.VerifyInputFormat(args[1]);}
         if(args.Length==3&&args[0]=="--file-bench"){IsSelfTest=true;return MainWindow.RunFileBench(args[1],args[2]);}
         if(args.Length>=2&&args[0]=="--file-bench-interact"){IsSelfTest=true;return MainWindow.RunInteractionBench(args.Length>2?args[1]:"--generated-4m",args[args.Length-1]);}

@@ -1221,9 +1221,10 @@ internal static class NoRevealProbe {
                 " rect=" + rectStart + ".." + rectEnd);
 
             // Unselected emphasis/code markers are transparent to character deletion; a
-            // structural marker/tag/url still deletes as one unit. A selection that only
-            // partly covers a marker is widened before it deletes, and typing over it takes
-            // the marked pair whole so no orphan marker is left as text.
+            // structural marker/tag/url still deletes as one unit. 2.3.1 (D1): replacing a
+            // selection changes only the characters the reader selected; the markers it cut off
+            // are written back next to the new text. A selection of only hidden markers therefore
+            // changes nothing, and typing over one keeps the pair around the typed text.
             EditCase(ref all, report, editor, session, "backspace after opening ** deletes visible space", "a **bold** b", 4, KeyAction.Backspace, "a**bold** b");
             EditCase(ref all, report, editor, session, "delete before closing ** deletes visible space", "a **bold** b", 8, KeyAction.Delete, "a **bold**b");
             HiddenBoundaryCases(ref all, report, editor, session);
@@ -1231,10 +1232,10 @@ internal static class NoRevealProbe {
             EditCase(ref all, report, editor, session, "backspace after > removes the prefix", "> quoted", 2, KeyAction.Backspace, "quoted");
             EditCase(ref all, report, editor, session, "backspace after <br> removes the tag", "x<br>y", 5, KeyAction.Backspace, "xy");
             EditCase(ref all, report, editor, session, "backspace after an image removes it whole", "![alt](missing.png)", 18, KeyAction.Backspace, "");
-            EditCase(ref all, report, editor, session, "backspace after a link target un-links", "[t](https://x)", 14, KeyAction.Backspace, "t");
-            EditCase(ref all, report, editor, session, "partial marker selection takes the whole pair", "a **bold** b", -8, KeyAction.Backspace, "a  b");
+            EditCase(ref all, report, editor, session, "backspace after a link target takes the label character and the emptied link", "[t](https://x)", 14, KeyAction.Backspace, "");
+            EditCase(ref all, report, editor, session, "backspace over hidden markers only deletes nothing", "a **bold** b", -8, KeyAction.Backspace, "a **bold** b");
             EditCase(ref all, report, editor, session, "backspace inside text stays one char", "a **bold** b", 6, KeyAction.Backspace, "a **bld** b");
-            EditCase(ref all, report, editor, session, "typing over a partial marker selection", "a **bold** b", -8, KeyAction.Type, "a X b");
+            EditCase(ref all, report, editor, session, "typing over hidden markers only keeps the pair around the typed text", "a **bold** b", -8, KeyAction.Type, "a **boldX** b");
             EditCase(ref all, report, editor, session, "typing inside styled text replaces one char", "a **bold** b", -4, KeyAction.Type, "a **Xold** b");
 
             // b55: with the markers hidden, the caret at the text start of a line whose text opens
@@ -2431,9 +2432,10 @@ internal static class NoRevealProbe {
     }
 
     // P2 items 1-2: Ctrl+Backspace / Ctrl+Delete take the visual-line word range, which can start
-    // or end on a zero-width marker run; and a selection that cuts only one side of a pair must be
-    // widened before Backspace/Delete/Cut removes (or copies) it. Both follow the same pair rule
-    // the whole-visible-text selection uses.
+    // or end on a zero-width marker run, and a selection can cut a pair. 2.3.1 (D1): the word range
+    // and the selection follow the same rule as typing and paste: only the drawn characters the
+    // range holds go, and a marker the range cut off is written back next to the change. The whole
+    // pair is still taken when nothing drawn would remain inside it (an emptied pair is never left).
     static void WordMarkerCases(ref bool all, StringBuilder report, SourceEditor editor, MarkdownLivePreview.Session session) {
         // At the end of a pair the word range is only the hidden closing run. Taking the pair
         // whole is what keeps a lone "**" from being drawn as text.
@@ -2445,8 +2447,10 @@ internal static class NoRevealProbe {
             "본문 **굵게**", 9, 0, KeyAction.WordBackspace, "본문 ");
         PairShellCase(ref all, report, editor, "ctrl+delete keeps the text after the pair",
             "**굵게** 글자", 2, 0, KeyAction.WordDelete, " 글자");
-        PairShellCase(ref all, report, editor, "ctrl+backspace over a multi-word pair takes the pair",
-            "x **hello world**", 17, 0, KeyAction.WordBackspace, "x ");
+        // The word range holds "world" and the closing run. The text left inside the pair keeps its
+        // opener, so the cut-off closer is written back after "hello" (the space moves outside it).
+        PairShellCase(ref all, report, editor, "ctrl+backspace over a multi-word pair keeps the pair around the remaining text",
+            "x **hello world**", 17, 0, KeyAction.WordBackspace, "x **hello** ");
         PairShellCase(ref all, report, editor, "ctrl+backspace over a one-sided selection takes the pair",
             "a **bold** b", 4, 6, KeyAction.WordBackspace, "a  b");
         PairShellCase(ref all, report, editor, "ctrl+delete inside a table cell takes the cell's pair",
@@ -2454,7 +2458,8 @@ internal static class NoRevealProbe {
         PairShellCase(ref all, report, editor, "ctrl+backspace inside a table cell takes the cell's pair",
             "| **메모** | z |", 8, 0, KeyAction.WordBackspace, "|  | z |");
         // The selection half of item 2: the range covers the visible text and the closing marker,
-        // the opening marker is outside it.
+        // the opening marker is outside it. No drawn character is left inside the pair, so the
+        // opener goes with the selected text and its closer (an emptied pair is never left on screen).
         PairShellCase(ref all, report, editor, "backspace over a one-sided selection takes the pair",
             "a **bold** b", 4, 6, KeyAction.Backspace, "a  b");
         PairShellCase(ref all, report, editor, "delete over a one-sided selection takes the pair",
@@ -2463,9 +2468,10 @@ internal static class NoRevealProbe {
             "a **bold** b", 4, 6, KeyAction.Cut, "a  b");
     }
 
-    // One whole-pair case: the inner text is selected and a delete, backspace or typed
-    // replacement runs. A delete takes the two hidden markers with it and one undo puts the
-    // pair and its text back; typing replaces only the text, the markers stay.
+    // One pair case: the inner text is selected and a delete, backspace or typed replacement runs.
+    // A delete of everything inside the pair takes both markers with it and one undo puts the pair
+    // and its text back; typing replaces only the text and the markers stay. A selection that cuts
+    // one marker redraws it next to the change (2.3.1 D1), so "a  b" here means the pair was emptied.
     static void PairShellCase(ref bool all, StringBuilder report, SourceEditor editor,
         string name, string text, int start, int length, KeyAction action, string expected) {
         editor.Text = text;

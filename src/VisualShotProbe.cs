@@ -151,7 +151,9 @@ public partial class MainWindow {
     }
 
     static void VisualShotHelpShot(string dir,string baseDir,string code,string file,string kind,string position,bool scrolled,StringBuilder checks,List<string> failures,List<VisualShotEntry> entries){
-        string path=Path.Combine(baseDir,file);
+        // Same order as MainWindow.HelpFile: the help\ folder first, the exe folder for an older layout.
+        string path=Path.Combine(Path.Combine(baseDir,"help"),file);
+        if(!File.Exists(path))path=Path.Combine(baseDir,file);
         string baseName=kind+"-"+code+"-"+position;
         if(!File.Exists(path)){failures.Add(baseName+": guide file is missing next to the exe: "+path);return;}
         MainWindow window=null;

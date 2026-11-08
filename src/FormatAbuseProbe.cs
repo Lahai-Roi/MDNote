@@ -21,7 +21,8 @@ namespace MDNote {
 // its selection, a command never leaves a fence open, the preview's heading/list parse agrees with
 // an independent line parser, and undo/redo restore a whole segment exactly.
 // Fixtures are generated here from the seed; no user file is read. The system clipboard is never
-// touched: Cut deletes the selection (the document half of the command) and Paste drives
+// touched: Cut runs the session's cut rule (which copies the selection itself since 2.3.1, so a
+// preview Copy handler stands in for the clipboard) and deletes what the rule leaves; Paste drives
 // MainWindow.LivePaste with an empty DataObject, exactly the app's plain/markdown paste entry.
 // Report: <folder>\format-abuse-probe.txt; format-abuse-probe-PASS.txt only when every sequence
 // kept every invariant.
@@ -844,10 +845,12 @@ internal static class FormatAbuseProbe {
 
     // ---------------------------------------------------------------- cut and paste
     // Cut keeps the document half of the command. The session's own PreviewExecuted rule
-    // (HiddenMarkerDelete) is invoked for the cut first, so in the formatted view a selection that
-    // exactly covers a styled part is widened over its markers and no empty pair is left behind,
-    // exactly as the real ApplicationCommands.Cut would widen it; only the vendor clipboard write
-    // is not run. In live view (markers shown) that rule leaves the selection alone by design.
+    // (HiddenMarkerDelete) is invoked for the cut first. 2.3.1 (D1): in the formatted view that rule
+    // now performs the cut itself (Editor.Copy() plus one update that changes only the selected
+    // characters and writes the markers it cut off back) and sets Handled, so the payload has to be
+    // read before it runs. The vendor clipboard write is stood in for by a preview Copy handler, the
+    // same way the fence cut case does it. In live view (markers shown) the rule widens the
+    // selection to whole pairs and leaves the removal to the probe, as before.
     static void CutStep(MainWindow window) {
         SourceEditor source = Source(window);
         if (source == null || source.Document == null) return;
@@ -861,10 +864,21 @@ internal static class FormatAbuseProbe {
             MethodInfo marker = typeof(MarkdownLivePreview.Session).GetMethod("HiddenMarkerDelete", Members);
             ExecutedRoutedEventArgs cutArgs = CutArguments();
             if (marker == null || cutArgs == null) throw new MissingMemberException("probe: the hidden-marker cut rule seam is missing");
-            marker.Invoke(session, new object[] { source.TextArea, cutArgs });
-            // The product's rule swallows the cut when the selection would break a fence or a
-            // table row (Handled); the probe must leave the text alone then, like the real key.
-            if (cutArgs.Handled) return;
+            int lengthBefore = source.Document.TextLength;
+            string selected = source.Document.GetText(source.SelectionStart, source.SelectionLength);
+            ExecutedRoutedEventHandler copyCapture = delegate(object sender, ExecutedRoutedEventArgs args) {
+                if (args.Command != ApplicationCommands.Copy) return;
+                args.Handled = true;
+            };
+            CommandManager.AddPreviewExecutedHandler(source.TextArea, copyCapture);
+            try { marker.Invoke(session, new object[] { source.TextArea, cutArgs }); }
+            finally { CommandManager.RemovePreviewExecutedHandler(source.TextArea, copyCapture); }
+            // The rule swallows the cut when the selection would break a fence or a table row
+            // (Handled without a change); only a real removal becomes the next paste's payload.
+            if (cutArgs.Handled) {
+                if (source.Document.TextLength != lengthBefore) cutBuffer = selected;
+                return;
+            }
         }
         if (source.SelectionLength == 0) return;
         cutBuffer = source.Document.GetText(source.SelectionStart, source.SelectionLength);

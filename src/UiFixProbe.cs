@@ -48,9 +48,12 @@ internal static class UiFixProbe {
             File.WriteAllText(markdown,"# 첫 문서\n\n본문 내용입니다.\n",new UTF8Encoding(false));
             string plain=Path.Combine(dir,"uifix-find.txt");
             File.WriteAllText(plain,"목록 하나\n목 둘\n",new UTF8Encoding(false));
-            string help=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"MDNote 사용법.md");
+            /* The Help menu opens the documents through MainWindow.HelpFile: the help\ folder next to
+               the exe first, the exe folder only for a copy shipped without it. Looking in the exe
+               folder alone failed a0 on every build whose documents sit in help\. */
+            string help=HelpDocument("MDNote 사용법.md");
             bool helpExists=File.Exists(help);
-            Check(ref all,report,"a0 help document next to the exe",helpExists,help);
+            Check(ref all,report,"a0 help document resolved the way the Help menu does",helpExists,help);
 
             if(helpExists){
                 // a1: the option is on, so the help document has to become a second tab in this window.
@@ -190,6 +193,8 @@ internal static class UiFixProbe {
             Progress("d-size-done");
             VerifyUndoCaretScroll(ref all,report);
             Progress("e-undo-done");
+            VerifyCaretRowClear(ref all,report);
+            Progress("bottom-row-done");
             VerifyOverflowAndDialogs(ref all,report);
             Progress("f-overflow-done");
             VerifyMenuSkinAndOverflow(ref all,report);
@@ -1248,6 +1253,22 @@ internal static class UiFixProbe {
                 Check(ref all,report,"g7 코드 in a "+(header?"header":"body")+" cell arms inline code and the first input writes the pair",armed&&pair,
                     "armed="+armed+" text=["+OneLine(source.Document.Text)+"] caret="+source.CaretIndex+"/"+(at+2));
             }
+            // g7b (11-08 VM, real clicks): in an empty cell ("|  |") the inline code / bold button with no selection,
+            // then the first typed character, must write the pair there ("| `x` |"); it wrote the bare character.
+            foreach(string kind in new[]{"code","bold"})foreach(int click in new[]{7,6}){
+                const string emptyRow="| h1 | h2 |\n| --- | --- |\n| a |  |\n";
+                window.SetText(emptyRow);window.SetMode(true);Pump(250);
+                var rowLine=source.Document.GetLineByNumber(3);
+                source.Select(rowLine.Offset+click,0);ClearTyping(window);Pump(80);
+                int caret0=source.CaretIndex;
+                Call(window,"ToggleFormat",kind);Pump(250);
+                int caret1=source.CaretIndex;
+                TypeText(source,"x");Pump(80);
+                string mark=kind=="code"?"`":"**";
+                string want="| h1 | h2 |\n| --- | --- |\n| a | "+mark+"x"+mark+" |\n";
+                Check(ref all,report,"g7b "+kind+" with no selection in an empty cell (caret "+click+") writes the pair with the first input",source.Document.Text==want,
+                    "caret="+caret0+"->"+caret1+" text=["+OneLine(source.Document.Text)+"]");
+            }
             // Inline bold still wraps a cell's own text and keeps the row shape.
             window.SetText(table);window.SetMode(true);Pump(250);
             var boldLine=source.Document.GetLineByNumber(1);
@@ -1330,6 +1351,54 @@ internal static class UiFixProbe {
             bool redoVisible=!redoCaret.IsEmpty&&redoCaret.Top>=source.VerticalOffset-1&&redoCaret.Bottom<=source.VerticalOffset+source.ViewportHeight+1;
             Check(ref all,report,"e1 redo scrolls the restored caret into view",source.Text==typed&&redoVisible,"caretLine="+source.TextArea.Caret.Line+" caret="+redoCaret+" offset="+source.VerticalOffset.ToString("0.0")+" viewport="+source.ViewportHeight.ToString("0.0"));
         }finally{Discard(window);window.Close();}
+    }
+    /* 11-06 (user video 193550): typing at the end of a window-sized document left the last row cut
+       off under the sliding 24 px end margin (ApplySourceInset), and the view shook on fast input /
+       arrow keys. The fix verifies the caret row after the frame's layout and scrolls the missing
+       pixels (EnsureCaretRowClear, Editor.cs:361-406), queued from the caret's PositionChanged
+       (Editor.cs:139). This types at the document end the way the user did and reads the caret's own
+       rectangle against the box TextView actually shows (its own two numbers).
+       Depends on: EnsureCaretRowClear and the QueueCaretClearance post from Caret.PositionChanged.
+       A revert leaves the row below the visible bottom by the margin step (> 1 px) and this check
+       fails; removing either method fails it through the missing member. The clip is produced by the
+       product's own layout order, so it is the end state that is asserted, not a forced scroll. */
+    static void VerifyCaretRowClear(ref bool all,StringBuilder report){
+        Progress("bottom-row-start");
+        MainWindow window=NewWindow();
+        try{
+            var builder=new StringBuilder();
+            for(int i=1;i<=60;i++)builder.Append("줄 ").Append(i).Append('\n');
+            window.SetText(builder.ToString());window.SetMode(true);Pump(500);
+            var source=(SourceEditor)FieldOf(window,"source");
+            IntPtr handle=IntPtr.Zero;try{handle=new WindowInteropHelper(window).Handle;}catch(Exception){}
+            bool focused=source.TextArea.IsKeyboardFocusWithin;
+            for(int attempt=0;attempt<12&&!focused;attempt++){
+                window.Activate();if(attempt==4&&handle!=IntPtr.Zero)Win32.SetForegroundWindow(handle);
+                source.Focus();Keyboard.Focus(source.TextArea);Pump(250);
+                focused=source.TextArea.IsKeyboardFocusWithin;
+            }
+            source.Select(source.Document.TextLength,0);Pump(400);window.UpdateLayout();Pump(200);
+            /* Type at the end the way the user does: the extent grows and the end margin slides in
+               while the frame's own follow-up scroll may land before the new margin is laid out. */
+            source.TextArea.PerformTextInput("\n");Pump(700);window.UpdateLayout();Pump(400);
+            source.TextArea.PerformTextInput("끝");Pump(700);window.UpdateLayout();Pump(400);
+            var view=source.TextArea.TextView;
+            Rect caret;
+            try{caret=source.TextArea.Caret.CalculateCaretRectangle();}catch(Exception){caret=Rect.Empty;}
+            double offset=view.ScrollOffset.Y,visible=view.ActualHeight,extent=source.ExtentHeight;
+            bool measured=!caret.IsEmpty&&!Double.IsNaN(caret.Bottom)&&!Double.IsInfinity(caret.Bottom);
+            bool inside=measured&&caret.Bottom<=offset+visible+1&&caret.Top>=offset-1;
+            bool helper=typeof(MainWindow).GetMethod("EnsureCaretRowClear",BindingFlags.Static|BindingFlags.NonPublic)!=null
+                &&typeof(MainWindow).GetMethod("QueueCaretClearance",BindingFlags.Instance|BindingFlags.NonPublic)!=null;
+            bool atEnd=source.TextArea.Caret.Line==source.Document.LineCount&&extent>visible+1&&offset>0;
+            Check(ref all,report,"11-06 typing at the document end leaves the last row inside the text view",
+                focused&&helper&&atEnd&&inside,
+                "focus="+focused+" helper="+helper+" end="+atEnd
+                    +" caret="+caret.Top.ToString("0.0")+".."+caret.Bottom.ToString("0.0")
+                    +" view="+offset.ToString("0.0")+".."+(offset+visible).ToString("0.0")
+                    +" extent="+extent.ToString("0.0")+" line="+source.TextArea.Caret.Line+"/"+source.Document.LineCount);
+        }catch(Exception error){all=false;report.Append("FAIL bottom row clear exception: ").Append(OneLine(error.ToString())).Append('\n');}
+        finally{Discard(window);window.Close();}
     }
     /* X25 (user real-input run 2026-10-30): dark + 450 px » crash, Esc on the table grid and the link prompt,
        the dark table-grid surface, and submenus of the » list staying inside the window. The » submenu check
@@ -2274,8 +2343,54 @@ internal static class UiFixProbe {
                 "fiveSpaceQuote="+spacedQuote.Count+" fourSpaceQuote="+fourSpaceQuote.Count
                     +" indentedSetext="+indentedSetext.Count+" level="+(indentedSetext.Count==0?"-":OutlineNodeLevel(indentedSetext[0]).ToString(System.Globalization.CultureInfo.InvariantCulture))
                     +" hashOnlyAtx="+emptyAtx.Count);
+
+            /* 11-01 #8 (user video 16:48): a press on a nested outline row jumped to the document's
+               first H1. The old press path asked ItemsControl.ContainerFromElement for the row, which
+               answers with the top-level heading a nested row hangs under (SourceOutline.cs:254-257);
+               the fix walks up from the pressed element instead (OutlineRowUnder, :309) and jumps from
+               the row it finds (JumpOutlineItem, :332). This drives the same pair the press handler
+               runs (OutlineRowUnder(args.OriginalSource) -> JumpOutlineItem). Depends on: OutlineRowUnder
+               returning the pressed nested row (not its root) and JumpOutlineItem carrying that row's
+               offset to the caret. Reverting to ContainerFromElement sends the caret to line 1
+               ("# 머리 하나") instead of line 2 and this check fails; removing either method fails it
+               through the missing member. */
+            string outlineJumpDoc="# 머리 하나\n## 아래 제목\n본문 줄\n# 머리 둘\n";
+            window.SetText(outlineJumpDoc);window.SetMode(true);Pump(400);
+            outline.Visibility=Visibility.Visible;Call(window,"RefreshOutline");Pump(500);
+            window.UpdateLayout();outline.UpdateLayout();Pump(200);
+            var jumpRoot=outline.Items.Count>0?outline.Items[0] as TreeViewItem:null;
+            if(jumpRoot!=null)jumpRoot.IsExpanded=true;
+            Pump(400);outline.UpdateLayout();Pump(200);
+            TreeViewItem jumpRow=jumpRoot==null?null:jumpRoot.ItemContainerGenerator.ContainerFromIndex(0) as TreeViewItem;
+            if(jumpRow==null&&jumpRoot!=null){jumpRoot.UpdateLayout();Pump(150);jumpRow=jumpRoot.ItemContainerGenerator.ContainerFromIndex(0) as TreeViewItem;}
+            var pressTarget=jumpRow==null?null:FirstTextBlock(jumpRow);
+            var rowUnder=typeof(MainWindow).GetMethod("OutlineRowUnder",BindingFlags.Static|BindingFlags.NonPublic);
+            var jumpItem=typeof(MainWindow).GetMethod("JumpOutlineItem",BindingFlags.Instance|BindingFlags.NonPublic);
+            bool rowResolved=false,clickMoved=false;
+            string jumpState="no nested row realised";
+            int headingOffset=source.Document.GetLineByNumber(2).Offset;
+            if(pressTarget!=null&&rowUnder!=null&&jumpItem!=null){
+                TreeViewItem resolved=null;
+                try{resolved=rowUnder.Invoke(null,new object[]{pressTarget}) as TreeViewItem;}catch(TargetInvocationException){}
+                rowResolved=jumpRow!=null&&Object.ReferenceEquals(resolved,jumpRow);
+                if(resolved!=null){
+                    try{jumpItem.Invoke(window,new object[]{resolved});}catch(TargetInvocationException){}
+                    Pump(300);
+                }
+                clickMoved=source.CaretIndex==headingOffset&&source.TextArea.Caret.Line==2;
+                jumpState="resolved="+(resolved==null?"null":(rowResolved?"row":"other"))+" caret="+source.CaretIndex+"/line"+source.TextArea.Caret.Line+" want="+headingOffset;
+            }
+            Check(ref all,report,"11-01 #8 a press on a nested outline row jumps to that heading",rowResolved&&clickMoved,jumpState);
         }catch(Exception error){all=false;report.Append("FAIL p2 outline/status exception: ").Append(OneLine(error.ToString())).Append('\n');}
         finally{Discard(window);window.Close();}
+    }
+    // The first TextBlock inside a realised row, the element a press inside the row names.
+    static TextBlock FirstTextBlock(DependencyObject root){
+        var text=root as TextBlock;
+        if(text!=null)return text;
+        int count=root==null?-1:VisualTreeHelper.GetChildrenCount(root);
+        for(int i=0;i<count;i++){var found=FirstTextBlock(VisualTreeHelper.GetChild(root,i));if(found!=null)return found;}
+        return null;
     }
     // The scroll host of a templated control, found by walking the visual tree (the tree's own
     // ScrollViewer is the first one on the way down).
@@ -2344,6 +2459,7 @@ internal static class UiFixProbe {
         [DllImport("user32.dll")] internal static extern bool ScreenToClient(IntPtr hwnd,ref POINT point);
         [DllImport("user32.dll")] internal static extern bool ClientToScreen(IntPtr hwnd,ref POINT point);
         [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr hwnd);
+        [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(IntPtr hwnd);
     }
     static string SubmenuBounds(MainWindow window,MenuItem item){
         Popup popup=null;
@@ -2553,6 +2669,20 @@ internal static class UiFixProbe {
     static object Call(MainWindow window,string name,params object[] args){
         var method=typeof(MainWindow).GetMethod(name,Members);
         return method==null?null:method.Invoke(window,args);
+    }
+    /* The path a help document really opens from: MainWindow.HelpFile itself, so the probe cannot
+       drift from the menu again. The mirror below only runs if that method is ever renamed. */
+    static string HelpDocument(string name){
+        var method=typeof(MainWindow).GetMethod("HelpFile",Members);
+        if(method!=null){
+            try{
+                string found=method.Invoke(null,new object[]{name}) as string;
+                if(!String.IsNullOrEmpty(found))return found;
+            }catch(TargetInvocationException){}
+        }
+        string folder=AppDomain.CurrentDomain.BaseDirectory;
+        string inHelp=Path.Combine(Path.Combine(folder,"help"),name);
+        return File.Exists(inHelp)?inHelp:Path.Combine(folder,name);
     }
     static string CountOf(MainWindow window){
         var label=FieldOf(window,"matchCount") as TextBlock;

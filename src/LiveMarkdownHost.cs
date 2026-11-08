@@ -805,6 +805,414 @@ public partial class MainWindow {
     static void WaitToolbarRegression(int milliseconds){
         var frame=new System.Windows.Threading.DispatcherFrame();var timer=new System.Windows.Threading.DispatcherTimer {Interval=TimeSpan.FromMilliseconds(milliseconds)};timer.Tick+=delegate{timer.Stop();frame.Continue=false;};timer.Start();System.Windows.Threading.Dispatcher.PushFrame(frame);LongLineBench.Idle();
     }
+    // 2.3.1 random format-abuse find: a character typed on a stacked hidden closing run (`*기울임***`, the
+    // italic closer then the outer bold closer) landed between the two closers and broke the pairs. It must go to
+    // the run's inner edge (inside every pair, FormatAt's answer): every pair survives and the character is drawn
+    // with the style the toolbar showed at the caret before the key. Basic view (markers hidden), caret at line end.
+    // VM real-input find (11-07): Backspace on the space between "_ab_" and "c" (no marker next to the caret)
+    // left "_ab_c", an underscore pair against a word character that no longer parses. Basic view rewrites the
+    // pair with "*" in the same update; Delete from the other side and plain text without "_" stay ordinary.
+    static void VerifyUnderscoreSpaceDelete(MainWindow window,Action<string,bool,string> check){
+        bool oldHide=hideMarkers;
+        try{
+            hideMarkers=true;window.UpdateLivePreview();LongLineBench.Idle();
+            string[] fixtures={"_ab_ c","x _ab_ c","a b"};
+            string[] expected={"*ab*c","x *ab*c","ab"};
+            bool[] backs={true,false,true};
+            for(int i=0;i<fixtures.Length;i++){
+                window.SetText(fixtures[i]);window.SetMode(true);LongLineBench.Idle();
+                int space=fixtures[i].LastIndexOf(' ');
+                window.source.Select(backs[i]?space+1:space,0);LongLineBench.Idle();
+                var args=new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,System.Windows.PresentationSource.FromVisual(window.source),0,backs[i]?System.Windows.Input.Key.Back:System.Windows.Input.Key.Delete){RoutedEvent=System.Windows.Input.Keyboard.PreviewKeyDownEvent};
+                window.source.TextArea.RaiseEvent(args);
+                if(!args.Handled){var down=new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,System.Windows.PresentationSource.FromVisual(window.source),0,backs[i]?System.Windows.Input.Key.Back:System.Windows.Input.Key.Delete){RoutedEvent=System.Windows.Input.Keyboard.KeyDownEvent};window.source.TextArea.RaiseEvent(down);}
+                LongLineBench.Idle();
+                string text=window.source.Document.Text;
+                window.Undo();LongLineBench.Idle();
+                bool restored=window.source.Document.Text==fixtures[i];
+                check("underscore pair after a space delete: "+fixtures[i]+(backs[i]?" Backspace":" Delete"),text==expected[i]&&restored,"got=["+text+"] want=["+expected[i]+"] undo="+restored);
+            }
+        }finally{hideMarkers=oldHide;window.UpdateLivePreview();LongLineBench.Idle();}
+    }
+    // VM real-input note (11-07): Enter inside bold, Ctrl+Z, Enter again left the second line plain. The second
+    // Enter must split the pair exactly like the first, in both views.
+    static void VerifyEnterUndoEnter(MainWindow window,Action<string,bool,string> check){
+        bool oldHide=hideMarkers;
+        try{
+            for(int round=0;round<4;round++){
+                bool hide=round%2==0;
+                hideMarkers=hide;window.UpdateLivePreview();LongLineBench.Idle();
+                // Rounds 2-3 follow the VM run: a longer document and a first Enter one character earlier.
+                string fixture=round<2?"a **굵게글자** b":"a **굵게글자** b\n\na **굵Z자** b\n\n- 목록 **굵게** 끝\n";
+                window.SetText(fixture);window.SetMode(true);LongLineBench.Idle();
+                int at=fixture.IndexOf("글",StringComparison.Ordinal);
+                int firstAt=round<2?at:fixture.IndexOf("게",StringComparison.Ordinal);
+                Action enter=delegate{
+                    var args=new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,System.Windows.PresentationSource.FromVisual(window.source),0,System.Windows.Input.Key.Enter){RoutedEvent=System.Windows.Input.Keyboard.PreviewKeyDownEvent};
+                    window.source.TextArea.RaiseEvent(args);
+                    if(!args.Handled){var down=new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,System.Windows.PresentationSource.FromVisual(window.source),0,System.Windows.Input.Key.Enter){RoutedEvent=System.Windows.Input.Keyboard.KeyDownEvent};window.source.TextArea.RaiseEvent(down);}
+                    LongLineBench.Idle();
+                };
+                window.source.Select(firstAt,0);LongLineBench.Idle();
+                enter();
+                string first=window.source.Document.Text;
+                window.Undo();LongLineBench.Idle();
+                string undone=window.source.Document.Text;int caret=window.source.CaretOffset;
+                window.source.Select(at,0);LongLineBench.Idle();
+                enter();
+                string second=window.source.Document.Text;
+                string view=(hide?"basic":"live")+(round<2?"":" long doc, first Enter elsewhere");
+                string wantSecond=fixture.Substring(0,at)+"**\n**"+fixture.Substring(at);
+                // Drawn weight of "글" on the second line, from the visual line on screen (not rebuilt here), on and off the caret line.
+                var doc=window.source.Document;var second2=doc.LineCount>=2?doc.GetLineByNumber(2):null;
+                string onCaret=second2==null?"?":DrawnWeight(window,second2,second2.Offset+2);
+                window.source.Select(1,0);LongLineBench.Idle();
+                string offCaret=second2==null?"?":DrawnWeight(window,second2,second2.Offset+2);
+                string parsed=second2==null?"?":StackedDrawnFlags(window.livePreview.Info(second2),2);
+                check(view+" Enter, Undo, Enter draws the second line bold",offCaret=="Bold"&&parsed.StartsWith("B",StringComparison.Ordinal)&&(hide?onCaret=="Bold":true),
+                    "onCaret="+onCaret+" offCaret="+offCaret+" parsed="+parsed);
+                check(view+" Enter, Undo, Enter splits the pair again",undone==fixture&&second==wantSecond&&(round>=2||first==wantSecond),
+                    "first=["+first.Replace("\n","|")+"] undone=["+undone+"] caretAfterUndo="+caret+"/"+at+" second=["+second.Replace("\n","|")+"]");
+            }
+        }finally{hideMarkers=oldHide;window.UpdateLivePreview();LongLineBench.Idle();}
+    }
+    // VM real-input find (11-07): live view Ctrl+Backspace at "a **굵게글자|** b" left "a **** b". A word delete
+    // that takes a pair's whole text takes the pair in both views; a word that is only part of it keeps the pair.
+    static void VerifyWordDeleteEmptiesPair(MainWindow window,Action<string,bool,string> check){
+        bool oldHide=hideMarkers;
+        try{
+            foreach(bool hide in new[]{true,false}){
+                hideMarkers=hide;window.UpdateLivePreview();LongLineBench.Idle();
+                string view=hide?"basic":"live";
+                string[] fixtures={"a **굵게글자** b","a **굵게 글자** b","a `코드` b","a **글자 굵게** b"};
+                string[] anchors={"** b","** b","` b","글자"};
+                string[] expected={"a  b","a **굵게**  b","a  b","a **굵게** b"};
+                bool[] forward={false,false,false,true};
+                for(int i=0;i<fixtures.Length;i++){
+                    window.SetText(fixtures[i]);window.SetMode(true);LongLineBench.Idle();
+                    window.source.Select(forward[i]?fixtures[i].IndexOf(anchors[i],StringComparison.Ordinal):fixtures[i].LastIndexOf(anchors[i],StringComparison.Ordinal),0);LongLineBench.Idle();
+                    (forward[i]?System.Windows.Documents.EditingCommands.DeleteNextWord:System.Windows.Documents.EditingCommands.DeletePreviousWord).Execute(null,window.source.TextArea);LongLineBench.Idle();
+                    string text=window.source.Document.Text;
+                    window.Undo();LongLineBench.Idle();
+                    bool restored=window.source.Document.Text==fixtures[i];
+                    check(view+" Ctrl+Backspace word delete: "+fixtures[i],text==expected[i]&&restored,"got=["+text+"] want=["+expected[i]+"] undo="+restored);
+                }
+            }
+        }finally{hideMarkers=oldHide;window.UpdateLivePreview();LongLineBench.Idle();}
+    }
+    // Code-review finds (2.3.1, not yet reproduced): selection edits that cut part of a pair's text must keep the
+    // pair balanced and never leave a blank just inside a closer / after an opener. A-D: Delete/Backspace/Cut/typing
+    // a space over a selection; E: Ctrl+Backspace over nested pairs; F: paste right after a closing backtick in a paragraph.
+    static void SelectionPrepare(MainWindow window,string fixture,int start,int length){
+        window.SetText(fixture);window.SetMode(true);LongLineBench.Idle();window.source.Select(start,length);LongLineBench.Idle();
+    }
+    static string selectionKeyTrace="";
+    static void SelectionKey(MainWindow window,System.Windows.Input.Key key){
+        var args=new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,System.Windows.PresentationSource.FromVisual(window.source),0,key){RoutedEvent=System.Windows.Input.Keyboard.PreviewKeyDownEvent};
+        window.source.TextArea.RaiseEvent(args);
+        selectionKeyTrace="handled="+args.Handled+" selectionAfterPreview="+window.source.SelectionStart+"+"+window.source.SelectionLength+" text=["+window.source.Document.Text+"]";
+        // A synthetic KeyDown does not run the editor's delete command (the session's PreviewExecuted rules), so the
+        // command the key is bound to is executed directly, as the other probes do (FormatAbuseProbe.DeleteOnce).
+        if(!args.Handled)(key==System.Windows.Input.Key.Back?System.Windows.Documents.EditingCommands.Backspace:System.Windows.Documents.EditingCommands.Delete).Execute(null,window.source.TextArea);
+        LongLineBench.Idle();
+    }
+    static void SelectionType(MainWindow window,string text){
+        window.source.TextArea.PerformTextInput(text);LongLineBench.Idle();
+    }
+    static bool SelectionBalanced(string text){
+        foreach(string marker in new[]{"**","~~","`"}){int count=0,at=0;while((at=text.IndexOf(marker,at,StringComparison.Ordinal))>=0){count++;at+=marker.Length;}if(count%2!=0)return false;}
+        return true;
+    }
+    static void VerifySelectionMarkerEdits(MainWindow window,Action<string,bool,string> check){
+        bool oldHide=hideMarkers;
+        try{
+            foreach(bool hide in new[]{true,false}){
+                hideMarkers=hide;window.UpdateLivePreview();LongLineBench.Idle();
+                string view=hide?"basic":"live";
+                const string bold="**a b**";
+                string got;
+                // Live view keeps the caret line as raw source: Delete/Backspace/Cut and typing over a selection are plain
+                // source edits there (format-matrix rule), so only the basic view is expected to keep the pair parsing.
+                string wantLast=hide?"**a** ":"**a **",wantFirst=hide?" **b**":"** b**";
+                // A: delete the last word of a pair's text; the blank moves outside the closer.
+                SelectionPrepare(window,bold,bold.IndexOf('b'),1);SelectionKey(window,System.Windows.Input.Key.Delete);got=window.source.Document.Text;
+                check(view+" selection Delete of the last word: "+bold,got==wantLast,"got=["+got+"] want=["+wantLast+"] key: "+selectionKeyTrace);
+                SelectionPrepare(window,bold,bold.IndexOf('b'),1);SelectionKey(window,System.Windows.Input.Key.Back);got=window.source.Document.Text;
+                check(view+" selection Backspace of the last word: "+bold,got==wantLast,"got=["+got+"] want=["+wantLast+"] key: "+selectionKeyTrace);
+                // Cut shares this rule (HiddenMarkerDelete) but writes the system clipboard, so this host probe never runs it.
+                // B: delete the first word; the blank moves outside the opener.
+                SelectionPrepare(window,bold,bold.IndexOf('a'),1);SelectionKey(window,System.Windows.Input.Key.Delete);got=window.source.Document.Text;
+                check(view+" selection Delete of the first word: "+bold,got==wantFirst,"got=["+got+"] want=["+wantFirst+"] key: "+selectionKeyTrace);
+                // C: type a space over the last character ("**ab**": b is offset 3).
+                string wantC=hide?"**a** ":"**a **",wantCc=hide?"**a** c":"**a c**";int wantCaret=hide?6:4;
+                SelectionPrepare(window,"**ab**",3,1);SelectionType(window," ");got=window.source.Document.Text;int caret=window.source.CaretOffset;
+                check(view+" space typed over the last character: **ab**",got==wantC&&caret==wantCaret,"got=["+got+"] caret="+caret+" want=["+wantC+"] caret="+wantCaret);
+                SelectionType(window,"c");got=window.source.Document.Text;
+                check(view+" letter after that space: **ab**",got==wantCc,"got=["+got+"] want=["+wantCc+"]");
+                // D: the selection includes the closer.
+                string wantD=hide?"**a** ":"**a ",wantDc=hide?"**a** c":"**a c";int wantDCaret=hide?6:4;
+                SelectionPrepare(window,"**ab**",3,3);SelectionType(window," ");got=window.source.Document.Text;caret=window.source.CaretOffset;
+                check(view+" space typed over the last character and the closer: **ab**",got==wantD&&caret==wantDCaret,"got=["+got+"] caret="+caret+" want=["+wantD+"] caret="+wantDCaret);
+                SelectionType(window,"c");got=window.source.Document.Text;
+                check(view+" letter after that space (closer selected): **ab**",got==wantDc,"got=["+got+"] want=["+wantDc+"]");
+                // E: Ctrl+Backspace at the end of nested pairs. Rule: no literal marker, pairs balanced; expected text derived from the rule.
+                const string nested="**a ~~b c~~**";
+                SelectionPrepare(window,nested,nested.Length,0);
+                System.Windows.Documents.EditingCommands.DeletePreviousWord.Execute(null,window.source.TextArea);LongLineBench.Idle();
+                got=window.source.Document.Text;
+                check(view+" Ctrl+Backspace through nested pairs: "+nested,got=="**a ~~b~~** "&&SelectionBalanced(got),"got=["+got+"] balanced="+SelectionBalanced(got)+" want=[**a ~~b~~** ]");
+                // E2: the caret between the stacked closers (basic view: a click past the line end lands there, VM 11-07 rk11).
+                SelectionPrepare(window,nested,nested.Length-2,0);
+                System.Windows.Documents.EditingCommands.DeletePreviousWord.Execute(null,window.source.TextArea);LongLineBench.Idle();
+                got=window.source.Document.Text;
+                check(view+" Ctrl+Backspace between stacked closers: "+nested,got=="**a ~~b~~** ","got=["+got+"] want=[**a ~~b~~** ]");
+                // F: paste right after a closing backtick of a paragraph lands outside the code span.
+                SelectionPrepare(window,"`a`",3,0);
+                var data=new System.Windows.DataObject(System.Windows.DataFormats.UnicodeText,"X");
+                MarkdownClipboard.Set(data,"X");window.PasteData(data,false);window.FlushDocumentChanges();LongLineBench.Idle();
+                got=window.source.Document.Text;
+                check(view+" paste after a closing backtick in a paragraph",got=="`a`X","got=["+got+"] want=[`a`X]");
+            }
+        }finally{hideMarkers=oldHide;window.UpdateLivePreview();LongLineBench.Idle();}
+    }
+    // Code-review finds on table edges (2.3.1, not yet reproduced): 1 Enter in a cell's code span next to a backtick of the
+    // content, 2 Enter / multi-line paste over a selection inside a cell's code span, 3 Delete over a selection that runs
+    // from a whole table into a paragraph's pair, 4 (log only) plain paste over a selection from a paragraph into a row.
+    // Rule for 1-2: both pieces stay real code spans (the drawn code text is exactly the two halves, no "<br>" drawn inside).
+    static void TableEnterKey(MainWindow window){
+        var args=new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,System.Windows.PresentationSource.FromVisual(window.source),0,System.Windows.Input.Key.Enter){RoutedEvent=System.Windows.Input.Keyboard.PreviewKeyDownEvent};
+        window.source.TextArea.RaiseEvent(args);
+        if(!args.Handled){var down=new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,System.Windows.PresentationSource.FromVisual(window.source),0,System.Windows.Input.Key.Enter){RoutedEvent=System.Windows.Input.Keyboard.KeyDownEvent};window.source.TextArea.RaiseEvent(down);}
+        window.FlushDocumentChanges();LongLineBench.Idle();
+    }
+    // The text the row draws with the code style, one string per code span (hidden marker and padding characters left out).
+    static string DrawnCodeRuns(MainWindow window,int lineNumber){
+        var line=window.source.Document.GetLineByNumber(lineNumber);
+        string row=window.source.Document.GetText(line);
+        var info=window.livePreview==null?null:window.livePreview.Info(line);
+        if(info==null)return "(no parse)";
+        var runs=new System.Text.StringBuilder();var current=new System.Text.StringBuilder();bool open=false;
+        for(int i=0;i<row.Length;i++){
+            bool hidden=false;
+            foreach(var run in info.Replacements)if(run.Kind==MarkdownLivePreview.ReplacementKind.Hidden&&run.Length>0&&i>=run.Start&&i<run.Start+run.Length){hidden=true;break;}
+            bool code=StackedDrawnFlags(info,i)[3]=='C';
+            if(code){if(!hidden){current.Append(row[i]);open=true;}}
+            else if(open){runs.Append('[').Append(current).Append(']');current.Length=0;open=false;}
+        }
+        if(open)runs.Append('[').Append(current).Append(']');
+        return runs.ToString();
+    }
+    static void TableCodeCase(MainWindow window,Action<string,bool,string> check,string name,string row,string anchor,int anchorShift,int selectLength,string pasted,string wantRuns){
+        const string head="| h | i |\n| --- | --- |\n";
+        string fixture=head+row+"\n";
+        window.SetText(fixture);window.SetMode(true);LongLineBench.Idle();
+        window.source.Select(head.Length+row.IndexOf(anchor,StringComparison.Ordinal)+anchorShift,selectLength);LongLineBench.Idle();
+        if(pasted==null)TableEnterKey(window);
+        else{
+            var data=new System.Windows.DataObject(System.Windows.DataFormats.UnicodeText,pasted);
+            MarkdownClipboard.Set(data,pasted);window.PasteData(data,false);window.FlushDocumentChanges();LongLineBench.Idle();
+        }
+        string text=window.source.Document.Text;
+        var line=window.source.Document.GetLineByNumber(3);
+        string got=window.source.Document.GetText(line);
+        string runs=DrawnCodeRuns(window,3);
+        int breaks=0,at=0;while((at=got.IndexOf("<br>",at,StringComparison.Ordinal))>=0){breaks++;at+=4;}
+        bool cellsKept=window.source.Document.LineCount==fixture.Split('\n').Length&&got.StartsWith("| ",StringComparison.Ordinal)&&got.EndsWith(" | e |",StringComparison.Ordinal);
+        check(name,runs==wantRuns&&breaks==1&&cellsKept,"row=["+got+"] drawnCode="+runs+" want="+wantRuns+" breaks="+breaks+" cellsKept="+cellsKept);
+    }
+    static void VerifyTableEdgeEdits(MainWindow window,Action<string,bool,string> check){
+        bool oldHide=hideMarkers;
+        try{
+            foreach(bool hide in new[]{true,false}){
+                hideMarkers=hide;window.UpdateLivePreview();LongLineBench.Idle();
+                string view=hide?"basic":"live";
+                // 1: Enter next to a backtick that belongs to the span's content ("``a`b``": content a`b).
+                TableCodeCase(window,check,view+" cell Enter before an inner backtick keeps both code spans","| ``a`b`` | e |","a`b",1,0,null,"[a][`b]");
+                TableCodeCase(window,check,view+" cell Enter after an inner backtick keeps both code spans","| ``a`b`` | e |","a`b",2,0,null,"[a`][b]");
+                TableCodeCase(window,check,view+" cell Enter in the middle of a plain code span (control)","| `ab` | e |","ab",1,0,null,"[a][b]");
+                // 2: a selection inside the span is replaced by the break, the span splits around it.
+                TableCodeCase(window,check,view+" cell Enter over a selection inside a code span","| `a b c` | e |","b",0,1,null,"[a ][ c]");
+                TableCodeCase(window,check,view+" cell multi-line paste into a code span","| `ab` | e |","ab",1,0,"x\ny","[ax][yb]");
+                TableCodeCase(window,check,view+" cell multi-line paste over a selection inside a code span","| `a b c` | e |","b",0,1,"x\ny","[a x][y c]");
+                // 3: Delete over whole table + the start of a paragraph's pair; the pair keeps balanced markers (basic view).
+                // The live view edits the caret line as source, so it is the plain raw delete there.
+                bool balancedTail=true;
+                {
+                    const string tail="| a | b |\n| --- | --- |\n| c | d |\n\n**a b**";
+                    int cut=tail.IndexOf("b**",StringComparison.Ordinal);
+                    SelectionPrepare(window,tail,0,cut);SelectionKey(window,System.Windows.Input.Key.Delete);
+                    string got=window.source.Document.Text;
+                    balancedTail=SelectionBalanced(got);
+                    bool ok=hide?(balancedTail&&got.Trim()=="**b**"):got==tail.Substring(cut);
+                    check(view+" Delete from a table into a paragraph pair keeps the pair balanced",ok,"got=["+got+"] balanced="+balancedTail+" key: "+selectionKeyTrace);
+                    SelectionPrepare(window,tail,0,cut);SelectionKey(window,System.Windows.Input.Key.Back);
+                    got=window.source.Document.Text;
+                    ok=hide?(SelectionBalanced(got)&&got.Trim()=="**b**"):got==tail.Substring(cut);
+                    check(view+" Backspace from a table into a paragraph pair keeps the pair balanced",ok,"got=["+got+"] key: "+selectionKeyTrace);
+                    // The mirror: from inside a paragraph's pair through the end of a table.
+                    const string front="**a b**\n\n| a | b |\n| --- | --- |\n| c | d |";
+                    int from=front.IndexOf("b**",StringComparison.Ordinal);
+                    SelectionPrepare(window,front,from,front.Length-from);SelectionKey(window,System.Windows.Input.Key.Delete);
+                    got=window.source.Document.Text;
+                    // Exact: a parity count alone would also pass "a****".
+                    ok=hide?got=="**a** ":got==front.Substring(0,from);
+                    check(view+" Delete from a paragraph pair through a table end keeps the pair balanced",ok,"got=["+got+"] key: "+selectionKeyTrace);
+                }
+                // 4 (log only): plain paste over a selection from a paragraph into a table row; what the row becomes is reported.
+                {
+                    const string mixed="para text\n\n| a | b |\n| --- | --- |\n| c | d |\n";
+                    window.SetText(mixed);window.SetMode(true);LongLineBench.Idle();
+                    int to=mixed.IndexOf("| c",StringComparison.Ordinal)+3;
+                    window.source.Select(2,to-2);LongLineBench.Idle();
+                    var data=new System.Windows.DataObject(System.Windows.DataFormats.UnicodeText,"X");
+                    MarkdownClipboard.Set(data,"X");window.PasteData(data,false);window.FlushDocumentChanges();LongLineBench.Idle();
+                    check(view+" plain paste over a paragraph-to-row selection (log only)",true,"text=["+window.source.Document.Text.Replace("\n","\\n")+"]");
+                }
+            }
+        }finally{hideMarkers=oldHide;window.UpdateLivePreview();LongLineBench.Idle();}
+    }
+    static void VerifyStackedCloserTyping(MainWindow window,Action<string,bool,string> check){
+        bool oldHide=hideMarkers;
+        try{
+            hideMarkers=true;window.UpdateLivePreview();LongLineBench.Idle();
+            string[] lines={"> 번****굵은 붙여넣기** 와 *기울임***","> 번****굵은 붙여넣기** 와 *기울임***","**a *b***","**a *b***","> 번****굵은 붙여넣기** 와 *기울임***","> 번****굵은 붙여넣기** 와 *기울임***"};int[] back={0,0,0,0,2,2};
+            string[] typed={"`","a","c","`","`","a"};
+            string[] names={"abuse line backtick","abuse line letter","stacked closer letter","stacked closer backtick","abuse line backtick after paste","abuse line letter after paste"};
+            for(int i=0;i<lines.Length;i++){
+                window.SetText(lines[i]);window.SetMode(true);LongLineBench.Idle();
+                var session=window.livePreview;
+                window.source.CaretIndex=window.source.Document.TextLength-back[i];LongLineBench.Idle();
+                var lineBefore=window.source.Document.GetLineByNumber(1);
+                var before=session.Info(lineBefore);
+                int relative=window.source.CaretIndex-lineBefore.Offset;
+                int inside=MarkdownLivePreview.Session.HiddenCloseInside(before,relative+back[i]);
+                bool fb,fi,fs,fc;int fh;session.FormatAt(window.source.CaretIndex,out fb,out fi,out fs,out fc,out fh);string flags=(fb?"B":"-")+(fi?"I":"-")+(fs?"S":"-")+(fc?"C":"-");
+                int emphasisBefore=StackedEmphasisCount(before),hiddenBefore=StackedHiddenLength(before);
+                string source=window.source.Document.Text;
+                window.source.TextArea.PerformTextInput(typed[i]);LongLineBench.Idle();
+                string result=window.source.Document.Text;
+                int at=0;while(at<source.Length&&at<result.Length&&source[at]==result[at])at++;
+                bool oneChar=result.Length==source.Length+1&&result.Remove(at,1)==source;
+                var after=window.livePreview.Info(window.source.Document.GetLineByNumber(1));
+                int emphasisAfter=StackedEmphasisCount(after),hiddenAfter=StackedHiddenLength(after);
+                string drawn=oneChar?StackedDrawnFlags(after,at):"?";
+                check("stacked closer typing keeps every pair: "+names[i],oneChar&&(inside<0||at==inside)&&emphasisAfter==emphasisBefore&&hiddenAfter==hiddenBefore,"result="+result+", spot="+at+", inside="+inside+", emphasis="+emphasisBefore+"/"+emphasisAfter+", hidden="+hiddenBefore+"/"+hiddenAfter+", markers="+StackedMarkerList(before));
+                check("stacked closer typing takes the toolbar style: "+names[i],oneChar&&drawn==flags,"toolbar="+flags+", drawn="+drawn);
+                window.Undo();LongLineBench.Idle();
+            }
+        }finally{hideMarkers=oldHide;window.UpdateLivePreview();LongLineBench.Idle();}
+    }
+    static int StackedEmphasisCount(MarkdownLivePreview.LineInfo info){
+        int count=0;foreach(var span in MarkdownInlineSpans.Build(info,info.Text))if(span.Kind==MarkdownInlineSpans.SpanKind.Emphasis)count++;
+        return count;
+    }
+    static string StackedMarkerList(MarkdownLivePreview.LineInfo info){
+        var list=new System.Text.StringBuilder();foreach(var run in info.Replacements)if(run.Kind==MarkdownLivePreview.ReplacementKind.Hidden&&!run.Prefix&&run.Length>0)list.Append(run.Start).Append('+').Append(run.Length).Append(' ');
+        return list.ToString();
+    }
+    static int StackedHiddenLength(MarkdownLivePreview.LineInfo info){
+        int total=0;foreach(var run in info.Replacements)if(run.Kind==MarkdownLivePreview.ReplacementKind.Hidden&&!run.Prefix&&run.Length>0)total+=run.Length;
+        return total;
+    }
+    // Drawn bold/italic/strike/code of one source character, in the toolbar's B-I-S-C notation.
+    // The font weight the visual line currently on screen uses at one document offset ("none" when the line is
+    // not built, "?" when no element covers the offset). Reads the existing visual line, so a stale one shows.
+    static string DrawnWeight(MainWindow window,ICSharpCode.AvalonEdit.Document.DocumentLine line,int offset){
+        var view=window.source.TextArea.TextView;
+        var visual=view.GetVisualLine(line.LineNumber);
+        if(visual==null)return "none";
+        int relative=offset-visual.FirstDocumentLine.Offset;
+        foreach(var element in visual.Elements){
+            if(relative<element.RelativeTextOffset||relative>=element.RelativeTextOffset+element.DocumentLength)continue;
+            if(element.TextRunProperties==null||element.DocumentLength==0)continue;
+            return element.TextRunProperties.Typeface.Weight==System.Windows.FontWeights.Bold?"Bold":element.TextRunProperties.Typeface.Weight.ToString();
+        }
+        return "?";
+    }
+    static string StackedDrawnFlags(MarkdownLivePreview.LineInfo info,int relative){
+        bool bold=false,italic=false,strike=false,code=false;
+        foreach(var part in info.Styles){
+            if(relative<part.Start||relative+1>part.Start+part.Length)continue;
+            bold|=(part.Style&MarkdownLivePreview.Style.Bold)!=0;italic|=(part.Style&MarkdownLivePreview.Style.Italic)!=0;
+            strike|=(part.Style&MarkdownLivePreview.Style.Strike)!=0;code|=(part.Style&MarkdownLivePreview.Style.Code)!=0;
+        }
+        return (bold?"B":"-")+(italic?"I":"-")+(strike?"S":"-")+(code?"C":"-");
+    }
+    // 2.3.1 random format-abuse find: a formatted paste that carries the same emphasis as the pair around the
+    // caret ("**번글자**" + Markdown "**굵은 붙여넣기**") wrote markers that collided with the pair's own, so the
+    // parser paired the stars wrongly. The pasted text now drops the markers of the kinds that already enclose it
+    // (LiveMarkdownCommands.StripEnclosingStyles) and keeps its other styles. Generated text only; the paste goes
+    // through window.PasteData with MDNote's own Markdown format, the system clipboard is never touched.
+    static void VerifyPasteInsideSameStyle(MainWindow window,Action<string,bool,string> check){
+        bool oldHide=hideMarkers;
+        const string table="| h | i |\n| --- | --- |\n| **번글자** | 끝 |\n";
+        try{
+            foreach(bool hide in new[]{true,false}){
+                hideMarkers=hide;window.UpdateLivePreview();LongLineBench.Idle();
+                string view=hide?"basic":"live";
+                PasteSameStyleCase(window,check,view+" bold into bold","**번글자**","번",false,"**굵은 붙여넣기**","**번굵은 붙여넣기글자**",1,new[]{"번","굵","글"},new[]{"B---","B---","B---"});
+                PasteSameStyleCase(window,check,view+" bold with italic inside into bold","**번글자**","번",false,"**a *b* c**","**번a *b* c글자**",2,new[]{"a","b","글"},new[]{"B---","BI--","B---"});
+                PasteSameStyleCase(window,check,view+" italic into bold stays","**번글자**","번",false,"*x*","**번*x*글자**",2,new[]{"x","글"},new[]{"BI--","B---"});
+                PasteSameStyleCase(window,check,view+" bold into plain text unchanged","번글자","번",false,"**굵은 붙여넣기**","번**굵은 붙여넣기**글자",1,new[]{"번","굵","글"},new[]{"----","B---","----"});
+                PasteSameStyleCase(window,check,view+" bold into bold table cell",table,"번",false,"**굵은 붙여넣기**","| **번굵은 붙여넣기글자** | 끝 |",1,new[]{"번","굵","글"},new[]{"B---","B---","B---"});
+                PasteSameStyleCase(window,check,view+" bold over a selection inside bold","**번글자**","글",true,"**굵**","**번굵자**",1,new[]{"번","굵","자"},new[]{"B---","B---","B---"});
+                PasteSameStyleCase(window,check,view+" strike into strike","~~번글자~~","번",false,"~~굵~~","~~번굵글자~~",1,new[]{"번","굵","글"},new[]{"--S-","--S-","--S-"});
+                PasteSameStyleCase(window,check,view+" italic into italic","*번글자*","번",false,"*x*","*번x글자*",1,new[]{"번","x","글"},new[]{"-I--","-I--","-I--"});
+                PasteSameStyleCase(window,check,view+" bold into italic stays","*번글자*","번",false,"**x**","*번**x**글자*",2,new[]{"번","x","글"},new[]{"-I--","BI--","-I--"});
+                PasteSameStyleCase(window,check,view+" literal star in the paste untouched","**번글자**","번",false,"a * b","**번a * b글자**",1,new[]{"a","글"},new[]{"B---","B---"});
+            }
+        }finally{hideMarkers=oldHide;window.UpdateLivePreview();LongLineBench.Idle();}
+        // Review fix: the other pairs must survive at the shifted offsets ("_" cannot close inside "b_c", so "*b_c*" stays the italic).
+        string kept=StripPastedPairs("**_a** *b_c*",true,false,false);
+        check("strip keeps the other pair at its shifted place",kept=="_a *b_c*","got=["+kept+"]");
+        string repaired=StripPastedPairs("**a** b*",true,false,false);
+        check("strip with a literal star left over",repaired=="a b*","got=["+repaired+"]");
+        string plain=StripPastedPairs("**x** *y*",true,false,false);
+        check("strip drops the same-kind pair and keeps the other",plain=="x *y*","got=["+plain+"]");
+    }
+    // A pasted text that is one complete span ("**`a`**", bold around inline code) at a table cell's text end is not a
+    // character typed next to a closer (rule H10 stays for typing): it is inserted as-is where the caret is, after the
+    // cell's own closer, and draws as its own bold+code span, in both views. Before the fix the basic view snapped the
+    // caret into a closing "**" and StripEnclosingStyles dropped the paste's own markers ("| **x`a`** |").
+    static void VerifyCellSpanPaste(MainWindow window,Action<string,bool,string> check){
+        bool oldHide=hideMarkers;
+        try{
+            foreach(bool hide in new[]{true,false}){
+                hideMarkers=hide;window.UpdateLivePreview();LongLineBench.Idle();
+                string view=hide?"basic":"live";
+                PasteSameStyleCase(window,check,view+" bold code into a cell after bold","| h | i |\n| --- | --- |\n| **x** | 끝 |\n","**x**",false,"**`a`**","| **x****`a`** | 끝 |",2,new[]{"x","a"},new[]{"B---","B--C"});
+                PasteSameStyleCase(window,check,view+" bold code into a cell after code","| h | i |\n| --- | --- |\n| `x` | 끝 |\n","`x`",false,"**`a`**","| `x`**`a`** | 끝 |",1,new[]{"x","a"},new[]{"---C","B--C"});
+                PasteSameStyleCase(window,check,view+" bold code into a cell after plain text","| h | i |\n| --- | --- |\n| x | 끝 |\n","x",false,"**`a`**","| x**`a`** | 끝 |",1,new[]{"x","a"},new[]{"----","B--C"});
+            }
+        }finally{hideMarkers=oldHide;window.UpdateLivePreview();LongLineBench.Idle();}
+    }
+    // One case: the caret goes right after `anchor` (or the anchor is selected), `pasted` arrives as MDNote Markdown,
+    // and the line must read `expected`, with `pairs` emphasis pairs, each probed character drawn with its flags,
+    // and one Undo must restore the fixture.
+    static void PasteSameStyleCase(MainWindow window,Action<string,bool,string> check,string name,string fixture,string anchor,bool select,string pasted,string expected,int pairs,string[] probes,string[] flags){
+        window.SetText(fixture);window.SetMode(true);LongLineBench.Idle();
+        int index=fixture.IndexOf(anchor,StringComparison.Ordinal);
+        if(select)window.source.Select(index,anchor.Length);else window.source.Select(index+anchor.Length,0);
+        LongLineBench.Idle();
+        int lineNumber=window.source.Document.GetLineByOffset(index).LineNumber;
+        var data=new System.Windows.DataObject(System.Windows.DataFormats.UnicodeText,pasted);
+        MarkdownClipboard.Set(data,pasted);
+        window.PasteData(data,false);window.FlushDocumentChanges();LongLineBench.Idle();
+        var line=window.source.Document.GetLineByNumber(lineNumber);
+        string row=window.source.Document.GetText(line);
+        var info=window.livePreview==null?null:window.livePreview.Info(line);
+        int found=info==null?-1:StackedEmphasisCount(info);
+        var drawn=new System.Text.StringBuilder();bool flagsOk=info!=null;
+        for(int i=0;i<probes.Length;i++){
+            int at=row.IndexOf(probes[i],StringComparison.Ordinal);
+            string got=info==null||at<0?"?":StackedDrawnFlags(info,at);
+            drawn.Append(probes[i]).Append('=').Append(got).Append(' ');
+            if(got!=flags[i])flagsOk=false;
+        }
+        check("paste inside same style "+name,row==expected&&found==pairs&&flagsOk,"row=["+row+"] want=["+expected+"], pairs="+found+"/"+pairs+", drawn "+drawn);
+        window.Undo();LongLineBench.Idle();
+        check("paste inside same style undoes in one step "+name,window.source.Document.Text==fixture,"text=["+window.source.Document.Text.Replace("\n","\\n")+"]");
+    }
     static void VerifyTableToolbarExitRegression(MainWindow window,Action<string,bool,string> check){
         const string fixture="before table\n\n| a | b |\n|---|---|\n| x | y |\n\nafter table\n\ntail\n";
         foreach(string input in new[]{"caret API","keyboard","click hit-test"}){
@@ -1006,6 +1414,14 @@ public partial class MainWindow {
             check("footnote and reference links resolve",noteUrl=="#^n"&&refUrl=="ref:Docs"&&window.source.Document.GetText(window.source.Document.GetLineByOffset(window.source.CaretIndex)).StartsWith("[^n]:",StringComparison.Ordinal)&&definition!=null,"note="+noteUrl+", ref="+refUrl+", definition="+(definition!=null));
             VerifyLiveToolbarRegression(window,check,file);
             VerifyTableToolbarExitRegression(window,check);
+            VerifyStackedCloserTyping(window,check);
+            VerifyPasteInsideSameStyle(window,check);
+            VerifyCellSpanPaste(window,check);
+            VerifyUnderscoreSpaceDelete(window,check);
+            VerifyEnterUndoEnter(window,check);
+            VerifyWordDeleteEmptiesPair(window,check);
+            VerifySelectionMarkerEdits(window,check);
+            VerifyTableEdgeEdits(window,check);
             // Scrollbar look: a long document in dark, then light.
             var lines=new System.Text.StringBuilder();for(int i=0;i<120;i++)lines.Append("\n스크롤 확인 줄 ").Append(i);
             window.source.Document.Insert(window.source.Document.TextLength,lines.ToString());window.source.ScrollToVerticalOffset(300);LongLineBench.Idle();

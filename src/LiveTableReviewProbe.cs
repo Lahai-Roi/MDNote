@@ -685,9 +685,10 @@ internal static class LiveTableReviewProbe {
             }
         }
     }
-    // E3: a link label owns its inline markup (GFM parses emphasis and tags inside "[...]"),
-    // so the J4 widening sees the pair under the link and a cut of the label's visible text
-    // takes the markers, the span and the label with it - it never leaves "****" on screen.
+    // E3: a link label owns its inline markup (GFM parses emphasis and tags inside "[...]").
+    // 2.3.1 (D1): a cut of the label's whole visible text leaves nothing drawn inside the label,
+    // so every pair around it (the emphasis, the span and the link itself) goes whole in the same
+    // command: no "****", no empty "<span></span>" and no "[](url)" is left on screen.
     static void RunLinkLabelCutCase() {
         SourceEditor editor=null;Window window=null;MarkdownLivePreview.Session session=null;
         try {
@@ -723,7 +724,7 @@ internal static class LiveTableReviewProbe {
             int widened=editor.SelectionLength;
             editor.SelectedText="";Pump();
             string after=editor.Document.GetText(editor.Document.GetLineByNumber(4));
-            Check("cut of link label text leaves no emptied pair",after=="- ##### [](https://example.com/linked)셋째 줄",
+            Check("cut of link label text takes the emptied link whole",after=="- ##### 셋째 줄",
                 "widened="+widened+", line=["+after+"]");
         } finally {
             if (session!=null) session.Dispose();

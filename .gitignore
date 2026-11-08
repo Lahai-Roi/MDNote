@@ -19,3 +19,6 @@ test-results/
 src/installer/legacy-cleanup.nsh
 src/installer/uninstall-files.nsh
 *.psd
+# vendored AvalonEdit build output (the shipped dll is src/lib)
+src/vendor/AvalonEdit/bin/
+src/vendor/AvalonEdit/obj/

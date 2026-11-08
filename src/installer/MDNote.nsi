@@ -11,7 +11,7 @@
 !ifndef OUTPUT
  !error "OUTPUT is required"
 !endif
-!define VERSION "2.3.0"
+!define VERSION "2.3.1"
 !ifdef TEST_BUILD
  !define APP_NAME "MDNote (설치 검사)"
  !define APP_KEY "MDNoteInstallerSmokeTest"
@@ -39,7 +39,7 @@ SetOverwrite on
 ShowInstDetails show
 ShowUninstDetails show
 ManifestDPIAware true
-VIProductVersion "2.3.0.0"
+VIProductVersion "2.3.1.0"
 VIAddVersionKey /LANG=1042 "ProductName" "$(MDNoteText16)"
 VIAddVersionKey /LANG=1042 "FileDescription" "${APP_NAME} 설치 프로그램"
 VIAddVersionKey /LANG=1042 "FileVersion" "${VERSION}"
@@ -63,7 +63,7 @@ VIAddVersionKey /LANG=1042 "LegalCopyright" "MDNote"
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_FUNCTION CreateDesktopShortcut
 !define MUI_FINISHPAGE_RUN_TEXT "$(MDNoteText5)"
-!define MUI_FINISHPAGE_SHOWREADME_NOTCHECKED
+; Start menu shortcuts are checked by default (user 2026-11-08).
 !define MUI_FINISHPAGE_SHOWREADME
 !define MUI_FINISHPAGE_SHOWREADME_FUNCTION CreateStartMenuShortcuts
 !define MUI_FINISHPAGE_SHOWREADME_TEXT "$(MDNoteText6)"

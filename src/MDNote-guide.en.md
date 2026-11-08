@@ -7,7 +7,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | Menu | Shortcut | Description |
 | --- | --- | --- |
 | Continue previous session | | When on, closes unsaved documents without prompting and reopens them as they were the next time you open MDNote. Off by default. |
-| Recent files | | Reopen a recently opened document. |
+| Recent files | | Reopen a recently opened document. At the bottom, **Clear recent files** empties the list, and turning on **Disable recent files** empties it and stops recording. |
 | Recover documents… | | Recover or delete documents that were closed without saving. |
 | ![New](guide-new.png) New | Ctrl+N, Ctrl+T | Open a new document. |
 | ![Open](guide-open.png) Open… | Ctrl+O | Open an MD or TXT file. |

@@ -373,11 +373,17 @@ public partial class MainWindow {
     }
     /* A CRLF document keeps its CR in the editor text, and .NET's multiline $ stops only before LF and its
        . takes the CR: "abc$" found nothing and ".*" swallowed the CR (a replace then ate the line break).
-       Outside a character class and an escape, $ becomes (?=\r?$) and . becomes [^\r\n], so a pattern
-       reads the line the way the reader sees it. Everything else is passed through untouched. */
+       Outside a character class and an escape, $ becomes (?<!\r)(?=\r?$): the end of the line as the
+       reader sees it, before the CR, and never the position between the CR and the LF, where a
+       zero-length match would split the pair into two line breaks of its own. . becomes [^\r\n].
+       A (?#...) comment is copied untouched (a $ or . in it is comment text, not pattern syntax).
+       A stretch the user turns dot-all on for himself - (?s), (?s:...) or (?-s) - keeps its own dots:
+       the flag is followed through the enclosing groups and put back at a closing paren, so only the
+       dots the user did not ask to cross lines are rewritten. Everything else is passed through. */
     internal static string AdaptPatternForCrLf(string pattern){
         if(pattern.IndexOf('$')<0&&pattern.IndexOf('.')<0)return pattern;
-        var adapted=new StringBuilder(pattern.Length+16);bool inClass=false;
+        var adapted=new StringBuilder(pattern.Length+16);bool inClass=false,dotAll=false;
+        var groups=new List<bool>();
         for(int i=0;i<pattern.Length;i++){
             char c=pattern[i];
             if(c=='\\'){adapted.Append(c);if(i+1<pattern.Length){i++;adapted.Append(pattern[i]);}continue;}
@@ -388,8 +394,45 @@ public partial class MainWindow {
                 if(j<pattern.Length&&pattern[j]==']'){adapted.Append(']');j++;}
                 i=j-1;continue;
             }
-            if(c=='$'){adapted.Append("(?=\\r?$)");continue;}
-            if(c=='.'){adapted.Append("[^\\r\\n]");continue;}
+            if(c=='('){
+                /* (?#...) is a comment: a paren, bracket, $ or . inside one is not pattern text, and the
+                   closing paren is the first one - copy it whole so it cannot change the scan's state. */
+                if(i+2<pattern.Length&&pattern[i+1]=='?'&&pattern[i+2]=='#'){
+                    int end=pattern.IndexOf(')',i+3);if(end<0)end=pattern.Length-1;
+                    adapted.Append(pattern,i,end-i+1);i=end;continue;
+                }
+                /* Inline options right after "(?": (?imnsx) applies to the rest of the enclosing group,
+                   (?imnsx:...) to its own group. Only s (dot-all) changes this adaptation. */
+                int optionAt=i+2,start=optionAt;bool sets=false,clears=false,minus=false;
+                if(i+1<pattern.Length&&pattern[i+1]=='?'){
+                    while(optionAt<pattern.Length){
+                        char option=pattern[optionAt];
+                        if(option=='-'){if(minus)break;minus=true;}
+                        else if(option=='i'||option=='m'||option=='n'||option=='s'||option=='x'){if(option=='s'){if(minus)clears=true;else sets=true;}}
+                        else break;
+                        optionAt++;
+                    }
+                }
+                if(optionAt>start&&optionAt<pattern.Length&&pattern[optionAt]==')'){
+                    if(sets)dotAll=true;if(clears)dotAll=false;
+                    adapted.Append(pattern,i,optionAt-i+1);i=optionAt;continue;
+                }
+                if(optionAt>start&&optionAt<pattern.Length&&pattern[optionAt]==':'){
+                    groups.Add(dotAll);if(sets)dotAll=true;if(clears)dotAll=false;
+                    adapted.Append(pattern,i,optionAt-i+1);i=optionAt;continue;
+                }
+                groups.Add(dotAll);adapted.Append(c);continue;
+            }
+            if(c==')'){
+                if(groups.Count>0){int last=groups.Count-1;dotAll=groups[last];groups.RemoveAt(last);}
+                adapted.Append(c);continue;
+            }
+            if(c=='$'){adapted.Append("(?<!\\r)(?=\\r?$)");continue;}
+            if(c=='.'){
+                if(dotAll)adapted.Append('.');
+                else adapted.Append("[^\\r\\n]");
+                continue;
+            }
             adapted.Append(c);
         }
         return adapted.ToString();

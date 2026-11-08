@@ -84,6 +84,16 @@ public partial class MainWindow {
         var closing=new ViewPreferences {Language="ko",Dark=false,Size=16,Family="Malgun Gothic",WordWrap=true,Recent=new List<string>{a,b},WindowPlacement="100|120|900|700|normal"};
         ViewPreferences mergedClose=ViewPreferences.MergePreferences(closing,baseline,mergedB);
         check("merge: close writes only its placement",mergedClose.WindowPlacement=="100|120|900|700|normal"&&mergedClose.Language=="en"&&mergedClose.Dark&&mergedClose.Size==24&&!mergedClose.WordWrap&&mergedClose.Family=="Consolas","placement="+mergedClose.WindowPlacement+", language="+mergedClose.Language+", dark="+mergedClose.Dark+", font="+mergedClose.Family);
+        // 최근 파일 기록 삭제 in window A, then window B (still holding a, b) opens c and saves: a and b
+        // stay cleared. A's off switch then wins over B, which never touched it (Argon review 11-07).
+        var cleared=ViewPreferences.MergePreferences(new ViewPreferences {Language="ko",Recent=new List<string>()},new ViewPreferences {Language="ko",Recent=new List<string>{a,b}},new ViewPreferences {Language="ko",Recent=new List<string>{a,b}});
+        int clearedCount=cleared.Recent.Count;/* the merge returns the disk snapshot it was given, changed in place */
+        var reopened=ViewPreferences.MergePreferences(new ViewPreferences {Language="ko",Recent=new List<string>{c,a,b}},new ViewPreferences {Language="ko",Recent=new List<string>{a,b}},cleared);
+        check("merge: another window's clear is not undone",clearedCount==0&&reopened.Recent.Count==1&&reopened.Recent[0]==c,"cleared="+clearedCount+" reopened="+String.Join(",",reopened.Recent.ToArray()));
+        var off=ViewPreferences.MergePreferences(new ViewPreferences {Language="ko",RecentOff=true,Recent=new List<string>()},new ViewPreferences {Language="ko",Recent=new List<string>{a}},new ViewPreferences {Language="ko",Recent=new List<string>{a}});
+        bool offWritten=off.RecentOff;
+        var other=ViewPreferences.MergePreferences(new ViewPreferences {Language="ko",Recent=new List<string>{d,a}},new ViewPreferences {Language="ko",Recent=new List<string>{a}},off);
+        check("merge: another window's off switch holds",offWritten&&other.RecentOff&&other.Recent.Count==0&&other.Serialize().IndexOf("<Recent>",StringComparison.Ordinal)<0,"off="+off.RecentOff+" other="+other.RecentOff+" recent="+other.Recent.Count);
         // Word wrap round-trips through the file, and a file from an older build still wraps.
         string path=Path.Combine(folder,"settings-merge-roundtrip.xml");bool unreadable;
         ViewPreferences.Save(path,new ViewPreferences {WordWrap=false}.Serialize());

@@ -1214,9 +1214,39 @@ internal static class TableCaretProbe {
         }
         return handled;
     }
+    // 11-08 user (video 205745): in a cell holding a sized span, text typed after the span ("테스트" at 40px, then "니거 ")
+    // did not go with Backspace.
+    static void SizedCellBackspace(MainWindow window,string tag){
+        string span="<span style=\"font-size:40px\">테스트</span>";
+        string fixture="before\n\n| a | b |\n| --- | --- |\n| "+span+"니거  | d |\n\nafter\n";
+        window.SetText(fixture);window.SetMode(true);LongLineBench.Idle();
+        var row=window.source.Document.GetLineByNumber(5);
+        int caret=row.Offset+window.source.Document.GetText(row).IndexOf("니거 ",StringComparison.Ordinal)+3;
+        window.source.Select(caret,0);LongLineBench.Idle();
+        var steps=new StringBuilder();
+        for(int press=0;press<3;press++){PressLiveKey(window,Key.Back);steps.Append(" [").Append(FlatText(window.source.Document.GetText(window.source.Document.GetLineByNumber(5)))).Append("]@").Append(window.source.CaretIndex);}
+        string expected="| "+span+" | d |";
+        Check(tag+" Backspace deletes text typed after a sized span in a cell",window.source.Document.GetText(window.source.Document.GetLineByNumber(5))==expected,steps.ToString());
+    }
+    // 11-08 user (video 214334): a size picked in a cell before typing left the drawn caret body-sized.
+    static void PendingSizeCellCaret(MainWindow window,string tag){
+        window.SetText(CellFixture());window.SetMode(true);LongLineBench.Idle();
+        var row=window.source.Document.GetLineByNumber(5);var info=window.livePreview.Info(row);
+        window.source.Select(row.Offset+info.Cells[0].End,0);window.source.Focus();LongLineBench.Idle();
+        window.livePreview.UpdateTableCaretNowForProbe();
+        Rect before=window.livePreview.TableCaretPainted();
+        window.SetFontSizeForProbe(40);LongLineBench.Idle();
+        window.livePreview.UpdateTableCaretNowForProbe();
+        Rect after=window.livePreview.TableCaretPainted();
+        Check(tag+" a size picked in a cell sizes the drawn caret before typing",!before.IsEmpty&&!after.IsEmpty&&after.Height>before.Height*1.8&&Math.Abs(after.Bottom-before.Bottom)<1.5,
+            "before="+before+" after="+after+" text=["+FlatText(window.text)+"]");
+        window.SetText(CellFixture());LongLineBench.Idle();
+    }
     static void RunCellEditing(MainWindow window,int width){
         string tag="live cell editing "+width;
         if(window.livePreview==null){Check(tag+" attached",false,"no live preview");return;}
+        SizedCellBackspace(window,tag);
+        PendingSizeCellCaret(window,tag);
         string fixture=CellFixture();
         // Enter on a caret row: one "<br>" inside the cell, never a new source line.
         window.SetText(fixture);window.SetMode(true);LongLineBench.Idle();

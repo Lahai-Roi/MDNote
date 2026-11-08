@@ -5,7 +5,7 @@ if(-not $NsisDirectory){$found=Get-Command makensis.exe -ErrorAction SilentlyCon
 if(-not $NsisDirectory){throw 'NSIS 3.13 폴더를 -NsisDirectory로 지정하세요.'}
 $compiler=Join-Path $NsisDirectory 'makensis.exe'
 if(-not(Test-Path -LiteralPath $compiler)){throw 'makensis.exe가 없습니다.'}
-if(-not $OutputFile){$OutputFile=Join-Path (Split-Path $sourceRoot) 'MDNote-Setup-2.3.0.exe'}
+if(-not $OutputFile){$OutputFile=Join-Path (Split-Path $sourceRoot) 'MDNote-Setup-2.3.1.exe'}
 $OutputFile=[IO.Path]::GetFullPath($OutputFile)
 if($OutputFile.StartsWith($sourceRoot+'\',[StringComparison]::OrdinalIgnoreCase)){throw '설치 EXE는 소스 폴더 밖에 저장하세요.'}
 $utf8=New-Object Text.UTF8Encoding($true)

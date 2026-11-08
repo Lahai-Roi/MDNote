@@ -1705,8 +1705,12 @@ internal static class WindowAbuseProbe {
             // Help > usage documents only when their files are next to the executable; a missing file
             // would raise a real message box, which a headless probe must not do.
             string baseDir=AppDomain.CurrentDomain.BaseDirectory;
-            string usageKo=Path.Combine(baseDir,"MDNote 사용법.md");
-            string exampleKo=Path.Combine(baseDir,"마크다운 작성 예제.md");
+            // Same order as MainWindow.HelpFile: the help\ folder first, the exe folder for an older layout.
+            string helpDir=Path.Combine(baseDir,"help");
+            string usageKo=Path.Combine(helpDir,"MDNote 사용법.md");
+            if (!File.Exists(usageKo)) usageKo=Path.Combine(baseDir,"MDNote 사용법.md");
+            string exampleKo=Path.Combine(helpDir,"마크다운 작성 예제.md");
+            if (!File.Exists(exampleKo)) exampleKo=Path.Combine(baseDir,"마크다운 작성 예제.md");
             if (File.Exists(usageKo)) {
                 int before=Documents(window).Count;
                 RunStep("menu:help-usage",delegate { Press(ChildItem(helpMenu,"MDNote 사용법")); Pump(); });

@@ -62,6 +62,7 @@ internal static partial class MarkdownLivePreview {
             // composition window reads its rectangle), only its pixels are covered here.
             View.InsertLayer(tableCaretLayer, KnownLayer.Caret, LayerInsertionPosition.Above);
             Editor.TextArea.Caret.PositionChanged += TableCaretCaretChanged;
+            Editor.TextArea.Caret.Refreshed += TableCaretRefreshed;
             Editor.TextArea.SelectionChanged += TableCaretSelectionChanged;
             Editor.TextArea.IsKeyboardFocusWithinChanged += TableCaretFocusChanged;
             View.ScrollOffsetChanged += TableCaretScrollChanged;
@@ -82,6 +83,7 @@ internal static partial class MarkdownLivePreview {
 
         void DetachTableCaret() {
             Editor.TextArea.Caret.PositionChanged -= TableCaretCaretChanged;
+            Editor.TextArea.Caret.Refreshed -= TableCaretRefreshed;
             Editor.TextArea.SelectionChanged -= TableCaretSelectionChanged;
             Editor.TextArea.IsKeyboardFocusWithinChanged -= TableCaretFocusChanged;
             View.ScrollOffsetChanged -= TableCaretScrollChanged;
@@ -196,11 +198,147 @@ internal static partial class MarkdownLivePreview {
                 return;
             }
             tableCaretRect = rect;
+            MeasureTableCaretPaint();
             if (rect.IsEmpty) ShowStockTableCaret(); else HideStockTableCaret();
             if (tableCaretLayer != null) tableCaretLayer.SetCaret(rect);
         }
 
-        Rect ComputeTableCaretRect(out bool pending) {
+        // 11-08 user (video 214334): a size picked before typing left the caret body-sized in a cell. The painted caret takes
+        // the pending size's height, bottom on the row's text bottom. A composition string is cell text now (CellText), so the
+        // caret rectangle is already after it and the painted caret needs no shift (tableCaretPaintDx stays 0).
+        double tableCaretPaintDx, tableCaretPaintHeight = -1;
+        internal Rect TableCaretPainted() {
+            Rect rect = tableCaretRect;
+            if (rect.IsEmpty) return rect;
+            double height = tableCaretPaintHeight > 0 ? tableCaretPaintHeight : rect.Height;
+            return new Rect(rect.X + tableCaretPaintDx, rect.Bottom - height, rect.Width, height);
+        }
+        void MeasureTableCaretPaint() {
+            tableCaretPaintDx = 0; tableCaretPaintHeight = -1;
+            if (tableCaretRect.IsEmpty) return;
+            double pending = Editor.PendingImeSize();
+            if (pending < 6) return;
+            double size; Typeface face;
+            try { LiveCompositionGeometry.Position(Editor, out size, out face); } catch (Exception) { return; }
+            if (size < 4 || face == null) return;
+            tableCaretPaintHeight = pending * face.FontFamily.LineSpacing;
+        }
+
+        // ---- IME composition string drawn inside the caret's table cell (CellText / TableProjection) ----
+        // The line whose row was last given a composition string: rebuilt when the composition ends or moves away.
+        DocumentLine imeRowLine;
+
+        // Called by the strut generator before a table row is laid out: records the editor's composition string for the row the caret is in
+        // (ImeText/ImeAt/ImeCell/ImeKey on its LineInfo). Cost with no composition: one property read.
+        internal void NoteRowIme(DocumentLine line, LineInfo info) {
+            info.ImeText = null; info.ImeKey = null; info.ImeAttrs = null; info.ImeCell = -1;
+            string text = Editor.ImeCompositionText;
+            if (String.IsNullOrEmpty(text) || info.Delimiter || info.Cells == null || info.Cells.Count == 0) return;
+            if (disposed || Editor.Document != Document) return;
+            int caret = Editor.CaretOffset;
+            if (caret < line.Offset || caret > line.EndOffset) return;
+            int at;
+            int cell = ImeCellOf(info, caret - line.Offset, out at);
+            if (cell < 0) return;
+            info.ImeText = text; info.ImeAttrs = Editor.ImeCompositionAttrs; info.ImeCell = cell; info.ImeAt = at;
+            info.ImeKey = ImeKeyOf(info);
+            imeRowLine = line;
+        }
+
+        // The cell a composition at this line-relative offset belongs to, and the source offset inside that cell its characters map to
+        // (the caret's own offset, or the cell's start/end when the caret stands in padding or a gap). Same rule as TableCellForOffset.
+        static int ImeCellOf(LineInfo info, int relative, out int at) {
+            List<Cell> cells = info.Cells;
+            at = relative;
+            if (cells == null || cells.Count == 0) return -1;
+            if (relative < cells[0].Start) { at = cells[0].Start; return 0; }
+            for (int c = 0; c < cells.Count; c++) {
+                if (relative < cells[c].Start) break;
+                if (relative > cells[c].End) continue;
+                return c;
+            }
+            for (int c = 0; c + 1 < cells.Count; c++) {
+                if (relative >= cells[c + 1].Start) continue;
+                string text = info.Text;
+                int pipe = cells[c].End;
+                while (pipe < cells[c + 1].Start && pipe < text.Length && text[pipe] != '|') pipe++;
+                if (relative <= pipe) { at = cells[c].End; return c; }
+                at = cells[c + 1].Start; return c + 1;
+            }
+            at = cells[cells.Count - 1].End;
+            return cells.Count - 1;
+        }
+
+        // Names everything a composition cell is drawn from, so a changed string, clause or armed style rebuilds the row.
+        string ImeKeyOf(LineInfo info) {
+            var key = new System.Text.StringBuilder();
+            key.Append(info.ImeCell).Append('|').Append(info.ImeAt).Append('|').Append(info.ImeText).Append('|');
+            if (info.ImeAttrs != null) foreach (byte b in info.ImeAttrs) key.Append((char)('0' + (b & 7)));
+            key.Append('|');
+            var ask = Editor.PendingImeStyle;
+            ImePendingStyle style = null;
+            if (ask != null) { try { style = ask(); } catch (Exception) { style = null; } }
+            if (style != null) {
+                key.Append(style.Bold ? 'B' : '-').Append(style.Italic ? 'I' : '-').Append(style.Strike ? 'S' : '-').Append(style.Code ? 'C' : '-').Append(style.Size);
+                if (style.Color != null) key.Append(style.Color.ToString());
+            }
+            return key.ToString();
+        }
+
+        // SourceEditor.ImeStringChanged: the composition string changed (before the caret line is redrawn). The caret's cell grows to hold it,
+        // like a typed character does (the redraw that follows lays the row out with the string in the cell); an ended composition rebuilds a row
+        // that was left behind. O(table) per update, nothing when the caret is not in a table row.
+        void ImeStringChangedInTable() {
+            if (disposed || Editor.Document != Document) return;
+            string text = Editor.ImeCompositionText;
+            int offset = Math.Max(0, Math.Min(Editor.CaretOffset, Document.TextLength));
+            DocumentLine line = Document.GetLineByOffset(offset);
+            DocumentLine old = imeRowLine;
+            if (old != null && !Object.ReferenceEquals(old, line)) {
+                // The composition left the row it was drawn in (caret moved), or it ended and the caret is elsewhere: rebuild that row once.
+                imeRowLine = null;
+                if (!old.IsDeleted) View.Redraw(old);
+            }
+            if (String.IsNullOrEmpty(text)) { imeRowLine = null; return; }
+            LineInfo info = Info(line);
+            if (!info.Table || info.Delimiter || info.Cells == null || info.Cells.Count == 0 || info.TableStart == null) return;
+            TableLayout table = FindTable(info.TableStart);
+            if (table == null || table.Start.IsDeleted) return;
+            if (GrowTypingColumn(info, table, line, info.Cells)) { table.Version++; RedrawTable(table); }
+        }
+
+        // Where the composition string drawn in the caret's cell starts (TextView coordinates, scroll subtracted), for the composition form
+        // and the candidate / Hanja list. False when the caret's cell draws no composition string.
+        internal bool CompositionStartRect(out Rect rect) {
+            rect = Rect.Empty;
+            if (disposed || String.IsNullOrEmpty(Editor.ImeCompositionText)) return false;
+            bool pending;
+            try { rect = ComputeTableCaretRect(out pending, 1); } catch (Exception) { rect = Rect.Empty; }
+            return !rect.IsEmpty;
+        }
+
+        // The drawn composition string as a rectangle (left = its start, width = its width on the start's row) and the offset of its target
+        // clause from the start; SourceEditor.ImeCandidateGeometry anchors the candidate window with it.
+        internal bool ImeCompositionSpan(out Rect span, out double target) {
+            span = Rect.Empty; target = 0;
+            Rect start;
+            if (!CompositionStartRect(out start)) return false;
+            bool pending;
+            Rect end = Rect.Empty, hot = Rect.Empty;
+            try { end = ComputeTableCaretRect(out pending, 0); hot = ComputeTableCaretRect(out pending, 2); } catch (Exception) { }
+            double width = !end.IsEmpty && end.Y == start.Y && end.X > start.X ? end.X - start.X : 1;
+            span = new Rect(start.X, start.Y, width, start.Height);
+            if (!hot.IsEmpty && hot.Y == start.Y && hot.X >= start.X) target = hot.X - start.X;
+            return true;
+        }
+        // Arming or dropping a pending size redraws the caret (Caret.Refresh); the drawn table caret follows it.
+        void TableCaretRefreshed(object sender, EventArgs e) { QueueTableCaretUpdate(); }
+
+        Rect ComputeTableCaretRect(out bool pending) { return ComputeTableCaretRect(out pending, 0); }
+
+        // anchor 0: the caret (after a composition string drawn in the cell); 1: where that composition string starts;
+        // 2: where its target clause starts. Empty for 1 and 2 when the cell draws no composition string.
+        Rect ComputeTableCaretRect(out bool pending, int anchor) {
             pending = false;
             if (!View.VisualLinesValid) { pending = true; return Rect.Empty; }
             TextArea area = Editor.TextArea;
@@ -222,6 +360,22 @@ internal static partial class MarkdownLivePreview {
             int cell, textIndex;
             if (!TableCellForOffset(info, element, relative, out cell, out textIndex)) return Rect.Empty;
             bool atWrapEnd = element.IsSoftWrapEnd(relative) && TableCaretAtWrapEnd(area.Caret);
+            // An empty cell's caret sits in the gap after its pipe, which names text index 0, the composition's start:
+            // the caret still goes after the string (11-08 VM, Japanese in an empty cell drew the caret before it).
+            if (anchor == 0) {
+                CellText own = info.Row.Texts != null && cell < info.Row.Texts.Length ? info.Row.Texts[cell] : null;
+                if (own != null && own.ImeLength > 0 && textIndex == own.ImeStart) textIndex = own.ImeStart + own.ImeLength;
+            }
+            if (anchor != 0) {
+                CellText drawn = info.Row.Texts != null && cell < info.Row.Texts.Length ? info.Row.Texts[cell] : null;
+                if (drawn == null || drawn.ImeLength <= 0) return Rect.Empty;
+                textIndex = drawn.ImeStart;
+                if (anchor == 2) {
+                    byte[] attrs = Editor.ImeCompositionAttrs;
+                    if (attrs != null) for (int i = 0; i < attrs.Length && i < drawn.ImeLength; i++) if (attrs[i] == 1 || attrs[i] == 3) { textIndex += i; break; }
+                }
+                atWrapEnd = false;
+            }
             double x, rowTop, rowBottom;
             if (!CellGeometry(line, cell, textIndex, atWrapEnd, out x, out rowTop, out rowBottom)) return Rect.Empty;
             Rect box = TableCellBox(visual, cell);
@@ -431,7 +585,7 @@ internal static partial class MarkdownLivePreview {
                 // painting in this same frame); queue the re-assert before the next frame.
                 if (session.TableCaretStockNeedsHide()) session.ScheduleTableCaretReassert();
                 if (!drawing || !blink) return;
-                Rect rect = session.DrawnTableCaret;
+                Rect rect = session.TableCaretPainted();
                 if (rect.IsEmpty || !session.TableCaretFocused) return;
                 Brush ink = session.TableCaretInk();
                 if (ink == null) return;

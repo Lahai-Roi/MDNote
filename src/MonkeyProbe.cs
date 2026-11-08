@@ -564,7 +564,9 @@ internal static class MonkeyProbe {
             if (replacement.Length != 2) continue;
             if (String.CompareOrdinal(info.Text, replacement.Start, "**", 0, 2) == 0) hiddenPairs++;
         }
-        if (balancedSpan && recognisedTag &&
+        // An escaped tag ("\<span", pasted web text kept literal) is meant to show as text: only unescaped tags count (11-08 seed 4).
+        bool escapedTag = sourceLine.IndexOf("\\<span", StringComparison.OrdinalIgnoreCase) >= 0 || sourceLine.IndexOf("\\</span", StringComparison.OrdinalIgnoreCase) >= 0;
+        if (balancedSpan && recognisedTag && !escapedTag &&
             (visible.IndexOf("<span", StringComparison.OrdinalIgnoreCase) >= 0 || visible.IndexOf("</span", StringComparison.OrdinalIgnoreCase) >= 0)) {
             AddFailure(failures, step, "invariant:span", "the caret line still shows a recognised span tag: [" + OneLine(visible) + "] source=[" + OneLine(sourceLine) + "]");
             return;

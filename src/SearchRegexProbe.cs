@@ -7,6 +7,7 @@ using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
+using Rx=System.Text.RegularExpressions;
 namespace MDNote {
 // --search-regex-probe <folder>: the Find/Replace regular-expression option (".*" beside "Aa") driven through
 // the window's own search bar and entry points (ShowSearch/ShowReplace/FindNext/ReplaceOne/ReplaceAll/Undo),
@@ -41,6 +42,7 @@ static class SearchRegexProbe {
             Application.Current.ShutdownMode=ShutdownMode.OnExplicitShutdown;
             handler=delegate(object sender,DispatcherUnhandledExceptionEventArgs args){dispatcherFailed=true;args.Handled=true;if(dispatcherNote.Length==0&&args.Exception!=null)dispatcherNote=args.Exception.GetType().Name+": "+args.Exception.Message;};
             Application.Current.DispatcherUnhandledException+=handler;Application.Current.Dispatcher.UnhandledException+=handler;
+            try{RunPatternCases();}catch(Exception ex){Fail("pattern-cases-exception",ex.GetType().Name+": "+ex.Message.Replace("\r","").Replace("\n","\\n"));}
             RunMode(true);
             RunMode(false);
         }catch(Exception ex){all=false;lines.Add("FATAL "+ex.GetType().Name+": "+ex.Message.Replace("\r","").Replace("\n","\\n")+" @ "+Flat(ex.StackTrace));}
@@ -187,6 +189,30 @@ static class SearchRegexProbe {
         Query(window,"a.*$",true,true);
         Find(window);
         Check("crlf-anchors",!hasCr||(dollar==1&&Selected(window)=="ab"),"hasCr="+hasCr+" b$ count="+dollar+" a.*$ selected=["+Selected(window).Replace("\r","\\r").Replace("\n","\\n")+"]");
+        /* 13b the same text through the bar: one zero-width $ per line end (not a second one between the
+           CR and the LF), and a replace must never split a CRLF pair. The basic surface searches the
+           visible text, whose line breaks are all \n, so the CRLF half can only be judged on live. */
+        bool crlf=mode=="live"&&hasCr;
+        Query(window,"$",true,true);
+        int lineEnds=Count(window);
+        Check("crlf-dollar-count",!crlf||lineEnds==3,"count="+lineEnds+" "+CountText(window));
+        Open(window,"ab\r\ncd",true);
+        hasCr=DocText(window).IndexOf('\r')>=0;
+        Query(window,"$",true,true);Replacement(window,"X");
+        Invoke(window,"ReplaceAll");Pump();Invoke(window,"FlushDocumentChanges");
+        Check("crlf-dollar-replace",!crlf||!hasCr||DocText(window)=="abX\r\ncdX","doc=["+DocText(window).Replace("\r","\\r").Replace("\n","\\n")+"]");
+        Open(window,"ab\r\ncd",true);
+        hasCr=DocText(window).IndexOf('\r')>=0;
+        Query(window,".",true,true);Replacement(window,"X");
+        Invoke(window,"ReplaceAll");Pump();Invoke(window,"FlushDocumentChanges");
+        Check("crlf-dot-replace",!hasCr||DocText(window)=="XX\r\nXX","doc=["+DocText(window).Replace("\r","\\r").Replace("\n","\\n")+"]");
+        // 13c the replacement string is never adapted: a literal dot and $$ stay what the user typed.
+        Open(window,"ab\r\ncd",true);
+        hasCr=DocText(window).IndexOf('\r')>=0;
+        Query(window,"b",true,true);Replacement(window,"$$.");
+        Invoke(window,"ReplaceAll");Pump();Invoke(window,"FlushDocumentChanges");
+        Check("replace-text-not-adapted",!hasCr||DocText(window)=="a$.\r\ncd","doc=["+DocText(window).Replace("\r","\\r").Replace("\n","\\n")+"]");
+        Query(window,"",false,true);
         // 14 a document past 32K: found off the UI thread, navigation and Replace All still work, one undo.
         var big=new StringBuilder();
         for(int i=0;i<4000;i++)big.Append("line ").Append(i).Append(" foo\n");
@@ -204,6 +230,77 @@ static class SearchRegexProbe {
         Invoke(window,"Undo");Pump();Invoke(window,"FlushDocumentChanges");
         Check("large-replace-all-one-undo",DocText(window)==bigText,"after one undo len="+DocText(window).Length+" expected="+bigText.Length);
         Query(window,"",false,true);
+    }
+
+    // ---------------------------------------------------------------- the CRLF adaptation itself
+    /* AdaptPatternForCrLf is a pure string rewrite, so its rules are checked here twice: the adapted
+       pattern text (what an escape, a class, a comment or an inline option group must come out as) and
+       the exact match offsets the adapted pattern produces over generated CRLF and LF text. The window
+       cases above can only see a count and a selection, and the basic surface searches text whose line
+       breaks are all \n, so the CRLF half needs this direct check. */
+    static void RunPatternCases(){
+        mode="pattern";
+        // passed through unchanged: escapes, character classes, explicit CRLF, \Z/\z, comments, (?s)
+        SamePattern("escaped-dollar","\\$");
+        SamePattern("escaped-dot","a\\.b");
+        SamePattern("char-class","[$.]");
+        SamePattern("char-class-negated","[^$.]");
+        SamePattern("char-class-dollar-only","[$]");
+        SamePattern("explicit-crlf","b\\r\\nc");
+        SamePattern("end-z","b\\z");
+        SamePattern("end-Z","b\\Z");
+        SamePattern("comment","a(?#note. $)b");
+        SamePattern("dot-all","(?s)a.b");
+        SamePattern("dot-all-scoped-all","(?s:a.b)");
+        // only the parts the user did not mark dot-all are rewritten
+        Adapted("dot-all-scoped-restored","(?s:a.b)c.d","(?s:a.b)c[^\\r\\n]d");
+        Adapted("dot-all-cleared","(?s)(?-s)a.b","(?s)(?-s)a[^\\r\\n]b");
+        Adapted("option-group-not-dot-all","(?i:a.b)","(?i:a[^\\r\\n]b)");
+        Adapted("comment-bracket","a(?#[)b.c","a(?#[)b[^\\r\\n]c");
+        Adapted("lookahead-dollar","b(?=$)","b(?=(?<!\\r)(?=\\r?$))");
+        Adapted("quantifier-after-dot","a.{2}","a[^\\r\\n]{2}");
+        Adapted("escaped-backslash-then-dollar","\\\\$","\\\\(?<!\\r)(?=\\r?$)");
+        Adapted("dollar-alone","$","(?<!\\r)(?=\\r?$)");
+        // exact match positions: a CRLF line end is the position before the CR, and nowhere else
+        IndexesCase("dollar-crlf","$","ab\r\ncd","2:0,6:0");
+        IndexesCase("dollar-lf","$","ab\ncd","2:0,5:0");
+        IndexesCase("dollar-before-cr","b$","ab\r\ncd","1:1");
+        IndexesCase("dollar-lookahead-crlf","b(?=$)","ab\r\ncd","1:1");
+        IndexesCase("dot-crlf",".","a\r\nb","0:1,3:1");
+        IndexesCase("dot-lf",".","a\nb","0:1,2:1");
+        IndexesCase("dot-all-match","(?s)a.b","a\rb","0:3");
+        IndexesCase("dot-all-scope-restored","(?s:a.b).","a\rb\rc","");
+        IndexesCase("dot-all-cleared","(?s)(?-s)a.b","a\rb","");
+        IndexesCase("explicit-crlf","b\\r\\nc","ab\r\ncd","1:4");
+        IndexesCase("escaped-dollar","\\$","a$b","1:1");
+        IndexesCase("escaped-dot","a\\.b","a.b axb","0:3");
+        IndexesCase("char-class","[$.]","a$b.c","1:1,3:1");
+        IndexesCase("backslash-then-dollar","\\\\$","a\\\r\nb","1:1");
+        IndexesCase("quantifier-after-dot","a.{2}","aXbY","0:3");
+        IndexesCase("quantifier-not-across-cr","a.{2}","a\r\nb","");
+        IndexesCase("end-z","b\\z","ab","1:1");
+        IndexesCase("end-Z","b\\Z","ab\n","1:1");
+        IndexesCase("comment-untouched","a(?#x.$)b","ab","0:2");
+    }
+    static void SamePattern(string name,string pattern){
+        string adapted=MainWindow.AdaptPatternForCrLf(pattern);
+        Check("adapt-"+name,adapted==pattern,"adapted=["+adapted+"]");
+    }
+    static void Adapted(string name,string pattern,string expected){
+        string adapted=MainWindow.AdaptPatternForCrLf(pattern);
+        Check("adapt-"+name,adapted==expected,"adapted=["+adapted+"] expected=["+expected+"]");
+    }
+    // Every match as index:length, joined, so a position the rewrite must not match (between the CR
+    // and the LF) fails the case even when the count alone would still look plausible.
+    static void IndexesCase(string name,string pattern,string text,string expected){
+        string actual;
+        try{
+            var regex=new Rx.Regex(MainWindow.AdaptPatternForCrLf(pattern),Rx.RegexOptions.Multiline|Rx.RegexOptions.CultureInvariant);
+            var found=new List<string>();
+            for(Rx.Match match=regex.Match(text);match.Success;match=match.NextMatch())found.Add(match.Index+":"+match.Length);
+            actual=String.Join(",",found.ToArray());
+        }catch(Exception ex){actual="exception "+ex.GetType().Name;}
+        Check("match-"+name,actual==expected,"indices=["+actual+"] expected=["+expected+"]");
     }
 
     // ---------------------------------------------------------------- the window's own search bar

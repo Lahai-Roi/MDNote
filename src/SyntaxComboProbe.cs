@@ -1503,9 +1503,10 @@ internal static class SyntaxComboProbe {
         check("switching to basic moves a caret out of a closing marker",
             source.Document.Text == "**굵게X**", "text=[" + source.Document.Text + "]");
 
-        // F4: a selection that fully covers a hidden opener (or part of one) would leave its
-        // partner behind as literal text, so the pair goes with it. Typing over the visible text
-        // keeps the pair, which is what the markers are for.
+        // F4: 2.3.1 (D1). A selection that covers a hidden opener (or part of one) writes that
+        // opener back next to the typed text instead of taking the pair with it: the partner is
+        // never left behind as literal text, and the characters the reader did not select stay.
+        // Typing over the visible text keeps the pair around it, which is what the markers are for.
         const string pair = "a **굵게** b";
         HideMarkers(window, true);
         Load(window, pair);
@@ -1515,7 +1516,7 @@ internal static class SyntaxComboProbe {
         source.Select(opener, 2);
         Pump();
         TextInput(window, "Z");
-        check("typing over a hidden opener takes the whole pair", source.Document.Text == "a Z b",
+        check("typing over a hidden opener writes it back after the typed text", source.Document.Text == "a Z**굵게** b",
             "text=[" + source.Document.Text + "]");
         Load(window, pair);
         source = Source(window);
@@ -1524,7 +1525,7 @@ internal static class SyntaxComboProbe {
         source.Select(opener + 1, 1);
         Pump();
         TextInput(window, "Z");
-        check("typing over part of a hidden marker takes the whole pair", source.Document.Text == "a Z b",
+        check("typing over part of a hidden opener writes it back after the typed text", source.Document.Text == "a Z**굵게** b",
             "text=[" + source.Document.Text + "]");
         Load(window, pair);
         source = Source(window);
@@ -1535,20 +1536,21 @@ internal static class SyntaxComboProbe {
         TextInput(window, "Z");
         check("typing over the pair's text keeps both markers", source.Document.Text == "a **Z** b",
             "text=[" + source.Document.Text + "]");
-        // The paste path widens the selection first (PrepareHiddenPaste, which HiddenPasteWiden
-        // and the host's Ctrl+V share); the same call stands in for that stage so the check
-        // needs no clipboard.
+        // The host's paste seam (PrepareHiddenPasteSelection, which LivePaste calls) only moves an
+        // endpoint that sits inside a marker out to its edge; it does not widen the selection to
+        // whole pairs, so the paste restores the cut-off opener like typing does. The same call
+        // stands in for that stage so the check needs no clipboard.
         Load(window, pair);
         source = Source(window);
         line = source.Document.GetLineByNumber(1);
         opener = OffsetOf(source, line, "**");
         source.Select(opener, 2);
         Pump();
-        typeof(MarkdownLivePreview.Session).GetMethod("PrepareHiddenPaste", Members).Invoke(Session(window), null);
+        typeof(MarkdownLivePreview.Session).GetMethod("PrepareHiddenPasteSelection", Members).Invoke(Session(window), null);
         Pump();
         Invoke(window, "LivePaste", new System.Windows.DataObject(), true, "Z");
         Pump();
-        check("pasting over a hidden opener takes the whole pair", source.Document.Text == "a Z b",
+        check("pasting over a hidden opener writes it back after the pasted text", source.Document.Text == "a Z**굵게** b",
             "text=[" + source.Document.Text + "]");
         // The pair growth only runs in the no-reveal mode: a live selection over a marker is
         // source text the user can see, so it is replaced literally.

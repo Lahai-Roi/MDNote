@@ -748,6 +748,8 @@ internal static class MarkdownStructuralInputProbe {
         Add(cases, "enter quote at column zero", "‸> a", null, EnterKey());
         Add(cases, "enter caret inside bullet marker", "-‸ a", null, EnterKey());
         Add(cases, "enter caret inside task box", "- [‸ ] a", null, EnterKey());
+        // The box is already part of ListEnd: a body that starts with "[a]" is text, not a second box.
+        Add(cases, "enter task body starting with brackets", "- [ ] [a‸] b", "- [ ] [a\n- [ ] ‸] b", EnterKey());
 
         // Enter inside a marker run splits at the run's outer edge, so "**굵게**" stays one
         // pair on one line (H9). A heading's own prefix is not a marker run.

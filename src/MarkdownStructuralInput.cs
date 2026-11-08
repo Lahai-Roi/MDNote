@@ -245,9 +245,9 @@ internal static class MarkdownStructuralInput {
         bool quoted = slots.QuoteEnd > slots.IndentEnd;
         if (column == 0 && (slots.HasList || quoted)) return null;
         if (slots.HasList) {
-            // A caret inside the task box counts as inside the marker.
+            // A caret inside the task box counts as inside the marker: ParseSlots already ends a
+            // task's ListEnd after the box, so a body that itself starts with "[a]" is not a second box.
             int markerEnd = slots.ListEnd;
-            if (slots.Kind == ListKind.Task && markerEnd + 2 < text.Length && text[markerEnd] == '[' && text[markerEnd + 2] == ']') markerEnd += 3;
             if (column < markerEnd) {
                 // The caret is inside the marker: a quote line still continues its quote.
                 if (quoted && column >= slots.QuoteEnd) return text.Substring(0, slots.QuoteEnd);
@@ -347,6 +347,15 @@ internal static class MarkdownStructuralInput {
     }
 
     internal static CommandResult Enter(TextDocument document, int selectionStart, int selectionLength, bool endEmptyItem) {
+        return Enter(document, selectionStart, selectionLength, endEmptyItem, true);
+    }
+
+    // markerEdge false: the caller (the live preview's inline Enter) already settled the split
+    // point from the parsed pairs, so H9's raw-run snap must not move it again. "**a**|*b*" is a
+    // closer and an opener that read as one "***" run to MarkerRunEdge, which pushed the break
+    // past the opener and left "*" on both lines. With markerEdge true (every other caller) the
+    // snap is unchanged.
+    internal static CommandResult Enter(TextDocument document, int selectionStart, int selectionLength, bool endEmptyItem, bool markerEdge) {
         if (!Validate(document, selectionStart, selectionLength)) return null;
         bool selected = selectionLength > 0;
         int selectionEnd = selectionStart + selectionLength;
@@ -355,7 +364,7 @@ internal static class MarkdownStructuralInput {
         int column = selectionStart - line.Offset;
         // H9: Enter inside a marker run splits at the run's outer edge, never inside it.
         bool moved = false;
-        if (!selected && !IsInsideFence(document, line)) {
+        if (markerEdge && !selected && !IsInsideFence(document, line)) {
             int edge = MarkerRunEdge(text, column);
             if (edge != column) { column = edge; selectionStart = line.Offset + edge; moved = true; }
         }

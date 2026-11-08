@@ -729,6 +729,9 @@ internal static class HistoryStressProbe {
     // ---------------------------------------------------------------- walks and rebuild
     static void UndoStep(MainWindow window,StressModel model,string where){
         string previous=currentAction;currentAction=where;watchdogPlace="walk:undo";
+        // A full walk is hundreds of undo/redo steps inside one action: the hang watchdog times each step,
+        // not the whole walk (a 266+178-step walk at ~45 ms a step on the slow VM passed 20 s with no hang).
+        if(stepInFlight)Interlocked.Exchange(ref stepStartTimestamp,Stopwatch.GetTimestamp());
         try{
             var result=new StepResult {Label=where,Kind=KindUndo};
             result.Before=Capture(window);
@@ -740,6 +743,7 @@ internal static class HistoryStressProbe {
     }
     static void RedoStep(MainWindow window,StressModel model,string where){
         string previous=currentAction;currentAction=where;watchdogPlace="walk:redo";
+        if(stepInFlight)Interlocked.Exchange(ref stepStartTimestamp,Stopwatch.GetTimestamp());
         try{
             var result=new StepResult {Label=where,Kind=KindRedo};
             result.Before=Capture(window);

@@ -713,6 +713,11 @@ public partial class MainWindow {
             }
             ProbeDefaults.Live = false;
             VerifySearchCountAcrossTabs(check, dir);
+            // b52 #13: the same open find bar, wrap off, with the match far to the right of the
+            // viewport. The helper below was written for that report but never called, so a revert
+            // of Search/LiveMarkdownHost's horizontal reveal failed nothing; it runs with the same
+            // throwaway folder (it deletes its own file).
+            VerifySearchRevealHorizontal(check, dir);
         } finally { ProbeDefaults.Live = oldLive; try { foreach (string left in System.IO.Directory.GetFiles(dir)) System.IO.File.Delete(left); System.IO.Directory.Delete(dir); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
     }
     // The reported case: the find bar stays open while the user edits a tab that opened after the window.

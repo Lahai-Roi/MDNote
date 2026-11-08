@@ -218,6 +218,10 @@ public partial class MainWindow {
         {"보기(_V)",new[]{"View(_V)","表示(_V)","视图(_V)","檢視(_V)"}},
         {"도움말(_H)",new[]{"Help(_H)","ヘルプ(_H)","帮助(_H)","說明(_H)"}},
         {"최근 파일",new[]{"Recent files","最近使ったファイル","最近的文件","最近的檔案"}},
+        /* 2026-11-07: the two commands the recent-files submenu now carries below its entries (a forum
+           reader asked how to clear the history). */
+        {"최근 파일 기록 삭제",new[]{"Clear recent files","最近使ったファイルの履歴を消去","清除最近的文件记录","清除最近的檔案記錄"}},
+        {"최근 파일 사용 안 함",new[]{"Disable recent files","最近使ったファイルを無効にする","禁用最近的文件","停用最近的檔案"}},
         {"언어",new[]{"Language","言語","语言","語言"}},
         {"새로 만들기",new[]{"New","新規作成","新建","新增"}},
         {"열기…",new[]{"Open…","開く…","打开…","開啟…"}},

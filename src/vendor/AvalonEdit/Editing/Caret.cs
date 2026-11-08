@@ -59,6 +59,30 @@ namespace ICSharpCode.AvalonEdit.Editing
 			}
 		}
 
+		/// <summary>
+		/// MDNote 2026-11-08: the font size the next typed text will get (a size picked before typing), or 0.
+		/// The caret takes that size's height until text is typed. Call <see cref="Refresh"/> after it changes.
+		/// </summary>
+		public Func<double> PendingEmSize { get; set; }
+
+		/// <summary>MDNote 2026-11-08: redraws the caret after <see cref="PendingEmSize"/> changed.</summary>
+		public void Refresh()
+		{
+			UpdateIfVisible();
+			EventHandler handler = Refreshed;
+			if (handler != null) handler(this, EventArgs.Empty);
+		}
+
+		/// <summary>MDNote 2026-11-08: raised by <see cref="Refresh"/>, for a host that paints its own caret (a table cell).</summary>
+		public event EventHandler Refreshed;
+
+		double PendingEmSizeNow()
+		{
+			Func<double> ask = PendingEmSize;
+			if (ask == null) return 0;
+			try { return ask(); } catch (Exception) { return 0; }
+		}
+
 		void TextView_VisualLinesChanged(object sender, EventArgs e)
 		{
 			if (visible) {
@@ -381,11 +405,59 @@ namespace ICSharpCode.AvalonEdit.Editing
 			double xPos = visualLine.GetTextLineVisualXPosition(textLine, position.VisualColumn);
 			double lineTop = visualLine.GetTextLineVisualYPosition(textLine, VisualYPosition.TextTop);
 			double lineBottom = visualLine.GetTextLineVisualYPosition(textLine, VisualYPosition.TextBottom);
+			// MDNote 2026-11-08: the caret takes the height of the text it stands on (a heading or a sized run), not the
+			// default line height; the default is kept when no run with a usable font is found.
+			double runTop, runHeight;
+			if (CaretRunMetrics(visualLine, textLine, position.VisualColumn, out runTop, out runHeight)) {
+				lineTop = runTop;
+				lineBottom = runTop + runHeight;
+			}
 
 			return new Rect(xPos,
 							lineTop,
 							SystemParameters.CaretWidth,
 							lineBottom - lineTop);
+		}
+
+		// The run the caret belongs to: the text element ending at or containing the caret column, else the one after it, else any
+		// element of the line with a usable font (an empty "# " heading has only its hidden prefix). Top = the line's baseline minus
+		// that font's ascent, height = its line spacing, so the caret spans that font's glyph box on the shared baseline.
+		bool CaretRunMetrics(VisualLine visualLine, TextLine textLine, int column, out double top, out double height)
+		{
+			top = 0; height = 0;
+			VisualLineElement chosen = null;
+			foreach (VisualLineElement element in visualLine.Elements) {
+				if (!UsableRun(element)) continue;
+				// The nearest document run starting before the caret (a composition string drawn between them has no document text of its own).
+				if (element.VisualColumn < column && element.DocumentLength > 0) chosen = element;
+			}
+			if (chosen == null) {
+				foreach (VisualLineElement element in visualLine.Elements)
+					if (UsableRun(element) && element.DocumentLength > 0 && element.VisualColumn >= column) { chosen = element; break; }
+			}
+			if (chosen == null) {
+				foreach (VisualLineElement element in visualLine.Elements)
+					if (UsableRun(element)) { chosen = element; break; }
+			}
+			if (chosen == null) return false;
+			// A run on another wrapped row of the same visual line would give that row's metrics.
+			TextLine chosenLine = visualLine.GetTextLine(Math.Min(chosen.VisualColumn, Math.Max(0, visualLine.VisualLength)));
+			if (chosenLine != textLine && chosen.DocumentLength > 0) return false;
+			var p = chosen.TextRunProperties;
+			FontFamily family = p.Typeface.FontFamily;
+			double em = p.FontRenderingEmSize;
+			double pending = PendingEmSizeNow();
+			if (pending >= 6) em = pending;
+			double baseline = visualLine.GetTextLineVisualYPosition(textLine, VisualYPosition.LineTop) + textLine.Baseline;
+			top = baseline - em * family.Baseline;
+			height = em * family.LineSpacing;
+			return height > 0;
+		}
+
+		static bool UsableRun(VisualLineElement element)
+		{
+			var p = element.TextRunProperties;
+			return p != null && p.Typeface != null && p.Typeface.FontFamily != null && p.FontRenderingEmSize >= 6;
 		}
 
 		Rect CalcCaretOverstrikeRectangle(VisualLine visualLine)

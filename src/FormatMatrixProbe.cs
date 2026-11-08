@@ -216,7 +216,9 @@ internal static class FormatMatrixProbe {
         var groups = new List<FormatMatrixKit.FailureGroup>(state.Groups.Values);
         groups.Sort(CompareGroups);
         if (groups.Count == 0) text.Append("(none)\n");
-        int shown = groups.Count > 300 ? 300 : groups.Count;
+        // The cap only bounds a runaway report: 300 hid whole check families behind the first
+        // alphabetical ones, so the list now runs to 2000 in count order.
+        int shown = groups.Count > 2000 ? 2000 : groups.Count;
         for (int group = 0; group < shown; group++) {
             FormatMatrixKit.FailureGroup item = groups[group];
             text.Append("\n### ").Append(item.Signature).Append("  -  ").Append(item.Count.ToString(CultureInfo.InvariantCulture)).Append('\n');
@@ -226,6 +228,7 @@ internal static class FormatMatrixProbe {
         }
         if (groups.Count > shown) text.Append("\n(").Append((groups.Count - shown).ToString(CultureInfo.InvariantCulture)).Append(" more signatures are not listed; the largest counts are above.)\n");
         text.Append("\n## Failures by dimension\n");
+        Dimension(text, groups, "check", -1);
         Dimension(text, groups, "action", 3);
         Dimension(text, groups, "container", 1);
         Dimension(text, groups, "caret", 2);
@@ -283,14 +286,21 @@ internal static class FormatMatrixProbe {
         thread.Start();
     }
     // Failure counts along one axis of the signature, so one action that fails everywhere is
-    // visible as a single line instead of hundreds of groups.
+    // visible as a single line instead of hundreds of groups. Slot -1 counts the check name the
+    // signature starts with ("balance  single-bold | ..."), so every family gets a total even
+    // when the signature list above shows only part of it.
     static void Dimension(StringBuilder text, List<FormatMatrixKit.FailureGroup> groups, string label, int slot) {
         var counts = new Dictionary<string,int>();
         var order = new List<string>();
         for (int i = 0; i < groups.Count; i++) {
-            string[] parts = groups[i].Signature.Split(new string[] { " | " }, StringSplitOptions.None);
-            if (parts.Length != 5) continue;
-            string key = parts[slot];
+            string key;
+            if (slot < 0) {
+                key = CheckName(groups[i].Signature);
+            } else {
+                string[] parts = groups[i].Signature.Split(new string[] { " | " }, StringSplitOptions.None);
+                if (parts.Length != 5) continue;
+                key = parts[slot];
+            }
             int count;
             if (!counts.TryGetValue(key, out count)) order.Add(key);
             counts[key] = count + groups[i].Count;
@@ -303,6 +313,16 @@ internal static class FormatMatrixProbe {
             text.Append(order[i]).Append('=').Append(counts[order[i]].ToString(CultureInfo.InvariantCulture));
         }
         text.Append('\n');
+    }
+    // A check's signatures carry its name before the five-part key ("balance  single-bold | ...").
+    // A group no check made ("fatal | run") is named by its leading word instead.
+    static string CheckName(string signature) {
+        if (signature == null || signature.Length == 0) return "(none)";
+        int gap = signature.IndexOf("  ", StringComparison.Ordinal);
+        if (gap > 0) return signature.Substring(0, gap);
+        int bar = signature.IndexOf(" | ", StringComparison.Ordinal);
+        if (bar > 0) return signature.Substring(0, bar);
+        return signature;
     }
 
     // ---------------------------------------------------------------- fixture driver
@@ -391,8 +411,13 @@ internal static class FormatMatrixProbe {
             Pump();
             visibleIndex = fixture.VisStart + fixture.VisLen - 1;
         }
-        string preLeft = hide && action == "enter" ? FormatMatrixKit.Flags(session, lineOffset + fixture.Offsets[Math.Max(0, visibleIndex - 1)]) : null;
-        string preRight = hide && action == "enter" && visibleIndex < fixture.Offsets.Count ? FormatMatrixKit.Flags(session, lineOffset + fixture.Offsets[visibleIndex]) : null;
+        // The Enter style checks compare what the two lines draw, so the expected side is the
+        // drawn style of that source character (a StyledPart covering it), not FormatAt's toolbar
+        // answer: FormatAt moves a caret on the outer edge of a hidden closing run back inside the
+        // pair (the 11-05 typing rule), so it calls the space right after "**ab**" bold while the
+        // surface draws that space plain.
+        string preLeft = hide && action == "enter" ? DrawnFlags(session, line, fixture.Offsets[Math.Max(0, visibleIndex - 1)]) : null;
+        string preRight = hide && action == "enter" && visibleIndex < fixture.Offsets.Count ? DrawnFlags(session, line, fixture.Offsets[visibleIndex]) : null;
 
         // ---- the action itself
         bool imeBusy = Apply(window, action, source);
@@ -427,8 +452,10 @@ internal static class FormatMatrixProbe {
                     if (Neighbor(after, targetLine, relative, typed.Length, out neighbor)) {
                         // The typed character must look like the visible character it joins: inside a
                         // run it takes the run's flags, just outside it takes none of them.
-                        string got = FormatMatrixKit.Flags(after, targetLine.Offset + relative);
-                        string want = FormatMatrixKit.Flags(after, targetLine.Offset + neighbor);
+                        // Drawn style, not FormatAt: a character right after a hidden closer is drawn plain
+                        // while the toolbar reads that spot as the pair's inside.
+                        string got = DrawnFlags(after, targetLine, relative);
+                        string want = DrawnFlags(after, targetLine, neighbor);
                         string joins = after.Document.GetText(targetLine.Offset + neighbor, 1);
                         Note(state, "style-flags", signature, got == want, "typed=" + got + " joins [" + joins + "] at " + neighbor + " with " + want, seed, afterText);
                         string gotSpan = FormatMatrixKit.SpanSignature(after, targetLine, relative);
@@ -471,11 +498,11 @@ internal static class FormatMatrixProbe {
             Note(state, "markup-leak", signature, rowLeak == null, "visible=[" + visible + "] draws " + rowLeak, seed, afterText);
             int nl = visible.IndexOf('\n');
             if (nl > 0 && nl - 1 < offsets.Count) {
-                string got = FormatMatrixKit.Flags(after, row.Offset + offsets[nl - 1]);
+                string got = DrawnFlags(after, row, offsets[nl - 1]);
                 Note(state, "enter-style-left", signature, got == preLeft, "got=" + got + " want=" + preLeft, seed, afterText);
             }
             if (nl >= 0 && nl + 1 < offsets.Count) {
-                string got = FormatMatrixKit.Flags(after, row.Offset + offsets[nl + 1]);
+                string got = DrawnFlags(after, row, offsets[nl + 1]);
                 Note(state, "enter-style-right", signature, got == preRight, "got=" + got + " want=" + preRight, seed, afterText);
             }
             return;
@@ -497,19 +524,24 @@ internal static class FormatMatrixProbe {
         if (visibleIndex >= 0 && visibleIndex <= fixture.LineVisible.Length) {
             string wantFirst = fixture.LineVisible.Substring(0, visibleIndex);
             string wantSecond = fixture.LineVisible.Substring(visibleIndex);
-            Note(state, "enter-visible", signature, firstVisible == wantFirst && secondVisible == wantSecond,
+            // Blanks at the split are not compared: a list item never draws its leading blank, and
+            // a blank before a closing marker has to move out of the pair (11-07).
+            Note(state, "enter-visible", signature, firstVisible.TrimEnd() == wantFirst.TrimEnd() && secondVisible.TrimStart() == wantSecond.TrimStart(),
                 "line1=[" + firstVisible + "] want=[" + wantFirst + "] line2=[" + secondVisible + "] want=[" + wantSecond + "]", seed, afterText);
         }
         string leftLeak = FormatMatrixKit.MarkupFault(firstVisible);
         string rightLeak = FormatMatrixKit.MarkupFault(secondVisible);
         Note(state, "markup-leak", signature, leftLeak == null && rightLeak == null,
             "line1=[" + firstVisible + "] draws " + leftLeak + ", line2=[" + secondVisible + "] draws " + rightLeak, seed, afterText);
-        if (firstVisible.Length > 0) {
-            string got = FormatMatrixKit.Flags(after, firstLine.Offset + firstOffsets[firstVisible.Length - 1]);
+        // A blank on either side of the split carries no style of its own to keep (see enter-visible).
+        bool blankLeft = visibleIndex > 0 && visibleIndex <= fixture.LineVisible.Length && char.IsWhiteSpace(fixture.LineVisible[visibleIndex - 1]);
+        if (firstVisible.Length > 0 && !blankLeft) {
+            string got = DrawnFlags(after, firstLine, firstOffsets[firstVisible.Length - 1]);
             Note(state, "enter-style-left", signature, got == preLeft, "got=" + got + " want=" + preLeft, seed, afterText);
         }
-        if (secondVisible.Length > 0) {
-            string got = FormatMatrixKit.Flags(after, secondLine.Offset + secondOffsets[0]);
+        bool blankRight = visibleIndex >= 0 && visibleIndex < fixture.LineVisible.Length && char.IsWhiteSpace(fixture.LineVisible[visibleIndex]);
+        if (secondVisible.Length > 0 && !blankRight) {
+            string got = DrawnFlags(after, secondLine, secondOffsets[0]);
             Note(state, "enter-style-right", signature, got == preRight, "got=" + got + " want=" + preRight, seed, afterText);
         }
     }
@@ -583,6 +615,22 @@ internal static class FormatMatrixProbe {
         int right = relative + length;
         if (right >= 0 && right < info.Text.Length && !FormatMatrixKit.HiddenAt(info, right)) { neighbor = right; return true; }
         return false;
+    }
+    // The format the surface actually draws at one source character: a StyledPart has to cover
+    // that character in the line's parse, the same [Start, Start+Length) range the transformer
+    // paints. FormatAt is the toolbar's answer instead and relocates a caret on a hidden closing
+    // run's outer edge to the pair's inside, so it reads a drawn-plain edge as styled.
+    static string DrawnFlags(MarkdownLivePreview.Session session, DocumentLine line, int relative) {
+        bool bold = false, italic = false, strike = false, code = false;
+        MarkdownLivePreview.LineInfo info = session.Info(line);
+        foreach (MarkdownLivePreview.StyledPart part in info.Styles) {
+            if (relative < part.Start || relative >= part.Start + part.Length) continue;
+            bold |= (part.Style & MarkdownLivePreview.Style.Bold) != 0;
+            italic |= (part.Style & MarkdownLivePreview.Style.Italic) != 0;
+            strike |= (part.Style & MarkdownLivePreview.Style.Strike) != 0;
+            code |= (part.Style & MarkdownLivePreview.Style.Code) != 0;
+        }
+        return (bold ? "B" : "-") + (italic ? "I" : "-") + (strike ? "S" : "-") + (code ? "C" : "-");
     }
 
     // ---------------------------------------------------------------- action paths

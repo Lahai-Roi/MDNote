@@ -1291,10 +1291,104 @@ internal static class MarkdownTableCommands {
         return canonical.Replace("\n", CellBreak);
     }
 
+    // The inline code span of one cell ([cellStart, cellEnd) of the row) whose content range,
+    // edges included, holds pos: a backtick run closed by the next run of the same length, as
+    // CommonMark pairs them. A backslash does not escape inside code, only before the opener.
+    static bool CodeSpanAround(string row, int cellStart, int cellEnd, int pos, out int openStart, out int openLen, out int closeStart) {
+        openStart = -1; openLen = 0; closeStart = -1;
+        if (row == null) return false;
+        cellEnd = Math.Min(cellEnd, row.Length);
+        int i = Math.Max(0, cellStart);
+        while (i < cellEnd) {
+            char c = row[i];
+            if (c == '\\') { i += 2; continue; }
+            if (c != '`') { i++; continue; }
+            int j = i;
+            while (j < cellEnd && row[j] == '`') j++;
+            int n = j - i, k = j, close = -1;
+            while (k < cellEnd) {
+                if (row[k] != '`') { k++; continue; }
+                int m = k;
+                while (m < cellEnd && row[m] == '`') m++;
+                if (m - k == n) { close = k; break; }
+                k = m;
+            }
+            if (close < 0) { i = j; continue; }
+            if (pos >= j && pos <= close) { openStart = i; openLen = n; closeStart = close; return true; }
+            i = close + n;
+        }
+        return false;
+    }
+
+    // Replaces [from, to) of a code span's content (row-relative, from == to for a caret) with a
+    // cell break: the span closes before it and reopens after it ("`a<br>b`" -> "`a`<br>`b`").
+    // A split run is never cut: a point inside a run of content backticks moves to the run's edge
+    // (a selection grows to it), and a piece that now touches a backtick of the content gets one
+    // padding space on both of its fences (CommonMark strips them), so "``a`b``" never reopens as a
+    // run of three. A piece with no text is left out: the break goes outside the span there.
+    static CommandResult CodeSpanBreak(int lineOffset, string row, int openStart, int openLen, int closeStart, int from, int to) {
+        string ticks = row.Substring(openStart, openLen);
+        int contentStart = openStart + openLen;
+        bool caret = from == to;
+        while (from > contentStart && from < closeStart && row[from - 1] == '`' && row[from] == '`') from--;
+        if (caret) to = from;
+        else while (to > contentStart && to < closeStart && row[to - 1] == '`' && row[to] == '`') to++;
+        bool leftEmpty = from == contentStart, rightEmpty = to == closeStart;
+        bool leftPad = !leftEmpty && row[from - 1] == '`';
+        bool rightPad = !rightEmpty && row[to] == '`';
+        string left = leftEmpty ? string.Empty : (leftPad ? " " : string.Empty) + ticks;
+        string right = rightEmpty ? string.Empty : ticks + (rightPad ? " " : string.Empty);
+        int editStart = leftEmpty ? openStart : from;
+        int editEnd = rightEmpty ? closeStart + openLen : to;
+        CommandResult result = new CommandResult();
+        result.Add(lineOffset + editStart, editEnd - editStart, left + CellBreak + right);
+        int shift = 0;
+        if (leftPad) { result.Add(lineOffset + contentStart, 0, " "); shift = 1; }
+        if (rightPad) result.Add(lineOffset + closeStart, 0, " ");
+        result.SelectionStart = lineOffset + editStart + shift + left.Length + CellBreakLength + right.Length;
+        result.SelectionLength = 0;
+        result.SortEdits();
+        return result;
+    }
+
+    // A multi-line paste inside one code span of a cell: each "<br>" the paste wrote would be drawn
+    // as code text, so every break closes the span and reopens it ("`a` + x/y + `b`" ->
+    // "`ax`<br>`yb`"). Only when the insertion (or the whole selection) lies in one span and the
+    // pasted text has no backtick of its own, which could change how the span pairs.
+    static string CodeSpanBreaks(TextDocument document, int selectionStart, int selectionLength, string text, List<MarkdownLivePreview.Cell> cells) {
+        if (text.IndexOf(CellBreak, StringComparison.Ordinal) < 0 || text.IndexOf('`') >= 0) return text;
+        DocumentLine line = document.GetLineByOffset(selectionStart);
+        int relative = selectionStart - line.Offset;
+        int end = relative + selectionLength;
+        if (selectionLength > 0 && document.GetLineByOffset(Math.Min(selectionStart + selectionLength, document.TextLength)).LineNumber != line.LineNumber) return text;
+        int cell = CellAt(cells, relative);
+        if (selectionLength > 0) {
+            if (cell != CellAt(cells, end) || relative < cells[cell].Start || end > cells[cell].End) return text;
+        } else {
+            relative = ClampIntoCell(cells, relative);
+            end = relative;
+            cell = CellAt(cells, relative);
+        }
+        string row = LineText(document, line);
+        int openStart, openLen, closeStart, endOpen, endLen, endClose;
+        if (!CodeSpanAround(row, cells[cell].Start, cells[cell].End, relative, out openStart, out openLen, out closeStart)) return text;
+        if (!CodeSpanAround(row, cells[cell].Start, cells[cell].End, end, out endOpen, out endLen, out endClose) || endOpen != openStart) return text;
+        string ticks = row.Substring(openStart, openLen);
+        return text.Replace(CellBreak, ticks + CellBreak + ticks);
+    }
+
     // Enter inside a cell writes the basic view's cell paragraph break as "<br>", so the table
     // keeps its rows. A selection inside one cell is replaced; a selection across cells (or rows)
     // keeps every "|" and puts the break in the first selected cell.
     internal static CommandResult EnterInCell(TextDocument document, int selectionStart, int selectionLength, List<MarkdownLivePreview.Cell> cells) {
+        return EnterInCell(document, selectionStart, selectionLength, cells, -1);
+    }
+
+    // settledColumn >= 0: the live preview's inline pair map already placed the break (relative
+    // to the row's line), so the "<br>" goes there and the raw marker-run snap is not applied
+    // again ("**a**|*b*" is a closer and an opener, not one run to split at its edge). -1 keeps
+    // H9's snap, for callers that have no line parse. Only an empty selection uses it.
+    internal static CommandResult EnterInCell(TextDocument document, int selectionStart, int selectionLength, List<MarkdownLivePreview.Cell> cells, int settledColumn) {
         if (document == null || cells == null || cells.Count == 0) return null;
         if (selectionStart < 0 || selectionLength < 0) return null;
         if (selectionStart > document.TextLength || selectionLength > document.TextLength - selectionStart) return null;
@@ -1310,22 +1404,46 @@ internal static class MarkdownTableCommands {
             return CellSelectionEdit(document, selectionStart, selectionLength, CellBreak);
         if (selectionLength == 0) {
             string rowText = LineText(document, line);
-            int at = line.Offset + ClampIntoCell(cells, selectionStart - line.Offset);
+            int at = line.Offset + ClampIntoCell(cells, settledColumn >= 0 ? Math.Min(settledColumn, rowText.Length) : selectionStart - line.Offset);
             // H9 in a cell: an Enter inside a marker run splits at the run's outer edge, so a
             // pair stays on one side of the cell's <br>. The cell's "<br>" is the single-marker
             // edge variant (an inert lone marker must not become an opener); plain Enter keeps
-            // its old edges.
-            int edge = MarkdownStructuralInput.MarkerRunEdge(rowText, at - line.Offset, true);
-            if (edge != at - line.Offset) at = line.Offset + ClampIntoCell(cells, edge);
+            // its old edges. A settled column came from the parsed pairs and stays as it is.
+            if (settledColumn < 0) {
+                int edge = MarkdownStructuralInput.MarkerRunEdge(rowText, at - line.Offset, true);
+                if (edge != at - line.Offset) at = line.Offset + ClampIntoCell(cells, edge);
+            }
+            // Inside an inline code span "<br>" would be drawn as text, so the span is closed
+            // before the break and reopened after it ("`a<br>b`" -> "`a`<br>`b`"); at the span's
+            // inner edge the break goes outside the span instead (11-07).
+            string ticks = "";
+            int cellIndex = CellAt(cells, at - line.Offset);
+            if (cellIndex >= 0) {
+                int openStart, openLen, closeStart;
+                if (CodeSpanAround(rowText, cells[cellIndex].Start, cells[cellIndex].End, at - line.Offset, out openStart, out openLen, out closeStart)) {
+                    int relative = at - line.Offset;
+                    if (relative == openStart + openLen) at = line.Offset + openStart;
+                    else if (relative == closeStart) at = line.Offset + closeStart + openLen;
+                    else return CodeSpanBreak(line.Offset, rowText, openStart, openLen, closeStart, relative, relative);
+                }
+            }
             CommandResult point = new CommandResult();
-            point.Add(at, 0, CellBreak);
-            point.SelectionStart = at + CellBreakLength;
+            point.Add(at, 0, ticks + CellBreak + ticks);
+            point.SelectionStart = at + ticks.Length + CellBreakLength + ticks.Length;
             point.SelectionLength = 0;
             return point;
         }
         int firstCell = CellAt(cells, selectionStart - line.Offset);
         int lastCell = CellAt(cells, selectionEnd - line.Offset);
         if (firstCell == lastCell && selectionStart - line.Offset >= cells[firstCell].Start && selectionEnd - line.Offset <= cells[firstCell].End) {
+            // A selection inside one code span: "<br>" would be drawn as code text, so the span splits
+            // around the break like a caret Enter does (a selection that leaves the span keeps the plain break).
+            string spanRow = LineText(document, line);
+            int spanOpen, spanLen, spanClose, endOpen, endLen, endClose;
+            if (CodeSpanAround(spanRow, cells[firstCell].Start, cells[firstCell].End, selectionStart - line.Offset, out spanOpen, out spanLen, out spanClose)
+                && CodeSpanAround(spanRow, cells[firstCell].Start, cells[firstCell].End, selectionEnd - line.Offset, out endOpen, out endLen, out endClose)
+                && endOpen == spanOpen)
+                return CodeSpanBreak(line.Offset, spanRow, spanOpen, spanLen, spanClose, selectionStart - line.Offset, selectionEnd - line.Offset);
             CommandResult inside = new CommandResult();
             inside.Add(selectionStart, selectionLength, CellBreak);
             inside.SelectionStart = selectionStart + CellBreakLength;
@@ -1346,6 +1464,7 @@ internal static class MarkdownTableCommands {
         // of writing the text into the first cell.
         if (SelectionCoversWholeTables(document, selectionStart, selectionLength)) return null;
         string text = CellInsertText(document, selectionStart, selectionLength, insert, cells);
+        text = CodeSpanBreaks(document, selectionStart, selectionLength, text, cells);
         DocumentLine line = document.GetLineByOffset(selectionStart);
         int selectionEnd = selectionStart + selectionLength;
         if (selectionLength > 0 && document.GetLineByOffset(Math.Min(selectionEnd, document.TextLength)).LineNumber != line.LineNumber)

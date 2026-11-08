@@ -137,7 +137,16 @@ internal static class MarkdownCommands {
         }
         // A link the selection cuts at an edge takes the whole span, exactly as a caret in its
         // markup does, before either answer below reads the text.
+        int preStart = caretOnly ? caret : selectionStart;
+        int preEnd = caretOnly ? caret : selectionStart + selectionLength;
         WidenSelectionToLinks(document, ref selectionStart, ref selectionLength);
+        // A whole link (the caret or selection sits in its label) is styled as one unit, but a
+        // pair of the same style inside the label (which InlineRuns never reads) must not nest
+        // with the outer one: an active style is removed from the label, otherwise the link is
+        // wrapped and the label's own pairs of that style are dropped.
+        bool labelHandled;
+        CommandResult labelResult = ToggleLinkLabelStyle(document, selectionStart, selectionLength, preStart, preEnd, marker, caretOnly, insideWord, caret, out labelHandled);
+        if (labelHandled) return labelResult;
         // Rule A/B: a selection that mixes styled and plain text (or cuts a run) gets the
         // Word-like whole-selection answer instead of a second pair around part of a run.
         bool wholeSelection;
@@ -238,6 +247,116 @@ internal static class MarkdownCommands {
         } else {
             result.SelectionStart = firstStart;
             result.SelectionLength = lastEnd - firstStart;
+        }
+        return result;
+    }
+
+    // The toggle target is exactly one link ([label](url) or [label][id]) and the style is a plain
+    // emphasis marker. InlineRuns skips link labels, so the generic answer cannot see a pair of
+    // the same style inside the label and would nest "**[**ab**](#x)**" (or draw raw stars).
+    //  - The style is active at the caret/selection inside the label: that pair (both markers)
+    //    goes, the link is not wrapped.
+    //  - Otherwise the link is wrapped and every same-style pair inside the label is dropped.
+    //  - The link is already wrapped from outside and its label holds same-style pairs: the outer
+    //    pair and the inner pairs all go (the style would otherwise stay on).
+    // handled=false leaves everything to the generic path (no styled pair in the label and no
+    // outer wrap, any other selection shape, code, image, footnote, autolink).
+    static CommandResult ToggleLinkLabelStyle(TextDocument document, int start, int length, int preStart, int preEnd, string marker, bool caretOnly, bool insideWord, int caret, out bool handled) {
+        handled = false;
+        if (marker == "`" || length <= 0) return null;
+        DocumentLine line = document.GetLineByOffset(start);
+        if (start + length > line.EndOffset) return null;
+        string text = LineText(document, line);
+        bool isLink = false;
+        foreach (LinkSpan candidate in LineLinks(text, line.Offset)) {
+            if (candidate.Start == start && candidate.End == start + length) { isLink = true; break; }
+        }
+        if (!isLink) return null;
+        int open = start - line.Offset;
+        int labelClose = LinkLabelClose(text, open, open + length);
+        if (labelClose < 0) return null;
+        string label = text.Substring(open + 1, labelClose - open - 1);
+        int labelAt = start + 1;
+        List<InlineRun> styled = new List<InlineRun>();
+        foreach (InlineRun run in InlineRuns(label)) {
+            if (!run.Code && IsStyleRun(label, run, marker)) styled.Add(run);
+        }
+        // No pair of this style in the label: the generic wrap/unwrap below this call is right.
+        if (styled.Count == 0) return null;
+        InlinePlan outer = new InlinePlan();
+        outer.S = start;
+        outer.E = start + length;
+        DescribeWrap(document, start, start + length, marker, outer);
+        int m = marker.Length;
+        // The outer-wrap answers keep a plain caret where the caret sits in a word (Hangul input)
+        // or touches no word character at all (a space or punctuation in the label); a caret on a
+        // word edge keeps the whole link selected, as before.
+        bool keepCaret = caretOnly && (insideWord || !CaretTouchesWord(document, caret));
+        CommandResult result = new CommandResult();
+        if (outer.Wrapped) {
+            result.Add(outer.LeftStart, outer.LeftEnd - outer.LeftStart, string.Empty);
+            int innerRemoved = 0;
+            for (int i = 0; i < styled.Count; i++) {
+                result.Add(labelAt + styled[i].OpenStart, styled[i].OpenEnd - styled[i].OpenStart, string.Empty);
+                result.Add(labelAt + styled[i].CloseStart, styled[i].CloseEnd - styled[i].CloseStart, string.Empty);
+                innerRemoved += (styled[i].OpenEnd - styled[i].OpenStart) + (styled[i].CloseEnd - styled[i].CloseStart);
+            }
+            result.Add(outer.RightStart, outer.RightEnd - outer.RightStart, string.Empty);
+            handled = true;
+            result.SortEdits();
+            if (keepCaret) {
+                result.SelectionStart = MapCaretThroughEdits(result.Edits, caret);
+                result.SelectionLength = 0;
+            } else {
+                result.SelectionStart = outer.LeftStart;
+                result.SelectionLength = length - innerRemoved;
+            }
+            return result;
+        }
+        List<InlineRun> active = new List<InlineRun>();
+        for (int i = 0; i < styled.Count; i++) {
+            // A selection (never a caret) may also cover the pair's own markers, wholly or one side
+            // only ("[«**ab**»](#u)", "[«**ab»**](#u)"): it still sits inside that styled pair.
+            bool inside = caretOnly
+                ? (labelAt + styled[i].OpenEnd <= preStart && preEnd <= labelAt + styled[i].CloseStart)
+                : (labelAt + styled[i].OpenStart <= preStart && preEnd <= labelAt + styled[i].CloseEnd);
+            if (inside) active.Add(styled[i]);
+        }
+        if (active.Count > 0) {
+            for (int i = 0; i < active.Count; i++) {
+                result.Add(labelAt + active[i].OpenStart, active[i].OpenEnd - active[i].OpenStart, string.Empty);
+                result.Add(labelAt + active[i].CloseStart, active[i].CloseEnd - active[i].CloseStart, string.Empty);
+            }
+            handled = true;
+            if (caretOnly) {
+                result.SortEdits();
+                result.SelectionStart = MapCaretThroughEdits(result.Edits, caret);
+                result.SelectionLength = 0;
+            } else {
+                // FinishSelection maps through the edits in ascending order and sorts them after.
+                result.Edits.Sort(delegate(SourceEdit x, SourceEdit y) { return x.Offset.CompareTo(y.Offset); });
+                FinishSelection(result, preStart, preEnd);
+            }
+            return result;
+        }
+        // A pair written at the line start must not merge with a tilde run into a fence opener.
+        if (!CanWriteEmphasisMarkers(document, marker, start)) { handled = true; return null; }
+        result.Add(start, 0, marker);
+        int removed = 0;
+        for (int i = 0; i < styled.Count; i++) {
+            result.Add(labelAt + styled[i].OpenStart, styled[i].OpenEnd - styled[i].OpenStart, string.Empty);
+            result.Add(labelAt + styled[i].CloseStart, styled[i].CloseEnd - styled[i].CloseStart, string.Empty);
+            removed += (styled[i].OpenEnd - styled[i].OpenStart) + (styled[i].CloseEnd - styled[i].CloseStart);
+        }
+        result.Add(start + length, 0, marker);
+        handled = true;
+        result.SortEdits();
+        if (keepCaret) {
+            result.SelectionStart = MapCaretThroughEdits(result.Edits, caret);
+            result.SelectionLength = 0;
+        } else {
+            result.SelectionStart = start + m;
+            result.SelectionLength = length - removed;
         }
         return result;
     }
@@ -540,6 +659,13 @@ internal static class MarkdownCommands {
         start = left;
         end = right;
         return left < right;
+    }
+
+    // A word character right before or right after the caret on its line (a word edge or inside).
+    static bool CaretTouchesWord(TextDocument document, int caret) {
+        DocumentLine line = document.GetLineByOffset(caret);
+        if (caret > line.Offset && IsWordChar(document.GetCharAt(caret - 1))) return true;
+        return caret < line.EndOffset && IsWordChar(document.GetCharAt(caret));
     }
 
     static bool IsWordChar(char c) {
@@ -1821,6 +1947,13 @@ internal static class MarkdownCommands {
         int relative = caret - line.Offset;
         foreach (CellSpan cell in TableCells(text)) {
             if (relative >= cell.Start && relative <= cell.End) return true;
+            // A padding-only cell ("|  |") reads as the one offset at its closing pipe, but its caret stop is one space inside
+            // (MarkdownTableCommands.EmptyCellStop): any offset in its padding is the cell (11-08: bold / inline code armed nothing there).
+            if (cell.Start == cell.End && relative < cell.Start) {
+                int a = cell.Start;
+                while (a > 0 && (text[a - 1] == ' ' || text[a - 1] == '\t')) a--;
+                if (a > 0 && text[a - 1] == '|' && relative >= a) return true;
+            }
         }
         return false;
     }
