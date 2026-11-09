@@ -1971,7 +1971,7 @@ internal static class WindowAbuseProbe {
                 Check("tabs:buffer","tabs:switch-f",Object.ReferenceEquals(ActiveDocument(window),tabF)&&String.Equals(Buffer(window),"F text mode body\n",StringComparison.Ordinal),
                     "tab F text is restored","text=["+OneLine(Buffer(window))+"]");
                 Check("tabs:mode","tabs:switch-f",Prop<bool>(window,"PlainText"),"tab F keeps TXT mode","plain="+Prop<bool>(window,"PlainText"));
-                Check("menu:state","tabs:switch-f",ButtonField(window,"quickText").Tag!=null,"the TXT toolbar button shows TXT mode","tag="+ButtonField(window,"quickText").Tag);
+                Check("menu:state","tabs:switch-f",ButtonField(window,"quickText").Tag!=null,"the TXT status-bar button shows TXT mode","tag="+ButtonField(window,"quickText").Tag);
             });
 
             // Toolbar B / heading state must follow the caret of the tab that becomes active.
@@ -2853,9 +2853,13 @@ internal static class WindowAbuseProbe {
             Check("overflow:menu","overflow:measure",ribbonSources.Length>0&&
                 window.ToolbarOverflowMenuHas(true,ribbonSources[ribbonSources.Length-1]),
                 "the ribbon overflow lists its last measured command","sources="+ribbonSources.Length);
-            Check("overflow:menu","overflow:measure",topSources.Length>0&&
-                window.ToolbarOverflowMenuHas(false,topSources[topSources.Length-1]),
-                "the top overflow lists its last measured command","sources="+topSources.Length);
+            /* 2026-11-09: the 목차 toggle is never folded into "»" (InsertControls.BuildTopOverflowMenu),
+               so the last unit that can move into the list is the one before it. */
+            FrameworkElement lastFoldableTop=null;
+            for(int i=topSources.Length-1;i>=0&&lastFoldableTop==null;i--)if(!Object.ReferenceEquals(topSources[i],ButtonField(window,"outlineButton")))lastFoldableTop=topSources[i];
+            Check("overflow:menu","overflow:measure",lastFoldableTop!=null&&
+                window.ToolbarOverflowMenuHas(false,lastFoldableTop),
+                "the top overflow lists its last foldable command","sources="+topSources.Length);
 
             // Bold through the overflow clone and through the toolbar button.
             ResetBaseline(window,"word\n",0);

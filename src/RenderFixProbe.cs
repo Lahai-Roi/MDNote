@@ -48,6 +48,7 @@ static class RenderFixProbe {
             try {RunFoldedDelimiter(outDir);} catch (Exception ex) {Check("folded-delimiter exception",false,ex.ToString());}
             try {RunCollapsedAfterEnter(outDir);} catch (Exception ex) {Check("collapsed-enter exception",false,ex.ToString());}
             try {RunSwallowedFold(outDir);} catch (Exception ex) {Check("swallowed-fold exception",false,ex.ToString());}
+            try {RunDetailsTags(outDir);} catch (Exception ex) {Check("details-tags exception",false,ex.ToString());}
         } catch (Exception ex) {all=false;report.Append("EXCEPTION ").Append(ex).Append('\n');}
         finally {Program.IsSelfTest=oldSelfTest;if (app!=null) app.ShutdownMode=oldShutdown;}
         report.Append("Cases: ").Append(cases).Append("\nResult: ").Append(all ? "PASS" : "FAIL").Append('\n');
@@ -66,13 +67,14 @@ static class RenderFixProbe {
     static SourceEditor editor;
     static Window window;
     static MarkdownLivePreview.Session session;
-    static void Open(string text,double width,string baseDirectory) {
+    static void Open(string text,double width,string baseDirectory) { Open(text,width,baseDirectory,false); }
+    static void Open(string text,double width,string baseDirectory,bool hideMarkers) {
         editor=new SourceEditor {FontFamily=new FontFamily("Malgun Gothic"),FontSize=16,WordWrap=true};
         editor.Text=text;
         window=new Window {Content=editor,Width=width,Height=900,WindowStyle=WindowStyle.None,ShowInTaskbar=false,ShowActivated=false,Left=-20000,Top=0};
         window.Show();Pump();
         session=MarkdownLivePreview.Attach(editor,new MarkdownLivePreview.Settings {
-            FontSize=16,Family="Malgun Gothic",LinePercent=150,WordWrap=true,BaseDirectory=baseDirectory
+            FontSize=16,Family="Malgun Gothic",LinePercent=150,WordWrap=true,BaseDirectory=baseDirectory,HideMarkers=hideMarkers
         });
         // The caret must not sit on a fixture line: a revealed line draws its source.
         editor.Select(editor.Document.GetLineByNumber(editor.Document.LineCount).Offset,0);
@@ -732,6 +734,45 @@ static class RenderFixProbe {
             try { Close(); } catch (Exception) { }
             watch.Dispose();
         }
+    }
+    // 11. A GitHub <details> block in the basic (markers hidden) view: a "<details>" or
+    //     "</details>" line is a blank row of text height while the caret is elsewhere, so no
+    //     tag glyph is drawn under the group's left bar (the bar used to cross the "<" of the
+    //     muted source row). The summary row keeps its fold sign and title, the body stays, and
+    //     the caret line shows its own tag again until the caret leaves it.
+    static void RunDetailsTags(string dir) {
+        const string text="<details>\r\n<summary>펼친 상자 제목</summary>\r\n\r\n안의 내용입니다.\r\n\r\n</details>\r\n\r\n끝\r\n";
+        try {
+            Open(text,900,dir,true);
+            window.UpdateLayout();Pump();
+            var document=editor.Document;var view=session.View;
+            MarkdownLivePreview.LineInfo openInfo=session.Info(document.GetLineByNumber(1));
+            MarkdownLivePreview.LineInfo closeInfo=session.Info(document.GetLineByNumber(6));
+            bool tagLines=openInfo.HtmlTagLine&&closeInfo.HtmlTagLine;
+            string openGlyphs=Glyphs(view.GetVisualLine(1)),closeGlyphs=Glyphs(view.GetVisualLine(6));
+            double openHeight=view.GetVisualLine(1)==null?-1:view.GetVisualLine(1).Height;
+            double bodyHeight=view.GetVisualLine(4)==null?-1:view.GetVisualLine(4).Height;
+            double closeHeight=view.GetVisualLine(6)==null?-1:view.GetVisualLine(6).Height;
+            bool rows=bodyHeight>0&&Math.Abs(openHeight-bodyHeight)<=.5&&Math.Abs(closeHeight-bodyHeight)<=.5;
+            Check("basic view draws block tag lines as blank rows",tagLines&&openGlyphs.Length==0&&closeGlyphs.Length==0&&rows,
+                "tagLines="+tagLines+", open=["+Escape(openGlyphs)+"], close=["+Escape(closeGlyphs)+
+                "], height open/body/close="+Number(openHeight)+"/"+Number(bodyHeight)+"/"+Number(closeHeight));
+            int[] offsets;
+            string[] visible=session.VisibleText(out offsets).Split('\n');
+            bool visibleOk=visible.Length>=6&&visible[0].Length==0&&visible[5].Length==0&&
+                visible[1]=="▸ 펼친 상자 제목"&&visible[3]=="안의 내용입니다.";
+            Check("basic view keeps the details title and body",visibleOk,
+                "visible=["+(visible.Length>0?Escape(visible[0]):"-")+"|"+(visible.Length>1?Escape(visible[1]):"-")+"|"+
+                (visible.Length>3?Escape(visible[3]):"-")+"|"+(visible.Length>5?Escape(visible[5]):"-")+"]");
+            // The caret line draws its own tag as source; moving the caret away hides it again.
+            editor.Select(document.GetLineByNumber(1).Offset,0);editor.UpdateLayout();Pump();
+            string revealed=Glyphs(view.GetVisualLine(1));
+            editor.Select(document.GetLineByNumber(8).Offset,0);editor.UpdateLayout();Pump();
+            string hiddenAgain=Glyphs(view.GetVisualLine(1));
+            Check("basic view shows a block tag on the caret line only",
+                revealed.IndexOf("<details>",StringComparison.Ordinal)>=0&&hiddenAgain.Length==0,
+                "caret=["+Escape(revealed)+"], left=["+Escape(hiddenAgain)+"]");
+        } finally {Close();}
     }
     // Records the first unhandled dispatcher exception (and keeps it from ending the probe), so a
     // rebuild that throws inside a layout pass fails the case instead of crashing the run.

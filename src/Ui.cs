@@ -11,22 +11,27 @@ using System.Windows.Shapes;
 namespace MDNote {
 internal static class Ui {
     internal const string ChevronGeometry="M 2.5,3.3 L 6,8.3 L 9.5,3.3";
+    /* Clipboard actions of the live code block: Lucide "copy" (two overlapping rounded squares on the
+       24 grid) and a plain check mark for the copied state. MarkdownLivePreview parses the same data for
+       its DrawingContext icon, so the ribbon set and the editor cannot drift apart. */
+    internal const string CopyIconData="M10 8 H20 A2 2 0 0 1 22 10 V20 A2 2 0 0 1 20 22 H10 A2 2 0 0 1 8 20 V10 A2 2 0 0 1 10 8 Z M4 16 A2 2 0 0 1 2 14 V4 A2 2 0 0 1 4 2 H14 A2 2 0 0 1 16 4";
+    internal const string CopyCheckData="M20 6 L9 17 L4 12";
     internal static ResourceDictionary Styles() {
         string xaml=@"
 <ResourceDictionary xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
  <!-- b51: every thumb radius is exactly half its painted thickness (4 on the 8 px bar, 5.5 on the 11 px hover bar, 5 on the 10 px horizontal hover bar), so both ends of the capsule are truly round. A radius larger than half the thickness is clipped by the border box, which made one end read flattened (user: one rounded end looks clipped). The bar is also thicker (axis 6 -> 8 px) and longer (min 24 -> 28 px) so it stops collapsing to a dot on a very long line. -->
- <ControlTemplate x:Key='ScrollThumb' TargetType='Thumb'><Grid Background='Transparent'><Border x:Name='T' Width='8' HorizontalAlignment='Right' CornerRadius='4' Margin='0,0,3,0' Background='{DynamicResource ScrollThumb}'/></Grid><ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='T' Property='Background' Value='{DynamicResource ScrollThumbHover}'/></Trigger><Trigger Property='IsDragging' Value='True'><Setter TargetName='T' Property='Background' Value='{DynamicResource ScrollThumbHover}'/><Setter TargetName='T' Property='Width' Value='11'/><Setter TargetName='T' Property='CornerRadius' Value='5.5'/></Trigger><DataTrigger Binding='{Binding IsMouseOver,RelativeSource={RelativeSource AncestorType=ScrollBar}}' Value='True'><Setter TargetName='T' Property='Width' Value='11'/><Setter TargetName='T' Property='CornerRadius' Value='5.5'/></DataTrigger></ControlTemplate.Triggers></ControlTemplate>
- <ControlTemplate x:Key='ScrollThumbHorizontal' TargetType='Thumb'><Border x:Name='T' CornerRadius='4' Margin='1' Background='{DynamicResource ScrollThumb}'/><ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='T' Property='Background' Value='{DynamicResource ScrollThumbHover}'/></Trigger><Trigger Property='IsDragging' Value='True'><Setter TargetName='T' Property='Background' Value='{DynamicResource ScrollThumbHover}'/><Setter TargetName='T' Property='Margin' Value='0'/><Setter TargetName='T' Property='CornerRadius' Value='5'/></Trigger><DataTrigger Binding='{Binding IsMouseOver,RelativeSource={RelativeSource AncestorType=ScrollBar}}' Value='True'><Setter TargetName='T' Property='Margin' Value='0'/><Setter TargetName='T' Property='CornerRadius' Value='5'/></DataTrigger></ControlTemplate.Triggers></ControlTemplate>
+ <ControlTemplate x:Key='ScrollThumb' TargetType='Thumb'><Grid Background='Transparent'><Border x:Name='T' Width='7' HorizontalAlignment='Right' CornerRadius='3.5' Margin='0,0,3,0' Background='{DynamicResource ScrollThumb}'/></Grid><ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='T' Property='Background' Value='{DynamicResource ScrollThumbHover}'/></Trigger><Trigger Property='IsDragging' Value='True'><Setter TargetName='T' Property='Background' Value='{DynamicResource ScrollThumbHover}'/><Setter TargetName='T' Property='Width' Value='13'/><Setter TargetName='T' Property='CornerRadius' Value='6.5'/></Trigger><DataTrigger Binding='{Binding IsMouseOver,RelativeSource={RelativeSource AncestorType=ScrollBar}}' Value='True'><Setter TargetName='T' Property='Width' Value='13'/><Setter TargetName='T' Property='CornerRadius' Value='6.5'/></DataTrigger></ControlTemplate.Triggers></ControlTemplate>
+ <ControlTemplate x:Key='ScrollThumbHorizontal' TargetType='Thumb'><Border x:Name='T' CornerRadius='3.5' Margin='1,6,1,1' Background='{DynamicResource ScrollThumb}'/><ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='T' Property='Background' Value='{DynamicResource ScrollThumbHover}'/></Trigger><Trigger Property='IsDragging' Value='True'><Setter TargetName='T' Property='Background' Value='{DynamicResource ScrollThumbHover}'/><Setter TargetName='T' Property='Margin' Value='0'/><Setter TargetName='T' Property='CornerRadius' Value='5'/></Trigger><DataTrigger Binding='{Binding IsMouseOver,RelativeSource={RelativeSource AncestorType=ScrollBar}}' Value='True'><Setter TargetName='T' Property='Margin' Value='0'/><Setter TargetName='T' Property='CornerRadius' Value='5'/></DataTrigger></ControlTemplate.Triggers></ControlTemplate>
  <ControlTemplate x:Key='ScrollPage' TargetType='RepeatButton'><Border Background='Transparent'/></ControlTemplate>
  <Style TargetType='ScrollBar'>
   <Setter Property='Background' Value='Transparent'/>
   <Style.Triggers>
    <Trigger Property='Orientation' Value='Vertical'>
-    <Setter Property='Width' Value='14'/><Setter Property='MinWidth' Value='14'/>
+    <Setter Property='Width' Value='17'/><Setter Property='MinWidth' Value='17'/>
     <Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ScrollBar'><Grid Background='Transparent'><Track x:Name='PART_Track' IsDirectionReversed='True'><Track.DecreaseRepeatButton><RepeatButton Command='ScrollBar.PageUpCommand' Focusable='False' Template='{StaticResource ScrollPage}'/></Track.DecreaseRepeatButton><Track.Thumb><Thumb MinHeight='28' Template='{StaticResource ScrollThumb}'/></Track.Thumb><Track.IncreaseRepeatButton><RepeatButton Command='ScrollBar.PageDownCommand' Focusable='False' Template='{StaticResource ScrollPage}'/></Track.IncreaseRepeatButton></Track></Grid></ControlTemplate></Setter.Value></Setter>
    </Trigger>
    <Trigger Property='Orientation' Value='Horizontal'>
-    <Setter Property='Height' Value='10'/><Setter Property='MinHeight' Value='10'/>
+    <Setter Property='Height' Value='14'/><Setter Property='MinHeight' Value='14'/>
     <Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ScrollBar'><Grid Background='Transparent'><Track x:Name='PART_Track'><Track.DecreaseRepeatButton><RepeatButton Command='ScrollBar.PageLeftCommand' Focusable='False' Template='{StaticResource ScrollPage}'/></Track.DecreaseRepeatButton><Track.Thumb><Thumb MinWidth='28' Template='{StaticResource ScrollThumbHorizontal}'/></Track.Thumb><Track.IncreaseRepeatButton><RepeatButton Command='ScrollBar.PageRightCommand' Focusable='False' Template='{StaticResource ScrollPage}'/></Track.IncreaseRepeatButton></Track></Grid></ControlTemplate></Setter.Value></Setter>
    </Trigger>
   </Style.Triggers>
@@ -135,13 +140,28 @@ internal static class Ui {
  </Style>
  <!-- Quiet outlined toggle (source edit): same chrome as the top bar toggles; the Markdown mark lives in the template so Content stays the plain label. -->
  <Style x:Key='FormatViewToggle' TargetType='CheckBox'><Setter Property='FontFamily' Value='Segoe UI, Malgun Gothic'/><Setter Property='FontSize' Value='13'/><Setter Property='FontWeight' Value='Normal'/>
-  <Setter Property='Foreground' Value='{DynamicResource Ink}'/><Setter Property='Height' Value='22'/><Setter Property='MinHeight' Value='22'/><Setter Property='MinWidth' Value='__SQUARE__'/><Setter Property='Cursor' Value='Hand'/>
+  <Setter Property='Foreground' Value='{DynamicResource Ink}'/><Setter Property='Height' Value='22'/><Setter Property='MinHeight' Value='22'/><Setter Property='MinWidth' Value='__SQUARE__'/><Setter Property='Cursor' Value='Hand'/><Setter Property='Padding' Value='9,0,9,0'/>
   <Setter Property='Template'><Setter.Value><ControlTemplate TargetType='CheckBox'>
-   <Border x:Name='Surface' RenderTransformOrigin='0.5,0.5' Background='Transparent' BorderBrush='{DynamicResource ButtonLine}' BorderThickness='1' CornerRadius='6' Padding='8,0,9,0'><StackPanel x:Name='ToggleContent' HorizontalAlignment='Center' Margin='0,0,0,1' RenderTransformOrigin='0.5,0.5' Orientation='Horizontal' VerticalAlignment='Center'><ContentControl x:Name='SourceGlyph' Content='{DynamicResource SourceToggleGlyph}' Margin='0,0,4,0' VerticalAlignment='Center' Focusable='False'/><ContentPresenter VerticalAlignment='Center' RecognizesAccessKey='True'/></StackPanel></Border>
+   <Border x:Name='Surface' RenderTransformOrigin='0.5,0.5' Background='Transparent' BorderBrush='{DynamicResource ButtonLine}' BorderThickness='1' CornerRadius='6' Padding='{TemplateBinding Padding}'><StackPanel x:Name='ToggleContent' HorizontalAlignment='Center' Margin='0,0,0,1' RenderTransformOrigin='0.5,0.5' Orientation='Horizontal' VerticalAlignment='Center'><ContentControl x:Name='SourceGlyph' Content='{DynamicResource SourceToggleGlyph}' Margin='0,0,4,0' VerticalAlignment='Center' Focusable='False'/><ContentPresenter x:Name='TextLabel' VerticalAlignment='Center' RecognizesAccessKey='True'/></StackPanel></Border>
    <ControlTemplate.Triggers>
     <Trigger Property='IsMouseOver' Value='True'><Setter TargetName='Surface' Property='Background' Value='{DynamicResource Hover}'/></Trigger>
     <Trigger Property='IsChecked' Value='True'><Setter TargetName='Surface' Property='Background' Value='{DynamicResource ActiveFill}'/><Setter Property='Foreground' Value='{DynamicResource ActiveInk}'/></Trigger>
     <MultiTrigger><MultiTrigger.Conditions><Condition Property='IsMouseOver' Value='True'/><Condition Property='IsChecked' Value='True'/></MultiTrigger.Conditions><Setter TargetName='Surface' Property='Background' Value='{DynamicResource ActiveHover}'/></MultiTrigger>
+    <Trigger Property='IsMouseOver' Value='True'><Setter TargetName='ToggleContent' Property='RenderTransform'><Setter.Value><ScaleTransform ScaleX='0.96' ScaleY='0.96'/></Setter.Value></Setter></Trigger>
+    <Trigger Property='IsPressed' Value='True'><Setter TargetName='Surface' Property='Background' Value='{DynamicResource Pressed}'/><Setter TargetName='ToggleContent' Property='RenderTransform'><Setter.Value><ScaleTransform ScaleX='0.92' ScaleY='0.92'/></Setter.Value></Setter></Trigger>
+    <Trigger Property='IsEnabled' Value='False'><Setter TargetName='Surface' Property='Opacity' Value='0.4'/></Trigger>
+   </ControlTemplate.Triggers>
+  </ControlTemplate></Setter.Value></Setter>
+ </Style>
+ <!-- Outline toggle (View > 목차 and its toolbar button): the same quiet outlined chrome as FormatViewToggle, but a plain Button whose checked look comes from Tag=Active (the app's existing active-tag convention). -->
+ <Style x:Key='FormatViewButton' TargetType='Button'><Setter Property='FontFamily' Value='Segoe UI, Malgun Gothic'/><Setter Property='FontSize' Value='13'/><Setter Property='FontWeight' Value='Normal'/>
+  <Setter Property='Foreground' Value='{DynamicResource Ink}'/><Setter Property='Height' Value='22'/><Setter Property='MinHeight' Value='22'/><Setter Property='MinWidth' Value='__SQUARE__'/><Setter Property='Cursor' Value='Hand'/><Setter Property='Padding' Value='9,0,9,0'/>
+  <Setter Property='Template'><Setter.Value><ControlTemplate TargetType='Button'>
+   <Border x:Name='Surface' RenderTransformOrigin='0.5,0.5' Background='Transparent' BorderBrush='{DynamicResource ButtonLine}' BorderThickness='1' CornerRadius='6' Padding='{TemplateBinding Padding}'><StackPanel x:Name='ToggleContent' HorizontalAlignment='Center' Margin='0,0,0,1' RenderTransformOrigin='0.5,0.5' Orientation='Horizontal' VerticalAlignment='Center'><ContentPresenter VerticalAlignment='Center' RecognizesAccessKey='True'/></StackPanel></Border>
+   <ControlTemplate.Triggers>
+    <Trigger Property='IsMouseOver' Value='True'><Setter TargetName='Surface' Property='Background' Value='{DynamicResource Hover}'/></Trigger>
+    <Trigger Property='Tag' Value='Active'><Setter TargetName='Surface' Property='Background' Value='{DynamicResource ActiveFill}'/><Setter Property='Foreground' Value='{DynamicResource ActiveInk}'/></Trigger>
+    <MultiTrigger><MultiTrigger.Conditions><Condition Property='IsMouseOver' Value='True'/><Condition Property='Tag' Value='Active'/></MultiTrigger.Conditions><Setter TargetName='Surface' Property='Background' Value='{DynamicResource ActiveHover}'/></MultiTrigger>
     <Trigger Property='IsMouseOver' Value='True'><Setter TargetName='ToggleContent' Property='RenderTransform'><Setter.Value><ScaleTransform ScaleX='0.96' ScaleY='0.96'/></Setter.Value></Setter></Trigger>
     <Trigger Property='IsPressed' Value='True'><Setter TargetName='Surface' Property='Background' Value='{DynamicResource Pressed}'/><Setter TargetName='ToggleContent' Property='RenderTransform'><Setter.Value><ScaleTransform ScaleX='0.92' ScaleY='0.92'/></Setter.Value></Setter></Trigger>
     <Trigger Property='IsEnabled' Value='False'><Setter TargetName='Surface' Property='Opacity' Value='0.4'/></Trigger>
@@ -311,6 +331,10 @@ internal static class Ui {
         /* a paragraph line above and below, and the markdown "- - -" between them */
         case "rule":return "@24:M3 5 H16 M3 12 H6 M10.5 12 H13.5 M18 12 H21 M3 19 H16";
         case "code":return "@24:M18 16 L22 12 L18 8 M6 8 L2 12 L6 16 M14.5 4 L9.5 20";
+        /* Live code block: the copy button and the check it turns into for 1.2 s after a copy. */
+        case "copy":return "@24:"+CopyIconData;
+        case "copied":return "@24:"+CopyCheckData;
+        case "inlineCode":return "@24:M16 18 L22 12 L16 6 M8 6 L2 12 L8 18";
         case "link":return "@24:M10 13 A5 5 0 0 0 17.54 13.54 L20.54 10.54 A5 5 0 0 0 13.47 3.47 L11.75 5.18 M14 11 A5 5 0 0 0 6.46 10.46 L3.46 13.46 A5 5 0 0 0 10.53 20.53 L12.24 18.82";
         case "inline":return "M5.5 4 H14.5 Q17 4 17 6.5 V13.5 Q17 16 14.5 16 H5.5 Q3 16 3 13.5 V6.5 Q3 4 5.5 4 Z M7.25 7.5 L8.75 10.5 M11.25 7.5 L12.75 10.5";
         case "highlight":return "@24:M15 3.6 L20.4 9 L11.4 18 L6 12.6 Z M6.3 12.9 L4.5 19.2 L11.1 17.7 M13.8 20.4 H20.7";
@@ -334,6 +358,10 @@ internal static class Ui {
         case "sourceBraceA":return "M2.57 1.5 H1.57 C1.07 1.5 0.57 2 0.57 3 V4.5 C0.57 5.2 0.07 5.7 -0.43 6 C0.07 6.3 0.57 6.8 0.57 7.5 V9 C0.57 10 1.07 10.5 1.57 10.5 H2.57 M9.35 1.5 H10.35 C10.85 1.5 11.35 2 11.35 3 V4.5 C11.35 5.2 11.85 5.7 12.35 6 C11.85 6.3 11.35 6.8 11.35 7.5 V9 C11.35 10 10.85 10.5 10.35 10.5 H9.35 M3.12 6 A0.3 0.3 0 1 0 3.72 6 A0.3 0.3 0 1 0 3.12 6 M5.52 6 A0.3 0.3 0 1 0 6.12 6 A0.3 0.3 0 1 0 5.52 6 M7.92 6 A0.3 0.3 0 1 0 8.52 6 A0.3 0.3 0 1 0 7.92 6";/* 2026-10-28 user-supplied SVG ({ ... }); braces pulled in 0.15 each side, dots 0.18 left (optical centre, tuned by the user) *//* 2026-10-28 user-supplied SVG ({ ... }); braces 0.3 further out each side and dots a touch smaller so the dots clear the braces *//* 2026-10-28 user-supplied SVG ({ ... }), braces 1.2 further apart so three solid dots sit 2.4 units (~3 px) apart without merging *//* dots: tiny stroked rings read as solid ~2 px dots *//* 2026-10-28 user-supplied SVG: soft-cornered { ... } braces with three dots *//* 2026-10-28 user: frame dropped (it suggested something unwanted); { ... } braces with three dots like a code/placeholder mark */
         case "sourceBraceB":return "M4.2 4.7 A1.8 1.8 0 0 1 7.8 4.7 V7.3 A1.8 1.8 0 0 1 4.2 7.3 Z M6.4 2.95 V2.2 C6.4 1.7 6.7 1.5 7.2 1.5 H8.6 C9.6 1.5 10.4 2.3 10.4 3.3 V4.6 C10.4 5.3 10.9 5.8 11.6 6 C10.9 6.2 10.4 6.7 10.4 7.4 V8.7 C10.4 9.7 9.6 10.5 8.6 10.5 H6.6 M5.6 9.05 V9.8 C5.6 10.3 5.3 10.5 4.8 10.5 H3.4 C2.4 10.5 1.6 9.7 1.6 8.7 V7.4 C1.6 6.7 1.1 6.2 0.4 6 C1.1 5.8 1.6 5.3 1.6 4.6 V3.3 C1.6 2.3 2.4 1.5 3.4 1.5 H5.4";/* 2026-10-28 user reference: braces joined through a central capsule ({0}) */
         case "sourceDoc":return "M2.2 1 H9.8 A1 1 0 0 1 10.8 2 V10 A1 1 0 0 1 9.8 11 H2.2 A1 1 0 0 1 1.2 10 V2 A1 1 0 0 1 2.2 1 Z M5.2 2.8 H4.7 A0.9 0.9 0 0 0 3.8 3.7 V5.3 A0.7 0.7 0 0 1 3.1 6 A0.7 0.7 0 0 1 3.8 6.7 V8.3 A0.9 0.9 0 0 0 4.7 9.2 H5.2 M6.8 2.8 H7.3 A0.9 0.9 0 0 1 8.2 3.7 V5.3 A0.7 0.7 0 0 0 8.9 6 A0.7 0.7 0 0 0 8.2 6.7 V8.3 A0.9 0.9 0 0 1 7.3 9.2 H6.8";/* source toggle (2026-10-27): plain page + one clear brace pair, no fold, few strokes */
+        /* 11-09 (user): the status-bar TXT toggle. txtDoc = a folded page with three text lines, the plain-text
+           sibling of the 원문 braces; txtT = the top bar's "type" T on the 12-unit grid CenteredInkIcon centres. */
+        case "txtDoc":return "M7.4 1 H3 A1 1 0 0 0 2 2 V10 A1 1 0 0 0 3 11 H9 A1 1 0 0 0 10 10 V3.6 Z M7.4 1 V3.6 H10 M4 5.6 H8 M4 7.4 H8 M4 9.2 H6.6";
+        case "txtT":return "M1.5 3 V1.5 H10.5 V3 M6 1.5 V10.5 M4 10.5 H8";
         case "sourcePage":return "M8.4 1.2 H3.6 A1.2 1.2 0 0 0 2.4 2.4 V12 A1.2 1.2 0 0 0 3.6 13.2 H10.8 A1.2 1.2 0 0 0 12 12 V4.8 Z M8.4 1.2 V4.8 H12 M6 6 H5.6 A0.8 0.8 0 0 0 4.8 6.8 V8.2 A0.8 0.8 0 0 1 4 9 A0.8 0.8 0 0 1 4.8 9.8 V11.2 A0.8 0.8 0 0 0 5.6 12 H6 M8.4 6 H8.8 A0.8 0.8 0 0 1 9.6 6.8 V8.2 A0.8 0.8 0 0 0 10.4 9 A0.8 0.8 0 0 0 9.6 9.8 V11.2 A0.8 0.8 0 0 1 8.8 12 H8.4";/* (unused page+braces drawing, kept for reference) */
         /* b50: the source toggle icon is a </> pair on a 12 unit tall box (InkSizedIcon scales by 12), mirror-symmetric about x=8, centred on y=6.6 */
         case "sourceCode":return "M4.8 3 L1.2 6.6 L4.8 10.2 M11.2 3 L14.8 6.6 L11.2 10.2 M9.2 0.6 L6.8 12.6";
@@ -562,13 +590,65 @@ internal static class Ui {
     internal static void TopSquare(Button button){Square(button);button.Width=button.MinWidth=22;button.Height=button.MinHeight=22;button.Margin=new Thickness(1,0,7,0);}
     // Toggles share one chrome: height 22, thin ButtonLine outline, one label size; ActiveFill/ActiveInk come from the Button style.
     internal static void ToggleChrome(Button button,bool square){Square(button);button.FontSize=LabelSize;button.FontWeight=FontWeights.Normal;button.BorderThickness=new Thickness(1);button.SetResourceReference(Control.BorderBrushProperty,"ButtonLine");button.Focusable=false;button.Height=22;button.MinHeight=22;/* b41: RC8 geometry, 22 px box, border 1, padding 2 */if(square){button.Width=22;button.MinWidth=22;button.Padding=new Thickness(2);button.Margin=new Thickness(3,0,3,0);}else{button.Width=Double.NaN;button.MinWidth=SquareSize;button.Padding=new Thickness(7,0,10,0);}}
+    /* The 목차 and 원문 toggles never fold into "»" (user, 2026-11-09). Below this host width they
+       drop their text label and draw only the 16 px glyph in the same 22 px-high box; the overflow
+       passes call this before they measure, so the freed width goes to the other commands. */
+    internal const double CompactToggleHostWidth=520;
+    internal const double CompactToggleBox=23;/* 11-09 (user, T looked off): odd width so a 1 px stroke can sit on the exact centre (22 left half a pixel either way) */
+    internal static void CompactToggleLabel(Control toggle,bool compact){
+        if(toggle==null)return;
+        if(compact){toggle.Padding=new Thickness(0);toggle.MinWidth=CompactToggleBox;}
+        else{toggle.ClearValue(Control.PaddingProperty);toggle.ClearValue(FrameworkElement.MinWidthProperty);}
+        /* The 원문 CheckBox gets its label from the FormatViewToggle template; the 목차 Button carries
+           a small icon+TextBlock row as its Content (it has no template glyph slot). */
+        var check=toggle as CheckBox;
+        if(check!=null){
+            check.ApplyTemplate();var template=check.Template;
+            var label=template==null?null:template.FindName("TextLabel",check) as UIElement;
+            if(label!=null)label.Visibility=compact?Visibility.Collapsed:Visibility.Visible;
+            /* drop the template's icon-to-label gap too, so the lone glyph sits optically centred in the 22 px box */
+            var glyph=template==null?null:template.FindName("SourceGlyph",check) as FrameworkElement;
+            if(glyph!=null)glyph.Margin=compact?new Thickness(0):new Thickness(0,0,4,0);
+            return;
+        }
+        var content=toggle as ContentControl;var row=content==null?null:content.Content as Panel;
+        if(row==null)return;
+        for(int i=0;i<row.Children.Count;i++){
+            var block=row.Children[i] as TextBlock;
+            if(block!=null){block.Visibility=compact?Visibility.Collapsed:Visibility.Visible;continue;}
+            var glyph=row.Children[i] as FrameworkElement;
+            /* a glyph may carry its own wide-layout margin in Tag (the 목차 mark, aligned to the 원문 braces) */
+            if(glyph!=null)glyph.Margin=compact?new Thickness(0):(glyph.Tag is Thickness?(Thickness)glyph.Tag:new Thickness(0,0,4,0));
+        }
+    }
     internal static FrameworkElement QuoteIcon(){var icon=new Grid {Width=16,Height=16};var path=new Path {Data=Geometry.Parse("M 2,2 V 14 M 6.5,4.5 H 14 M 6.5,8 H 14 M 6.5,11.5 H 11"),StrokeThickness=1.5,StrokeStartLineCap=PenLineCap.Round,StrokeEndLineCap=PenLineCap.Round,StrokeLineJoin=PenLineJoin.Round};path.SetResourceReference(Shape.StrokeProperty,"Ink");icon.Children.Add(path);return icon;}
     internal static FrameworkElement CodeIcon(){var icon=new Grid {Width=16,Height=16};var path=new Path {Data=Geometry.Parse("M 5,3.5 L 1,8 L 5,12.5 M 11,3.5 L 15,8 L 11,12.5 M 9.3,2.5 L 6.7,13.5"),StrokeThickness=1.5,StrokeStartLineCap=PenLineCap.Round,StrokeEndLineCap=PenLineCap.Round,StrokeLineJoin=PenLineJoin.Round};path.SetResourceReference(Shape.StrokeProperty,"Ink");icon.Children.Add(path);return icon;}
+    /* 2026-11-09: inline code's own mark, GitHub-style "<>": CodeIcon's two chevrons at the same size,
+       stroke, caps and 16 px box, without the slash the code-block glyph keeps. */
+    /* 11-09: GitHub/Lucide "code" (chevrons) beside the code block's "code-xml" (same family + slash), both on the ribbon's 24 grid */
+    internal static FrameworkElement InlineCodeIcon(){return GridIcon("inlineCode");}
     internal static FrameworkElement CloseIcon(){var path=new Path {Data=Geometry.Parse("M 0.75,0.75 L 11.25,11.25 M 11.25,0.75 L 0.75,11.25"),Width=12,Height=12,Margin=new Thickness(0,0,-1.2,0),StrokeThickness=1.5,StrokeStartLineCap=PenLineCap.Round,StrokeEndLineCap=PenLineCap.Round,HorizontalAlignment=HorizontalAlignment.Right,VerticalAlignment=VerticalAlignment.Center};path.SetBinding(Shape.StrokeProperty,new Binding("Foreground"){RelativeSource=new RelativeSource(RelativeSourceMode.FindAncestor,typeof(Button),1)});return path;}
     internal static FrameworkElement StrikeIcon(){var icon=new Grid {Width=18,Height=18};icon.Children.Add(new TextBlock {Text="S",FontFamily=new FontFamily("Segoe UI"),FontSize=14,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center});var line=new Border {Height=1,Margin=new Thickness(1,0,1,0),VerticalAlignment=VerticalAlignment.Center};line.SetResourceReference(Border.BackgroundProperty,"Ink");icon.Children.Add(line);return icon;}
     internal static FrameworkElement CheckboxIcon(){var icon=new Grid {Width=15,Height=15};var path=new System.Windows.Shapes.Path {Data=Geometry.Parse("M 2,2 L 13,2 L 13,13 L 2,13 Z M 4,7 L 6.5,10 L 11,5"),StrokeThickness=1.25,StrokeLineJoin=PenLineJoin.Round,StrokeStartLineCap=PenLineCap.Round,StrokeEndLineCap=PenLineCap.Round,Fill=Brushes.Transparent};path.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty,"Ink");icon.Children.Add(path);return icon;}
     internal static FrameworkElement RuleIcon(){var icon=new Grid {Width=18,Height=18};var path=new Path {Data=Geometry.Parse("M 2,9 L 16,9"),StrokeThickness=1.5};path.SetResourceReference(Shape.StrokeProperty,"Ink");icon.Children.Add(path);return icon;}
-    internal static FrameworkElement OutlineIcon(){var icon=new Grid {Width=18,Height=18};var path=new Path {Data=Geometry.Parse("M 3,5 L 15,5 M 3,9 L 15,9 M 3,13 L 15,13"),StrokeThickness=1.6,StrokeStartLineCap=PenLineCap.Round,StrokeEndLineCap=PenLineCap.Round};path.SetResourceReference(Shape.StrokeProperty,"Ink");icon.Children.Add(path);return icon;}
+    /* 2026-11-09 (user): the 목차 mark is the GitHub-style list: three short dots on the left beside
+       three full-width lines, in the same 14 px slot the stepped mark used. Round 1.0 caps and the
+       dots share the one "Ink" dynamic resource, so a theme switch repaints both. A Canvas keeps both
+       halves on the same absolute 14 px coordinates (a centred Path would re-centre its own bounds). */
+    /* 11-09 (user, real window): the mark was smaller than the 원문 braces and sat high, so it now uses the braces' 16 px
+       slot and their +0.5 px optical nudge (CenteredInkIcon("sourceBraceA",16,0.5)): rows at 4.5 / 8.5 / 12.5, dots r 1. */
+    internal static FrameworkElement OutlineIcon(){
+        var icon=new Canvas {Width=16,Height=16};/* 11-09: lines to x 15 (GitHub list-unordered proportion), so the mark fills the 원문 braces' width and the gap to 목차 matches */
+        var lines=new Path {Data=Geometry.Parse("M 5.5,4.5 L 15,4.5 M 5.5,8.5 L 15,8.5 M 5.5,12.5 L 15,12.5"),StrokeThickness=1.1,StrokeStartLineCap=PenLineCap.Round,StrokeEndLineCap=PenLineCap.Round,StrokeLineJoin=PenLineJoin.Round};
+        lines.SetResourceReference(Shape.StrokeProperty,"Ink");icon.Children.Add(lines);
+        for(int i=0;i<3;i++){
+            /* r 1 at x 2.25, y 4.5 / 8.5 / 12.5: the 2 px box starts 1 above and left of each centre */
+            var dot=new Ellipse {Width=2,Height=2};
+            Canvas.SetLeft(dot,1.25);Canvas.SetTop(dot,3.5+i*4);
+            dot.SetResourceReference(Shape.FillProperty,"Ink");icon.Children.Add(dot);
+        }
+        return icon;
+    }
     internal static FrameworkElement ImageIcon(){var icon=new Grid {Width=18,Height=18};var path=new System.Windows.Shapes.Path {Data=Geometry.Parse("M 1,2 L 17,2 L 17,16 L 1,16 Z M 2,14 L 7,8 L 11,12 L 14,9 L 17,13 M 12,5 A 1,1 0 1 0 14,5 A 1,1 0 1 0 12,5"),StrokeThickness=1.3};path.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty,"Ink");icon.Children.Add(path);return icon;}
     internal static Image GlyphImage(string glyph,int weight,bool dark,int width){var brush=Ui.Brush(dark?"#E7EBF2":"#263242");var text=new FormattedText(glyph,System.Globalization.CultureInfo.InvariantCulture,FlowDirection.LeftToRight,new Typeface(new FontFamily("Segoe UI"),FontStyles.Normal,FontWeight.FromOpenTypeWeight(weight),FontStretches.Normal),14,brush,1);var geometry=text.BuildGeometry(new Point());Rect bounds=geometry.Bounds;geometry.Transform=new TranslateTransform((width-bounds.Width)/2-bounds.Left,(18-bounds.Height)/2-bounds.Top);var group=new DrawingGroup();group.Children.Add(new GeometryDrawing(Brushes.Transparent,null,new RectangleGeometry(new Rect(0,0,width,18))));group.Children.Add(new GeometryDrawing(brush,weight>=800?new Pen(brush,(weight-700)/500.0):null,geometry));var source=new DrawingImage(group);source.Freeze();var image=new Image {Source=source,Width=width,Height=18,Tag=glyph};System.Windows.Automation.AutomationProperties.SetName(image,glyph);return image;}
     internal static Image HeadingIcon(int level,bool dark){int[] weights={600,600,600,600,600,600};return GlyphImage("H"+level,weights[System.Math.Max(0,System.Math.Min(5,level-1))],dark,20);}

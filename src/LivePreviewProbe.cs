@@ -1741,6 +1741,69 @@ internal static class NoRevealProbe {
             Check(ref all, report, "formatted paste inside inline code stays literal", codeText == "a `co굵게de` b",
                 "text='" + Flat(codeText) + "'");
 
+            // 11-09 user (bug B): a multi-line paste inside an open inline pair used to split it - the line
+            // break landed between its markers and the tail drew raw "</span>==". The block is inserted as
+            // its visible text and every break closes the enclosing pairs and reopens them on the next
+            // line (the same split Enter writes), so the document's own markers stay balanced everywhere.
+            ProbeSet(window, "documentNewline", "\n");
+            string spanOpen = "<span style=\"color:#B91C1C\">";
+            string spanLine = "==a" + spanOpen + "bc</span>==";
+            window.SetText(spanLine);
+            window.SetMode(true);
+            ProbePump();
+            source.Select(spanLine.IndexOf("bc") + 1, 0);
+            ProbePump();
+            var spanData = new DataObject();
+            spanData.SetData(DataFormats.UnicodeText, "테스트</span>\n==테스트입력");
+            MarkdownClipboard.Set(spanData, "테스트</span>\n==테스트입력");
+            ProbeCall(window, "PasteData", spanData, false);
+            ProbePump();
+            string spanExpected = "==a" + spanOpen + "b테스트</span>==\n==" + spanOpen + "\\=\\=테스트입력c</span>==";
+            Check(ref all, report, "multi-line paste inside ==...<span>...== keeps every marker balanced",
+                source.Document.Text == spanExpected, "text='" + Flat(source.Document.Text) + "' expected='" + Flat(spanExpected) + "'");
+
+            // The user's own shape: one character selected inside the coloured span, then the paste.
+            window.SetText(spanLine);
+            window.SetMode(true);
+            ProbePump();
+            source.Select(spanLine.IndexOf("bc") + 1, 1);
+            ProbePump();
+            var spanSelData = new DataObject();
+            spanSelData.SetData(DataFormats.UnicodeText, "테스트</span>\n==테스트입력");
+            MarkdownClipboard.Set(spanSelData, "테스트</span>\n==테스트입력");
+            ProbeCall(window, "PasteData", spanSelData, false);
+            ProbePump();
+            string spanSelExpected = "==a" + spanOpen + "b테스트</span>==\n==" + spanOpen + "\\=\\=테스트입력</span>==";
+            Check(ref all, report, "multi-line paste over a selection inside ==...<span>...== keeps every marker balanced",
+                source.Document.Text == spanSelExpected, "text='" + Flat(source.Document.Text) + "' expected='" + Flat(spanSelExpected) + "'");
+
+            window.SetText("==ab==");
+            window.SetMode(true);
+            ProbePump();
+            source.Select(3, 0);
+            ProbePump();
+            PastePlainData(window, "X\nY");
+            Check(ref all, report, "multi-line paste inside ==...== reopens the pair on the next line",
+                source.Document.Text == "==aX==\n==Yb==", "text='" + Flat(source.Document.Text) + "'");
+
+            window.SetText("`ab`");
+            window.SetMode(true);
+            ProbePump();
+            source.Select(2, 0);
+            ProbePump();
+            PastePlainData(window, "X\nY");
+            Check(ref all, report, "multi-line paste inside `...` reopens the code span on the next line",
+                source.Document.Text == "`aX`\n`Yb`", "text='" + Flat(source.Document.Text) + "'");
+
+            window.SetText("==ab==");
+            window.SetMode(true);
+            ProbePump();
+            source.Select(3, 0);
+            ProbePump();
+            PastePlainData(window, "Z");
+            Check(ref all, report, "a one-line paste inside ==...== keeps its own markup",
+                source.Document.Text == "==aZb==", "text='" + Flat(source.Document.Text) + "'");
+
             // 7. A multi-line paste into a list item or a quote continues the prefix Enter writes
             // on that line; a pasted line that already carries the prefix keeps its own.
             window.SetText("- 항목");

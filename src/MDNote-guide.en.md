@@ -31,7 +31,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | --- | --- | --- |
 | ![edit](guide-btn-edit.en.png) Toggle editing | Ctrl+E | Switch between the read view and editing view. |
 | Always open for editing | | When on, documents open ready for editing right away. |
-| ![txt](guide-btn-txt.png) TXT mode | | Convert an MD document to plain text or back. |
+| ![txt](guide-btn-txt.png) TXT mode | | Convert an MD document to plain text or back. Same as the **TXT** button at the right end of the status bar. |
 | Start new documents in TXT mode | | When on, new documents start in TXT mode. |
 | Undo / Redo | Ctrl+Z / Ctrl+Y | Undo or redo your last edit. Consecutive typing (including Backspace) is undone in one step, while typing after moving the cursor, pressing Delete, pasting, cutting, running a command, changing focus, or switching documents starts a new undo step. |
 | Select all / Copy / Cut | Ctrl+A / Ctrl+C / Ctrl+X | Select everything, or copy or cut the selected text. |
@@ -58,12 +58,14 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | Word wrap | | Wrap lines to fit the window width. |
 | Markdown Live Preview | | When on, shows only the cursor line and selected lines as source text (with symbols) in the editing screen. When off, uses the basic mode. |
 | Heading level marks | | Choose from Slash bars, # symbols, or Off. Clicking the item toggles it on or off, and turning it back on restores the last used style. Defaults to Slash bars. |
+| ![outline](guide-outline.png) Outline | F10 | Same as the **Outline** button at the top right. Opens and closes the outline panel. |
 | Increase text size / Decrease text size | Ctrl++ / Ctrl+- | Also works with Ctrl+mouse wheel. |
 | Reset text size | Ctrl+0 | Return to the default text size. |
 | Line spacing | | Choose 100%, 125%, 150%, 200%, or Custom. |
 | Font and size… | | Set the default font and size. |
 | Default text color… / Reset default text color | | Set or reset the default text color for the whole document. |
 | ![dark](guide-btn-dark.png) Dark mode | | Switch to a dark color theme. |
+| Use GPU acceleration | | Off by default, so MDNote draws the screen with the CPU, which uses less memory with the same typing and scrolling speed. Turn it on if scrolling stutters, for example on a very large or high-resolution screen. It applies immediately to all open windows and is remembered. |
 | Focus mode | | Choose Paragraph, Line, or Off. Paragraph keeps only the paragraph with the cursor clear, and Line keeps only the line with the cursor clear, while the rest is faded. Off by default. |
 | Typewriter mode | | When on, the line you are typing stays in the middle of the window. Off by default. |
 
@@ -86,6 +88,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | F5 | Toggle task list | F11 | Previous tab |
 | F6 | Quote | F12 | Next tab |
 
+- Highlight is Ctrl+Shift+H. **Superscript** and **Subscript** have no key assigned at first; assign one in the **Shortcuts** settings if you want to use them.
 - In the **Shortcuts** menu, you can assign any action to F1–F12 or restore defaults. F1–F12 shortcuts do not run while the cursor is inside an input box such as Find/Replace or the font size box.
 
 ## 5. Language
@@ -110,15 +113,28 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 
 | Tool | Location | Description |
 | --- | --- | --- |
-| Formatting toolbar | Below the menu bar (while editing) | Buttons for Heading, text styling, List, To-do, Quote, Code, Link, Image, and Table. |
+| Formatting toolbar | Below the menu bar (while editing) | Buttons for Heading, text styling, Highlight, Inline code, List, To-do, Quote, Code block, Link, Image, and Table. |
 | ![Source](guide-btn-source.en.png) Source | Far right of the formatting toolbar | Edit the raw source with Markdown symbols and HTML tags visible. |
-| ![txt](guide-btn-txt.png) TXT | Top bar | Same as Edit → **TXT mode**. |
-| ![outline](guide-outline.png) Outline | Top right | Shows the heading list; click a heading to jump to it. |
+| TXT | Right end of the status bar | Same as Edit → **TXT mode**. Pressed means TXT mode (the document is handled as a .txt plain-text file); not pressed means Markdown (.md). In a narrow window it shows a **T** icon instead of the text. |
+| ![outline](guide-outline.png) Outline | Top right | Opens the outline panel. Click a heading in the list to jump to it; the **Files** tab opens documents from the same folder. Also opened with F10 or View → **Outline**. |
 | Table toolbar | When the cursor is inside a table | Buttons for Align left, center, and right, Add/Remove row, Add/Remove column, Delete table, Add paragraph below, and indent/outdent. Change column alignment with these alignment buttons rather than editing the second row (`---`) directly. |
 
 - Turning off **Source** returns to the formatted view.
 - In TXT mode, you edit plain text with line numbers shown.
-- The Outline displays H1–H6 markers, and you can drag its border with the document to resize it.
+- The **Outline** button shows a list icon (dots with lines) with the word "Outline" beside it. In a narrow window, the **Outline** and **Source** buttons show icons only.
+- Hover over the Edit, Source, Outline, and TXT buttons to see a short note on what pressing each one will do.
+- The top of the outline panel has two tabs: **Outline | Files**.
+- The **Outline** tab is a simple list. Slanted bars before each title show its level (`/` is level 1, `//` is level 2, and so on). Small arrows fold and unfold the sub-headings under a heading. Long titles scroll sideways. Drag the left edge of the panel to change its width.
+- The **Files** tab shows the folder of the current document (only .md, .markdown, and .txt files). A folder loads its contents when you expand it. The folder icon at the top right opens another folder, and the refresh icon reloads the list. Click a file to open it in a tab (or switch to it if it is already open). Right-click for **Show in Explorer** and **Copy path**.
+- YAML front matter written between two `---` lines at the very top of a document appears as a small grey box. It is left out of the outline, the character count, HTML export, and printing.
+- Highlight: `==text==` appears with a yellow background. Use the toolbar button where the inline code button used to be (Ctrl+Shift+H). The inline code button is right after it, with a `<>` icon. The code block button keeps `</>`.
+- Superscript and subscript are written as `<sup>2</sup>` and `<sub>2</sub>`. They have no key at first; assign one in the Shortcuts settings.
+- GitHub-style HTML tags are drawn: `<b>` `<i>` `<s>` `<u>` `<mark>` `<kbd>` `<sup>` `<sub>` `<small>` `<abbr title>` `<img src width height>`, centering with `<p align="center">` or `<div align="center">`, `<h1>`–`<h6>`, `<hr>`, and `<pre>`. `<details><summary>` is shown as an open box with its title and does not fold. HTML tables and scripts stay as plain text.
+- Hover over a footnote number (`[^1]`) to see the footnote text. Click the ↩ at the end of a footnote to return to its place in the text.
+- Put `[TOC]` alone on a line to insert a table of contents there.
+- Emoji shortcodes such as `:tada:` are shown as emoji.
+- Hover over a code block to see a copy icon at its top right. Click it to copy just the code.
+- Scrollbars are wider and easier to grab, and they thicken when the mouse is over them.
 - Diagonal `/` bars appear to the left of headings to show their level. The number of bars matches the level (1 for H1, 6 for H6), and their color follows the heading text color. In Live mode, the heading line with the cursor shows the `#` symbols instead of the bars. Under View → **Heading level marks**, you can change the bars to faint `#` symbols or turn them off.
 - Put `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, or `[!CAUTION]` on the first line of a quote to display it as a callout box with a colored bar, icon, and title, just like on GitHub. For details, see **Help → Writing Markdown**.
 
@@ -140,6 +156,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | Right before or after a table | Enter | Inserts a blank line outside the table. |
 | Inside a table | Ctrl+] / Ctrl+[ | Indent the entire table into the list item above, or outdent it back out. |
 
+- With nothing selected, pick a text size and Bold (in either order), then type: both apply together.
 - To stop a task list, press **Backspace** on the newly created empty checkbox line to remove the box.
 - You can click checkboxes to toggle completion in both Read and editing views. Press **Ctrl+S** afterward to save the change to the file.
 - Selecting some cells in a table and deleting or typing keeps the pipe dividers (`|`) and table structure intact, clearing or replacing only the contents of the selected cells. However, selecting the entire table or pressing Ctrl+A and deleting removes the table itself like normal text.

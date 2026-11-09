@@ -22,6 +22,7 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -1037,6 +1038,10 @@ namespace ICSharpCode.AvalonEdit.Editing
 
 		bool isMouseCursorHidden;
 
+		// MDNote 2026-11-09: user32 directly, so the editor does not load System.Windows.Forms on the typing path.
+		[DllImport("user32.dll")]
+		static extern int ShowCursor(bool show);
+
 		void AttachTypingEvents()
 		{
 			// Use the PreviewMouseMove event in case some other editor layer consumes the MouseMove event (e.g. SD's InsertionCursorLayer)
@@ -1051,7 +1056,7 @@ namespace ICSharpCode.AvalonEdit.Editing
 		void ShowMouseCursor()
 		{
 			if (this.isMouseCursorHidden) {
-				System.Windows.Forms.Cursor.Show();
+				ShowCursor(true);
 				this.isMouseCursorHidden = false;
 			}
 		}
@@ -1060,7 +1065,7 @@ namespace ICSharpCode.AvalonEdit.Editing
 		{
 			if (Options.HideCursorWhileTyping && !this.isMouseCursorHidden && this.IsMouseOver) {
 				this.isMouseCursorHidden = true;
-				System.Windows.Forms.Cursor.Hide();
+				ShowCursor(false);
 			}
 		}
 

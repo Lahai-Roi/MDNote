@@ -93,6 +93,75 @@ internal static class MarkdownCommands {
         internal int RightEnd;
     }
 
+    // HTML script commands use the same line/cell segmentation and delayed first-input wrap as
+    // emphasis. Splitting an active run removes the style only from the selected text.
+    internal static CommandResult ToggleScript(TextDocument document, int selectionStart, int selectionLength, bool superscript) {
+        if (!Validate(document, selectionStart, selectionLength) || TouchesCode(document, selectionStart, selectionLength)) return null;
+        string name = superscript ? "sup" : "sub", opening = "<" + name + ">", closing = "</" + name + ">";
+        int caret = selectionStart; bool word = false;
+        if (selectionLength == 0) {
+            if (!CaretInEditableText(document, caret)) return null;
+            if (IsStrictlyInsideWord(document, caret)) {
+                int end; word = ExpandWord(document, caret, out selectionStart, out end); selectionLength = end - selectionStart;
+            } else {
+                if (CaretInsideInlineCode(document, caret)) return null;
+                DocumentLine line = document.GetLineByOffset(caret); string text = LineText(document, line);
+                foreach (InlineHtml.Tag tag in InlineHtml.Parse(text).Values) {
+                    if (tag.Name != name) continue;
+                    if (caret == line.Offset + tag.CloseStart || caret == line.Offset + tag.End)
+                        return new CommandResult { SelectionStart=line.Offset + (caret == line.Offset + tag.CloseStart ? tag.CloseEnd : tag.Start) };
+                }
+                return new CommandResult { TypingOpen=opening, TypingClose=closing, TypingMarker=opening, SelectionStart=caret };
+            }
+        }
+        WidenSelectionToLinks(document, ref selectionStart, ref selectionLength);
+        NormalizeInlineSelection(document, ref selectionStart, ref selectionLength);
+        var result = new CommandResult();
+        foreach (LineSegment segment in InlineSegments(document, selectionStart, selectionLength)) {
+            int s = segment.Start, length = segment.End - segment.Start;
+            NormalizeInlineSelection(document, ref s, ref length);
+            if (length <= 0) continue;
+            DocumentLine line = document.GetLineByOffset(s); string text = LineText(document, line);
+            int a = s - line.Offset, b = a + length;
+            var info = MarkdownLivePreview.ParseInlineText(text, false);
+            List<MarkdownInlineSpans.Span> spans = MarkdownInlineSpans.Build(info, text);
+            // Never cut an opening/closing tag or a Markdown marker in half.
+            foreach (MarkdownInlineSpans.Span span in spans) {
+                if (span.Kind == MarkdownInlineSpans.SpanKind.Atomic) continue;
+                if (a > span.OpenStart && a < span.OpenStart + span.OpenLen) a = span.OpenStart;
+                if (b > span.CloseStart && b < span.CloseStart + span.CloseLen) b = span.CloseStart + span.CloseLen;
+            }
+            var tags = InlineHtml.Parse(text); var styled = new bool[text.Length]; var markers = new bool[text.Length];
+            foreach (MarkdownInlineSpans.Span span in spans) {
+                if (span.Kind == MarkdownInlineSpans.SpanKind.Atomic) continue;
+                for (int p = span.OpenStart; p < span.OpenStart + span.OpenLen; p++) markers[p] = true;
+                for (int p = span.CloseStart; p < span.CloseStart + span.CloseLen; p++) markers[p] = true;
+            }
+            foreach (InlineHtml.Tag tag in tags.Values) if (tag.Name == name)
+                for (int p = tag.End; p < tag.CloseStart; p++) styled[p] = true;
+            bool all = true, any = false;
+            for (int p = a; p < b; p++) if (!markers[p]) { any = true; if (!styled[p]) all = false; }
+            if (!any) continue;
+            string before = "", after = "";
+            foreach (InlineHtml.Tag tag in tags.Values) {
+                if (tag.Name != name || tag.CloseEnd <= a || tag.Start >= b) continue;
+                if (tag.Start >= a && tag.End <= b) result.Add(line.Offset + tag.Start, tag.End - tag.Start, "");
+                else if (tag.End == a) result.Add(line.Offset + tag.Start, tag.End - tag.Start, "");
+                else if (tag.End < a && a < tag.CloseStart) before += closing;
+                if (tag.CloseStart >= a && tag.CloseEnd <= b) result.Add(line.Offset + tag.CloseStart, tag.CloseEnd - tag.CloseStart, "");
+                else if (tag.CloseStart == b) result.Add(line.Offset + tag.CloseStart, tag.CloseEnd - tag.CloseStart, "");
+                else if (tag.End < b && b < tag.CloseStart) after += opening;
+            }
+            if (!all) { before += opening; after = closing + after; }
+            if (before.Length > 0) result.Add(line.Offset + a, 0, before);
+            if (after.Length > 0) result.Add(line.Offset + b, 0, after);
+        }
+        if (result.Edits.Count == 0) return null;
+        result.Edits.Sort(delegate(SourceEdit a, SourceEdit b) { return a.Offset.CompareTo(b.Offset); });
+        FinishSelection(result, word ? caret : selectionStart, word ? caret : selectionStart + selectionLength);
+        return result;
+    }
+
     #region ToggleInline
     internal static CommandResult ToggleInline(TextDocument document, int selectionStart, int selectionLength, string marker) {
         if (!Validate(document, selectionStart, selectionLength)) return null;
@@ -106,7 +175,7 @@ internal static class MarkdownCommands {
         // (the word expands and WidenToCodeRun moves the pair outside the backticks, the same
         // answer colour and size give); a caret on the run's inner edge has nothing to wrap, so
         // the toggle declines.
-        if (selectionLength == 0 && marker != "`" && CaretInsideInlineCode(document, selectionStart)
+        if (selectionLength == 0 && marker != "`" && marker != "==" && CaretInsideInlineCode(document, selectionStart)
             && !IsStrictlyInsideWord(document, selectionStart)) return null;
 
         int caret = selectionStart;
@@ -137,9 +206,13 @@ internal static class MarkdownCommands {
         }
         // A link the selection cuts at an edge takes the whole span, exactly as a caret in its
         // markup does, before either answer below reads the text.
+        if (marker == "==") SnapHighlightEdges(document, ref selectionStart, ref selectionLength);
         int preStart = caretOnly ? caret : selectionStart;
         int preEnd = caretOnly ? caret : selectionStart + selectionLength;
         WidenSelectionToLinks(document, ref selectionStart, ref selectionLength);
+        bool replacedOpposite;
+        CommandResult exclusive = ReplaceOppositeInline(document, selectionStart, selectionLength, marker, insideWord ? caret : -1, out replacedOpposite);
+        if (replacedOpposite) return exclusive;
         // A whole link (the caret or selection sits in its label) is styled as one unit, but a
         // pair of the same style inside the label (which InlineRuns never reads) must not nest
         // with the outer one: an active style is removed from the label, otherwise the link is
@@ -248,6 +321,165 @@ internal static class MarkdownCommands {
             result.SelectionStart = firstStart;
             result.SelectionLength = lastEnd - firstStart;
         }
+        return result;
+    }
+
+    // Include a link label's own pairs for the replacement rule (InlineRuns deliberately skips
+    // labels for the older wrap commands). Keep its long/padded code runs as the fallback.
+    static List<InlineRun> SelectionInlineRuns(string text) {
+        List<InlineRun> runs = InlineRuns(text);
+        var starts = new HashSet<int>();
+        foreach (InlineRun run in runs) starts.Add(run.OpenStart);
+        foreach (MarkdownInlineSpans.Span span in MarkdownInlineSpans.Build(MarkdownLivePreview.ParseInlineText(text, false), text)) {
+            if (span.Kind != MarkdownInlineSpans.SpanKind.Emphasis && span.Kind != MarkdownInlineSpans.SpanKind.Code) continue;
+            if (starts.Add(span.OpenStart)) runs.Add(new InlineRun { OpenStart=span.OpenStart, OpenEnd=span.OpenStart + span.OpenLen, CloseStart=span.CloseStart, CloseEnd=span.CloseStart + span.CloseLen, Code=span.Kind == MarkdownInlineSpans.SpanKind.Code });
+        }
+        runs.Sort(delegate(InlineRun a, InlineRun b) { return a.OpenStart.CompareTo(b.OpenStart); });
+        return runs;
+    }
+
+    // True when a closed highlight run ends exactly at `caret` (the caret is on the run's outer
+    // edge). The live view moves a caret sitting there to the run's inner edge before the typed
+    // character is inserted; with inline code armed the host keeps that arm (it asks this) and the
+    // first input still goes to the arming spot, where WrapTyped's exclusive rule splits the
+    // highlight: "==t==" + code "X" writes "==t==" + "`X`", never "==tX==".
+    internal static bool CaretAfterClosedHighlight(TextDocument document, int caret) {
+        if (document == null || caret <= 0 || caret > document.TextLength) return false;
+        DocumentLine line = document.GetLineByOffset(caret);
+        string text = LineText(document, line);
+        int point = caret - line.Offset;
+        foreach (InlineRun run in SelectionInlineRuns(text)) {
+            if (run.Code || !IsStyleRun(text, run, "==")) continue;
+            if (point == run.CloseEnd) return true;
+        }
+        return false;
+    }
+
+    // A mouse drag can land between the two hidden '=' characters. Never leave half a marker
+    // behind when switching that selection off; ordinary partial-content selections stay partial.
+    static void SnapHighlightEdges(TextDocument document, ref int start, ref int length) {
+        if (length <= 0) return;
+        int end = start + length;
+        foreach (DocumentLine line in TouchedLines(document, start, length)) {
+            string text = LineText(document, line);
+            foreach (InlineRun run in SelectionInlineRuns(text)) {
+                if (run.Code || !IsStyleRun(text, run, "==")) continue;
+                int a = line.Offset + run.OpenStart, b = line.Offset + run.OpenEnd;
+                int c = line.Offset + run.CloseStart, d = line.Offset + run.CloseEnd;
+                if (start > a && start < b) start = a;
+                if (end > c && end < d) end = d;
+            }
+        }
+        length = end - start;
+    }
+
+    // The toolbar's selection answer ignores hidden markup but requires every selected visible
+    // character to carry the style. Difference maps keep nested styles/markers O(line), not
+    // O(selected characters * spans). The caret-only path allocates none of these maps.
+    internal static bool SelectionHasInlineStyle(MarkdownLivePreview.LineInfo info, int start, int end, MarkdownLivePreview.Style style) {
+        if (info == null || info.Text == null || start < 0 || end > info.Text.Length || start >= end) return false;
+        int[] covered = new int[info.Text.Length + 1], hidden = new int[info.Text.Length + 1];
+        foreach (MarkdownLivePreview.StyledPart part in info.Styles) {
+            if ((part.Style & style) == 0) continue;
+            int a = Math.Max(0, part.Start), b = Math.Min(info.Text.Length, part.Start + part.Length);
+            if (a < b) { covered[a]++; covered[b]--; }
+        }
+        foreach (MarkdownLivePreview.Replacement part in info.Replacements) {
+            if (part.Kind != MarkdownLivePreview.ReplacementKind.Hidden) continue;
+            int a = Math.Max(0, part.Start), b = Math.Min(info.Text.Length, part.Start + part.Length);
+            if (a < b) { hidden[a]++; hidden[b]--; }
+        }
+        int active = 0, invisible = 0; bool any = false;
+        for (int p = 0; p < end; p++) {
+            active += covered[p]; invisible += hidden[p];
+            if (p < start || invisible > 0) continue;
+            any = true;
+            if (active <= 0) return false;
+        }
+        return any;
+    }
+
+    // Only the selected line bodies/cells are projected, never the document. Removing highlight
+    // uses the existing partial-run split rule; code is an atomic unit, as for the other commands.
+    // The later button then applies its style to the projection. One result = one undo step.
+    static CommandResult ReplaceOppositeInline(TextDocument document, int start, int length, string marker, int caret, out bool handled) {
+        handled = false;
+        if (length <= 0 || (marker != "==" && marker != "`")) return null;
+        List<LineSegment> segments = InlineSegments(document, start, length);
+        foreach (LineSegment segment in segments) {
+            DocumentLine line = document.GetLineByOffset(segment.Start);
+            string text = LineText(document, line);
+            foreach (InlineRun run in SelectionInlineRuns(text)) {
+                bool opposite = marker == "==" ? run.Code : !run.Code && IsStyleRun(text, run, "==");
+                if (opposite && segment.Start < line.Offset + run.CloseStart && segment.End > line.Offset + run.OpenEnd) handled = true;
+            }
+        }
+        if (!handled) return null;
+        var result = new CommandResult();
+        int delta = 0, first = -1, last = 0, keptCaret = -1;
+        foreach (LineSegment segment in segments) {
+            DocumentLine line = document.GetLineByOffset(segment.Start);
+            int pieceStart, pieceEnd;
+            PieceBounds(document, line, segment.Start, out pieceStart, out pieceEnd);
+            string original = document.GetText(pieceStart, pieceEnd - pieceStart);
+            // A neutral prefix prevents a cell's literal '#'/'---' from becoming structure in
+            // the one-piece projection. Real fences/structure were rejected on the original.
+            var projected = new TextDocument("x " + original);
+            int a = 2 + segment.Start - pieceStart, b = 2 + segment.End - pieceStart;
+            if (marker == "==") WidenToCodeRun(projected.Text, 0, ref a, ref b);
+            else { int n = b - a; SnapHighlightEdges(projected, ref a, ref n); b = a + n; }
+            string before = projected.Text;
+            var part = new EmphasisPart { Start=a, End=b, LineOffset=0, Text=before, Runs=new List<InlineRun>() };
+            var remove = new CommandResult();
+            foreach (InlineRun run in SelectionInlineRuns(before)) {
+                bool opposite = marker == "==" ? run.Code : !run.Code && IsStyleRun(before, run, "==");
+                if (!opposite || a >= run.CloseStart || b <= run.OpenEnd) continue;
+                if (run.Code) {
+                    var plan = new InlinePlan();
+                    DescribeCodeWrap(projected, run.OpenStart, run.CloseEnd, plan);
+                    int innerStart = plan.Wrapped ? plan.ContentStart : run.OpenEnd;
+                    int innerEnd = plan.Wrapped ? plan.ContentEnd : run.CloseStart;
+                    remove.Add(run.OpenStart, innerStart - run.OpenStart, "");
+                    remove.Add(innerEnd, run.CloseEnd - innerEnd, "");
+                    // Code's contents were literal: removing its ticks must not reinterpret
+                    // ==, stars, tags, entities or escapes as fresh Markdown (or lose text).
+                    for (int p = innerStart; p < innerEnd; p++) {
+                        char c = before[p];
+                        string literal = c == '&' ? "&amp;" : c == '<' ? "&lt;" : c == '>' ? "&gt;" : "\\`*_~[]=".IndexOf(c) >= 0 ? "\\" + c : null;
+                        if (literal != null) remove.Add(p, 1, literal);
+                    }
+                } else part.Runs.Add(run);
+            }
+            RemoveEmphasisPart(part, remove);
+            remove.Edits.Sort(delegate(SourceEdit x, SourceEdit y) { return x.Offset.CompareTo(y.Offset); });
+            FinishSelection(remove, a, b);
+            int mappedCaret = caret >= pieceStart && caret <= pieceEnd ? MapCaretThroughEdits(remove.Edits, 2 + caret - pieceStart) : -1;
+            foreach (SourceEdit edit in remove.Edits) projected.Replace(edit.Offset, edit.Length, edit.Text);
+            a = remove.SelectionStart; b = a + remove.SelectionLength;
+            MarkdownLivePreview.LineInfo parsed = MarkdownLivePreview.ParseInlineText(projected.Text, false);
+            MarkdownLivePreview.Style wanted = marker == "==" ? MarkdownLivePreview.Style.Highlight : MarkdownLivePreview.Style.Code;
+            bool already = SelectionHasInlineStyle(parsed, a, b, wanted);
+            CommandResult apply = already ? null : ToggleInline(projected, a, b - a, marker);
+            if (!already && apply == null) return null;
+            if (apply != null) {
+                if (mappedCaret >= 0) mappedCaret = MapCaretThroughEdits(apply.Edits, mappedCaret);
+                foreach (SourceEdit edit in apply.Edits) projected.Replace(edit.Offset, edit.Length, edit.Text);
+                a = apply.SelectionStart; b = a + apply.SelectionLength;
+            }
+            string changed = projected.GetText(2, projected.TextLength - 2);
+            // A projected code delimiter must not turn the real line start into a block fence.
+            FenceMark fence;
+            if (pieceStart == line.Offset && TryFenceMark(changed, out fence)) return null;
+            if (changed != original) result.Add(pieceStart, original.Length, changed);
+            if (first < 0) first = pieceStart + delta + a - 2;
+            last = pieceStart + delta + b - 2;
+            if (mappedCaret >= 0) keptCaret = pieceStart + delta + mappedCaret - 2;
+            delta += changed.Length - original.Length;
+        }
+        if (result.Edits.Count == 0) return null;
+        result.SelectionStart = keptCaret >= 0 ? keptCaret : first;
+        result.SelectionLength = keptCaret >= 0 ? 0 : Math.Max(0, last - first);
+        result.SortEdits();
         return result;
     }
 
@@ -362,7 +594,7 @@ internal static class MarkdownCommands {
     }
 
     static bool IsKnownMarker(string marker) {
-        return marker == "**" || marker == "*" || marker == "~~" || marker == "`";
+        return marker == "**" || marker == "*" || marker == "~~" || marker == "==" || marker == "`";
     }
 
     static List<InlinePlan> BuildInlinePlans(TextDocument document, int start, int length, string marker) {
@@ -729,8 +961,38 @@ internal static class MarkdownCommands {
     // typed text as one command, so the style never exists in the source without its text and one
     // undo takes both back. The caret lands before the closing markers, inside the new pair.
     internal static CommandResult WrapTyped(TextDocument document, int caret, string open, string close, string text) {
+        return WrapTyped(document, caret, open, close, text, null);
+    }
+    internal static CommandResult WrapTyped(TextDocument document, int caret, string open, string close, string text, string exclusiveMarker) {
         if (!Validate(document, caret, 0)) return null;
         if (open == null || close == null || string.IsNullOrEmpty(text)) return null;
+        // A new typing style replaces the opposing *existing* run too, not just another arm.
+        // Split it only with the first input, so arming/abandoning still writes no empty pairs.
+        if (exclusiveMarker == "==" || exclusiveMarker == "`") {
+            DocumentLine line = document.GetLineByOffset(caret);
+            string value = LineText(document, line);
+            foreach (InlineRun run in SelectionInlineRuns(value)) {
+                bool opposite = exclusiveMarker == "==" ? run.Code : !run.Code && IsStyleRun(value, run, "==");
+                int point = caret - line.Offset;
+                if (!opposite || point < run.OpenEnd || point > run.CloseEnd || (run.Code && point == run.CloseEnd)) continue;
+                int contentStart = run.OpenEnd, contentEnd = run.CloseStart;
+                if (run.Code) {
+                    var plan = new InlinePlan();
+                    DescribeCodeWrap(document, line.Offset + run.OpenStart, line.Offset + run.CloseEnd, plan);
+                    if (plan.Wrapped) { contentStart = plan.ContentStart - line.Offset; contentEnd = plan.ContentEnd - line.Offset; }
+                }
+                point = Math.Max(contentStart, Math.Min(point, contentEnd));
+                string other = run.Code ? "`" : "==";
+                string left = TypingFragment(document, line.Offset + contentStart, line.Offset + point, other);
+                string right = TypingFragment(document, line.Offset + point, line.Offset + contentEnd, other);
+                string inserted = left + open + text + close + right;
+                if (LineStartRun(document, line.Offset + run.OpenStart, line.Offset + run.CloseEnd, inserted, "") >= 3) return null;
+                var split = new CommandResult();
+                split.Add(line.Offset + run.OpenStart, run.CloseEnd - run.OpenStart, inserted);
+                split.SelectionStart = line.Offset + run.OpenStart + left.Length + open.Length + text.Length;
+                return split;
+            }
+        }
         // The armed pair plus the first input must not start the line with a fence run; the host
         // then inserts the input plainly, exactly as if the style had not been armed.
         if (LineStartRun(document, caret, caret, open + text + close, string.Empty) >= 3) return null;
@@ -740,6 +1002,20 @@ internal static class MarkdownCommands {
         result.SelectionLength = 0;
         result.SortEdits();
         return result;
+    }
+
+    static string TypingFragment(TextDocument document, int start, int end, string marker) {
+        if (start >= end) return "";
+        if (marker == "`") {
+            string lead, trail;
+            CodeDelimiters(document, start, end, out lead, out trail);
+            return lead + document.GetText(start, end - start) + trail;
+        }
+        int a = start, b = end;
+        while (a < b && Char.IsWhiteSpace(document.GetCharAt(a))) a++;
+        while (b > a && Char.IsWhiteSpace(document.GetCharAt(b - 1))) b--;
+        if (a == b) return document.GetText(start, end - start);
+        return document.GetText(start, a - start) + marker + document.GetText(a, b - a) + marker + document.GetText(b, end - b);
     }
 
     // True when the line text before the caret holds an unmatched opening marker of this
@@ -1568,7 +1844,7 @@ internal static class MarkdownCommands {
     // The pen's plans for a selection that crosses link or emphasis markup, or null when it
     // crosses none. A link keeps its brackets and target outside the code and its label inside
     // ("[`t`](u)", a code-styled link for the live parser and for GFM); an image, a footnote mark
-    // and an autolink stay whole and unstyled; every "**", "*", "_" or "~~" marker inside the
+    // and an autolink stay whole and unstyled; every "**", "*", "_", "~~" or "==" marker inside the
     // selection stays outside the backticks, so each pair still closes. The text between is
     // wrapped piece by piece with the usual per-line plans (whitespace trimmed, an existing code
     // run kept whole), and the caller's all-or-nothing toggle runs over all the pieces. Only the
@@ -2996,7 +3272,7 @@ internal static class MarkdownCommands {
     }
 
     #region InlineSpanSelection
-    // One inline pair of a line: an emphasis marker pair ("**", "__", "*", "_", "~~") or an
+    // One inline pair of a line: an emphasis marker pair ("**", "__", "*", "_", "~~", "==") or an
     // inline code run. Offsets are line-relative; [OpenEnd, CloseStart) is the styled content.
     struct InlineRun {
         internal int OpenStart, OpenEnd, CloseStart, CloseEnd;
@@ -3047,8 +3323,8 @@ internal static class MarkdownCommands {
     // so a span wrapped around those would only show its own tags as text.
     static List<InlineRun> InlineRuns(string text) {
         List<InlineRun> runs = new List<InlineRun>();
-        int[] opens = { -1, -1, -1, -1, -1 };
-        string[] tokens = { "**", "__", "*", "_", "~~" };
+        int[] opens = { -1, -1, -1, -1, -1, -1 };
+        string[] tokens = { "**", "__", "*", "_", "~~", "==" };
         for (int i = 0; i < text.Length; ) {
             char c = text[i];
             if (c == '\\') { i += 2; continue; }

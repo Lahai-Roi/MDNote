@@ -7,7 +7,7 @@ bool restoreMaximized;
 // Runs in the MainWindow constructor: a machine with no primary screen or a zero work area (RDP,
 // monitors switching) must open at the default spot rather than fail to start.
 void RestoreWindowPlacement(){try{RestoreWindowPlacementCore();}catch(Exception){restoreMaximized=false;WindowStartupLocation=WindowStartupLocation.CenterScreen;}}
-void RestoreWindowPlacementCore(){if(Program.IsSelfTest||String.IsNullOrEmpty(rememberedWindow))return;string[] parts=rememberedWindow.Split('|');double left,top,width,height;if(parts.Length!=5||!Double.TryParse(parts[0],NumberStyles.Float,CultureInfo.InvariantCulture,out left)||!Double.TryParse(parts[1],NumberStyles.Float,CultureInfo.InvariantCulture,out top)||!Double.TryParse(parts[2],NumberStyles.Float,CultureInfo.InvariantCulture,out width)||!Double.TryParse(parts[3],NumberStyles.Float,CultureInfo.InvariantCulture,out height)||Double.IsNaN(left)||Double.IsInfinity(left)||Double.IsNaN(top)||Double.IsInfinity(top)||Double.IsNaN(width)||Double.IsNaN(height)||width<200||width>16000||height<150||height>16000)return;double scale=ScreenScale();var requested=new System.Drawing.Rectangle((int)(left/scale),(int)(top/scale),(int)(width/scale),(int)(height/scale));var screen=System.Windows.Forms.Screen.FromRectangle(requested).WorkingArea;var work=new Rect(screen.Left*scale,screen.Top*scale,screen.Width*scale,screen.Height*scale);Width=Math.Max(MinWidth,Math.Min(width,work.Width));Height=Math.Max(MinHeight,Math.Min(height,work.Height));Left=Math.Max(work.Left,Math.Min(left,work.Right-Width));Top=Math.Max(work.Top,Math.Min(top,work.Bottom-Height));WindowStartupLocation=WindowStartupLocation.Manual;restoreMaximized=parts[4]=="max";lastRestorableState=restoreMaximized?WindowState.Maximized:WindowState;}
+void RestoreWindowPlacementCore(){if(Program.IsSelfTest||String.IsNullOrEmpty(rememberedWindow))return;string[] parts=rememberedWindow.Split('|');double left,top,width,height;if(parts.Length!=5||!Double.TryParse(parts[0],NumberStyles.Float,CultureInfo.InvariantCulture,out left)||!Double.TryParse(parts[1],NumberStyles.Float,CultureInfo.InvariantCulture,out top)||!Double.TryParse(parts[2],NumberStyles.Float,CultureInfo.InvariantCulture,out width)||!Double.TryParse(parts[3],NumberStyles.Float,CultureInfo.InvariantCulture,out height)||Double.IsNaN(left)||Double.IsInfinity(left)||Double.IsNaN(top)||Double.IsInfinity(top)||Double.IsNaN(width)||Double.IsNaN(height)||width<200||width>16000||height<150||height>16000)return;double scale=ScreenScale();var screen=MonitorArea.WorkFromRect((int)(left/scale),(int)(top/scale),(int)(width/scale),(int)(height/scale));var work=new Rect(screen.Left*scale,screen.Top*scale,screen.Width*scale,screen.Height*scale);Width=Math.Max(MinWidth,Math.Min(width,work.Width));Height=Math.Max(MinHeight,Math.Min(height,work.Height));Left=Math.Max(work.Left,Math.Min(left,work.Right-Width));Top=Math.Max(work.Top,Math.Min(top,work.Bottom-Height));WindowStartupLocation=WindowStartupLocation.Manual;restoreMaximized=parts[4]=="max";lastRestorableState=restoreMaximized?WindowState.Maximized:WindowState;}
 void RememberWindowPlacement(){if(Program.IsSelfTest)return;WindowState effective=WindowState==WindowState.Minimized?lastRestorableState:WindowState;Rect bounds=WindowState!=WindowState.Normal?RestoreBounds:new Rect(Left,Top,ActualWidth,ActualHeight);if(bounds.IsEmpty||Double.IsNaN(bounds.Left))return;rememberedWindow=String.Join("|",new[]{bounds.Left.ToString("R",CultureInfo.InvariantCulture),bounds.Top.ToString("R",CultureInfo.InvariantCulture),bounds.Width.ToString("R",CultureInfo.InvariantCulture),bounds.Height.ToString("R",CultureInfo.InvariantCulture),effective==WindowState.Maximized?"max":"normal"});SaveWindowPlacement();}
 
 static bool FinitePlacement(double value){return !Double.IsNaN(value)&&!Double.IsInfinity(value);}
@@ -28,16 +28,16 @@ internal void ClaimPlacementAnchor(){var latest=lastMovedWindow==null?null:lastM
 internal void EnsureVisibleForeground(){if(WindowState==WindowState.Minimized){/* b50: skip the DWM restore animation so a close prompt from the taskbar appears at once */IntPtr restoring=new WindowInteropHelper(this).Handle;int flag=1;if(restoring!=IntPtr.Zero)DwmSetWindowAttribute(restoring,3,ref flag,4);WindowState=lastRestorableState==WindowState.Maximized?WindowState.Maximized:WindowState.Normal;flag=0;if(restoring!=IntPtr.Zero)DwmSetWindowAttribute(restoring,3,ref flag,4);}if(Program.IsSelfTest)return;if(!IsVisible)Show();Activate();IntPtr handle=new WindowInteropHelper(this).Handle;if(handle!=IntPtr.Zero){BringWindowToTop(handle);SetForegroundWindow(handle);}}
 void ApplyTitleTheme(){IntPtr handle=new WindowInteropHelper(this).Handle;if(handle==IntPtr.Zero)return;try{int enabled=dark?1:0;if(DwmSetWindowAttribute(handle,20,ref enabled,4)!=0)DwmSetWindowAttribute(handle,19,ref enabled,4);int caption=dark?0x202020:-1;DwmSetWindowAttribute(handle,35,ref caption,4);int ink=dark?0xE8E8E8:-1;DwmSetWindowAttribute(handle,36,ref ink,4);}catch(DllNotFoundException){}catch(EntryPointNotFoundException){}}
 // WPF units per screen pixel; 1 when the primary screen is missing or reports an empty work area.
-static double ScreenScale(){var primary=System.Windows.Forms.Screen.PrimaryScreen;double pixels=primary==null?0:primary.WorkingArea.Height;double scale=pixels>0?SystemParameters.WorkArea.Height/pixels:1;return scale>0&&!Double.IsInfinity(scale)?scale:1;}
-static Rect ScreenWorkArea(System.Drawing.Rectangle screen){double scale=ScreenScale();return new Rect(screen.Left*scale,screen.Top*scale,screen.Width*scale,screen.Height*scale);}
-static Rect WorkAreaFor(Rect bounds){try{double scale=ScreenScale();return ScreenWorkArea(System.Windows.Forms.Screen.FromRectangle(new System.Drawing.Rectangle((int)(bounds.Left/scale),(int)(bounds.Top/scale),(int)(bounds.Width/scale),(int)(bounds.Height/scale))).WorkingArea);}catch(Exception){return SystemParameters.WorkArea;}}
+static double ScreenScale(){double pixels=MonitorArea.PrimaryWorkHeight();double scale=pixels>0?SystemParameters.WorkArea.Height/pixels:1;return scale>0&&!Double.IsInfinity(scale)?scale:1;}
+static Rect ScreenWorkArea(MonitorArea.PixelRect screen){double scale=ScreenScale();return new Rect(screen.Left*scale,screen.Top*scale,screen.Width*scale,screen.Height*scale);}
+static Rect WorkAreaFor(Rect bounds){try{double scale=ScreenScale();return ScreenWorkArea(MonitorArea.WorkFromRect((int)(bounds.Left/scale),(int)(bounds.Top/scale),(int)(bounds.Width/scale),(int)(bounds.Height/scale)));}catch(Exception){return SystemParameters.WorkArea;}}
 // A maximized or minimized window reports its normal (restore) rectangle in Left/Top, and a window
 // that has not been placed yet has NaN there: neither names the monitor the window is drawn on.
 // The handle does, so an owned dialog or a cascade started from such a window follows that monitor.
 static Rect WorkAreaFor(Window window,Rect bounds){
     if(window!=null&&(window.WindowState!=WindowState.Normal||!FinitePlacement(window.Left)||!FinitePlacement(window.Top))){
         IntPtr handle=new WindowInteropHelper(window).Handle;
-        if(handle!=IntPtr.Zero)return ScreenWorkArea(System.Windows.Forms.Screen.FromHandle(handle).WorkingArea);
+        if(handle!=IntPtr.Zero)return ScreenWorkArea(MonitorArea.WorkFromWindow(handle));
     }
     return WorkAreaFor(bounds);
 }
@@ -164,4 +164,42 @@ bool PrepareCloseDeferral(){
     return false;
 }
 void ResetCloseDeferral(){closeDeferred=false;closeOpenSince=0;closeComposeSince=0;closeSettleSince=0;closeCompositionRequested=false;closeOpenCancelled=false;closeCancelledOpen=null;}
-}}
+}
+/* 2026-11-09: screen metrics through user32 only. System.Windows.Forms.Screen and System.Drawing.Rectangle
+   were loaded by the startup placement code and stayed in memory; these calls return the same device-pixel
+   work-area rectangles Screen did (ScreenWorkArea scales them to DIPs exactly as before). */
+internal static class MonitorArea{
+    [StructLayout(LayoutKind.Sequential)]struct RECT{internal int Left;internal int Top;internal int Right;internal int Bottom;}
+    [StructLayout(LayoutKind.Sequential)]struct MONITORINFO{internal int cbSize;internal RECT rcMonitor;internal RECT rcWork;internal int dwFlags;}
+    [StructLayout(LayoutKind.Sequential)]internal struct ScreenPoint{internal int X;internal int Y;}
+    // Device pixels; Width/Height are derived so callers keep the old Rectangle fields.
+    internal struct PixelRect{internal int Left;internal int Top;internal int Width;internal int Height;}
+    const uint MonitorDefaultToPrimary=1,MonitorDefaultToNearest=2;
+    [DllImport("user32.dll")]static extern IntPtr MonitorFromRect(ref RECT rect,uint flags);
+    [DllImport("user32.dll")]static extern IntPtr MonitorFromWindow(IntPtr window,uint flags);
+    [DllImport("user32.dll")]static extern IntPtr MonitorFromPoint(ScreenPoint point,uint flags);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="GetMonitorInfoW")]static extern bool GetMonitorInfoW(IntPtr monitor,ref MONITORINFO info);
+    [DllImport("user32.dll")]static extern bool GetCursorPos(out ScreenPoint point);
+    // Pointer position in screen device pixels; false while the input desktop is switched (UAC, lock, RDP).
+    internal static bool TryGetCursor(out ScreenPoint point){return GetCursorPos(out point);}
+    // Work-area height of the primary monitor in device pixels; 0 when it cannot be read (Screen returned null).
+    internal static int PrimaryWorkHeight(){PixelRect work;return TryPrimaryWork(out work)?work.Height:0;}
+    static bool TryPrimaryWork(out PixelRect work){ScreenPoint origin=new ScreenPoint();return TryWork(MonitorFromPoint(origin,MonitorDefaultToPrimary),out work);}
+    // The monitor holding the largest part of the rectangle (Screen.FromRectangle's rule), else the nearest.
+    internal static PixelRect WorkFromRect(int left,int top,int width,int height){
+        RECT bounds=new RECT();bounds.Left=left;bounds.Top=top;bounds.Right=left+width;bounds.Bottom=top+height;
+        PixelRect work;if(!TryWork(MonitorFromRect(ref bounds,MonitorDefaultToNearest),out work))throw new InvalidOperationException("GetMonitorInfo failed for the placement rectangle");
+        return work;
+    }
+    internal static PixelRect WorkFromWindow(IntPtr window){
+        PixelRect work;if(!TryWork(MonitorFromWindow(window,MonitorDefaultToNearest),out work))throw new InvalidOperationException("GetMonitorInfo failed for the window");
+        return work;
+    }
+    static bool TryWork(IntPtr monitor,out PixelRect work){
+        work=new PixelRect();if(monitor==IntPtr.Zero)return false;
+        MONITORINFO info=new MONITORINFO();info.cbSize=Marshal.SizeOf(typeof(MONITORINFO));
+        if(!GetMonitorInfoW(monitor,ref info))return false;
+        work.Left=info.rcWork.Left;work.Top=info.rcWork.Top;work.Width=info.rcWork.Right-info.rcWork.Left;work.Height=info.rcWork.Bottom-info.rcWork.Top;return true;
+    }
+}
+}

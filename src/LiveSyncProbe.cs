@@ -67,6 +67,8 @@ internal static class LiveSyncProbe {
             sizes.IsDropDownOpen=false;Pump();
             // A focus loss with nothing typed must not commit; the synthetic event is the same
             // path the popup used to take (the old handler ran a size command and source.Focus()).
+            /* 2.4.0: a mouse pick now hands focus back to the editor, so the box already follows the new selection here; the check is that the focus loss itself changes nothing */
+            picked=sizes.Text;
             var lost=new KeyboardFocusChangedEventArgs(Keyboard.PrimaryDevice,Environment.TickCount,sizes,null);
             lost.RoutedEvent=Keyboard.LostKeyboardFocusEvent;
             sizes.RaiseEvent(lost);Pump();

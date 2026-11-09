@@ -28,22 +28,15 @@ A fast, lightweight Markdown and TXT editor for Windows—just like Notepad.
 
 ## Key Features
 
-- **Edit as Formatted**: Hide symbols like `#` and `**` and write directly as the document appears. If you prefer to see the symbols while typing, switch to **Live mode** (shows raw syntax only on the active line) or **Source** editing.
-- **Formatting Toolbar**: Insert headings, bold, italic, strikethrough, text color, lists & checklists, blockquotes, code (inline & block), links, images, and tables with a click.
-- **Table Editing**: Type directly inside cells, and add, remove, or align rows and columns using the toolbar.
-- **TXT mode**: Plain text editing with line numbers. Converting MD to TXT strips formatting symbols and keeps only the visible text.
-- **Tabs, Windows, and Outline**: Open multiple documents in tabs or new windows, and jump to sections using the heading list.
-- **Insert images**: Whether added via paste, drag-and-drop, or the image button, images remaining in the document upon saving are collected into an adjacent folder of the same name and linked.
-- **Continue previous session**: When on, closes unsaved documents without prompting and resumes them right where you left off the next time you open MDNote.
-- **Find & Replace, Print, Encodings**: Find with regular expressions if you like. Open and save files in UTF-8, UTF-16, CP949, Shift JIS, GBK, Big5, and more.
-- **Save as HTML**: Choose **HTML files (*.html)** in **Save as…** to create a separate .html file that opens in a browser and can be pasted into blogs or email.
-- **Math formulas**: `$E=mc^2$` in a sentence and `$$ … $$` on their own lines are shown as formulas.
-- **Heading level marks**: `/` bars matching the heading level are shown to the left of each heading so you can tell its level at a glance. You can change them to `#` symbols or turn them off under **View → Heading level marks**.
-- **Colored boxes (alerts)**: Writing `[!NOTE]`, `[!TIP]`, `[!WARNING]`, etc. on the first line of a quote shows it as a box with a colored bar and icon, just like on GitHub. They also appear as-is when printing and saving as HTML.
-- **Focus mode & Typewriter mode**: Keep only the current paragraph or line clear, or keep the line you are typing in the middle of the window. Both are off by default.
-- **File change alerts**: If another program changes or deletes an open file, MDNote asks whether to reload it. It also asks before saving over a file that was changed elsewhere.
-- **Dark mode, Font & Line Spacing, F1–F12 Shortcuts**: Customize display settings and function key shortcuts to your liking.
-- **5 Languages**: Supports 한국어, English, 日本語, 简体中文, and 繁體中文. Help guides and sample documents open in the selected language.
+- **Edit as formatted**: Symbols like `#` and `**` stay hidden while you write. Switch to **Live mode** or **Source** when you want to see them.
+- **Toolbar and table editing**: Insert headings, bold, text color, lists, code, links, images and tables with a click; type straight into table cells.
+- **GitHub formatting and math**: Alerts (GitHub and Obsidian style), highlights, footnotes, `[TOC]`, emoji and math (`$E=mc^2$`) are rendered right in the editor.
+- **TXT mode**: Plain text with line numbers, just like Notepad.
+- **Tabs, windows and outline**: Open documents in tabs or windows, and jump through the heading list or the files in the same folder.
+- **Tidy images**: Pasted or dropped images are collected into a folder next to the document when you save.
+- **Find & replace, print, save as HTML, many encodings** (UTF-8, CP949, Shift JIS, GBK, Big5, etc.)
+- **Continue previous session, file change alerts**
+- **Dark, focus and typewriter modes, custom shortcuts, 5 languages**
 
 ![Dark mode](screenshots/en-dark.png)
 
@@ -54,6 +47,7 @@ A fast, lightweight Markdown and TXT editor for Windows—just like Notepad.
 | ![Live mode](screenshots/features/en-live.png)<br>**Live mode**: Shows Markdown symbols only on the line where the cursor is, while the rest stays formatted. | ![Table Editing](screenshots/features/en-table.png)<br>**Table Editing**: Type directly inside cells, and add or align rows and columns using the toolbar. |
 | ![Outline](screenshots/features/en-outline.png)<br>**Outline**: Click a heading in the list to jump straight to that section. | ![Find & Replace](screenshots/features/en-find.png)<br>**Find & Replace**: Find text in the document and replace it all at once. |
 | ![TXT mode](screenshots/features/en-txt.png)<br>**TXT mode**: Write plain text with line numbers, just like Notepad. | ![Language Selection](screenshots/features/en-lang.png)<br>**5 Languages**: Menus, help guides, and sample documents switch to the selected language. |
+| ![Alerts and formatting](screenshots/features/en-github.png)<br>**Alerts and formatting**: GitHub alerts, Obsidian-style callouts with custom titles, highlights, footnotes and keyboard labels. | ![Math](screenshots/features/en-math.png)<br>**Math**: Inline `$…$` and display `$$…$$` are drawn as formulas. |
 
 ## How to Use
 

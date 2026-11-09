@@ -942,19 +942,20 @@ bool PasteData(IDataObject data,bool plain){
 }
 void PasteCaptured(PasteSnapshot snapshot,bool plain){if(snapshot==null||!editing||documentOperationBusy)return;if(source!=null&&source.ImeBusy){source.RunAfterComposition(delegate{PasteCaptured(snapshot,plain);});return;}/* #7: paste after the pending syllable lands */PasteCapturedNow(snapshot,plain);}
 // Y2: a rich paste that lands inside an emphasis run must not repeat that run's own delimiter.
-// The text is already bold/italic/struck, and the nested pair closes the outer one early
+// The text is already bold/italic/struck/highlighted, and the nested pair closes the outer one early
 // ("**a**bold** b**" leaves the markers as literal text). The caret's line is read with the live
 // parser's pairing rules (token order, escapes, code spans, link labels and span/font tags
 // skipped), once per paste, and only for a caret without a selection. At the inner edge of a run
 // a different kind that would start (or end) with the same marker character is dropped too,
 // because the two runs would merge into "***" and pair differently.
-[ThreadStatic] static bool pasteEmphasisContext,pasteInsideBold,pasteInsideItalic,pasteInsideStrike,pasteAtOpenEdge,pasteAtCloseEdge;
+[ThreadStatic] static bool pasteEmphasisContext,pasteInsideBold,pasteInsideItalic,pasteInsideStrike,pasteInsideHighlight,pasteAtOpenEdge,pasteAtCloseEdge;
 [ThreadStatic] static char pasteEdgeMarker;
 internal static bool PasteBoldSuppressed{get{return pasteEmphasisContext&&(pasteInsideBold||((pasteAtOpenEdge||pasteAtCloseEdge)&&pasteEdgeMarker=='*'));}}
 internal static bool PasteItalicSuppressed{get{return pasteEmphasisContext&&(pasteInsideItalic||((pasteAtOpenEdge||pasteAtCloseEdge)&&pasteEdgeMarker=='*'));}}
 internal static bool PasteStrikeSuppressed{get{return pasteEmphasisContext&&(pasteInsideStrike||((pasteAtOpenEdge||pasteAtCloseEdge)&&pasteEdgeMarker=='~'));}}
+internal static bool PasteHighlightSuppressed{get{return pasteEmphasisContext&&(pasteInsideHighlight||((pasteAtOpenEdge||pasteAtCloseEdge)&&pasteEdgeMarker=='='));}}
 static void ArmPasteEmphasis(SourceEditor editor){
-    pasteEmphasisContext=false;pasteInsideBold=false;pasteInsideItalic=false;pasteInsideStrike=false;pasteAtOpenEdge=false;pasteAtCloseEdge=false;pasteEdgeMarker='\0';
+    pasteEmphasisContext=false;pasteInsideBold=false;pasteInsideItalic=false;pasteInsideStrike=false;pasteInsideHighlight=false;pasteAtOpenEdge=false;pasteAtCloseEdge=false;pasteEdgeMarker='\0';
     if(editor==null||editor.Document==null||editor.SelectionLength!=0)return;
     int caret=editor.SelectionStart;
     if(caret<0||caret>editor.Document.TextLength)return;
@@ -967,8 +968,8 @@ static void ArmPasteEmphasis(SourceEditor editor){
 // Escapes, code spans, link targets and span/font tags are skipped; the walk is bounded by the
 // parser's own budget so a pathological line cannot make a paste quadratic.
 static void PasteScanEmphasis(string text,int column){
-    int[] opens={-1,-1,-1,-1,-1};
-    string[] tokens={"**","__","*","_","~~"};
+    int[] opens={-1,-1,-1,-1,-1,-1};
+    string[] tokens={"**","__","*","_","~~","=="};
     int budget=text.Length*4+64;
     // A link label owns its own inline markup while the "](url)" / "][id]" tail is hidden, so a
     // marker inside a URL never pairs with the line (MarkdownLivePreview.ParseInline). The walk
@@ -1032,7 +1033,7 @@ static void PasteScanEmphasis(string text,int column){
         else if(i>opens[kind]+length&&!char.IsWhiteSpace(text[i-1])){
             int open=opens[kind];
             if(open+length<=column&&column<=i){
-                if(kind<2)pasteInsideBold=true;else if(kind<4)pasteInsideItalic=true;else pasteInsideStrike=true;
+                if(kind<2)pasteInsideBold=true;else if(kind<4)pasteInsideItalic=true;else if(kind==4)pasteInsideStrike=true;else pasteInsideHighlight=true;
                 if(column==open+length){pasteAtOpenEdge=true;pasteEdgeMarker=c;}
                 if(column==i){pasteAtCloseEdge=true;pasteEdgeMarker=c;}
             }
@@ -1104,13 +1105,13 @@ static int PasteCodeClose(string text,int start,int fence,ref int budget){
 }
 void PasteCapturedNow(PasteSnapshot snapshot,bool plain){
     if(!editing||documentOperationBusy)return;
-    bool hadContext=pasteEmphasisContext,hadBold=pasteInsideBold,hadItalic=pasteInsideItalic,hadStrike=pasteInsideStrike,hadOpen=pasteAtOpenEdge,hadClose=pasteAtCloseEdge;
+    bool hadContext=pasteEmphasisContext,hadBold=pasteInsideBold,hadItalic=pasteInsideItalic,hadStrike=pasteInsideStrike,hadHighlight=pasteInsideHighlight,hadOpen=pasteAtOpenEdge,hadClose=pasteAtCloseEdge;
     char hadMarker=pasteEdgeMarker;
     if(!plain&&!hadContext&&(snapshot.HasHtml||snapshot.HasRtf))ArmPasteEmphasis(source);
     try{
         if(LivePaste(CapturedPasteData(snapshot,plain),plain,snapshot.Value))return;
     }finally{
-        pasteEmphasisContext=hadContext;pasteInsideBold=hadBold;pasteInsideItalic=hadItalic;pasteInsideStrike=hadStrike;pasteAtOpenEdge=hadOpen;pasteAtCloseEdge=hadClose;pasteEdgeMarker=hadMarker;
+        pasteEmphasisContext=hadContext;pasteInsideBold=hadBold;pasteInsideItalic=hadItalic;pasteInsideStrike=hadStrike;pasteInsideHighlight=hadHighlight;pasteAtOpenEdge=hadOpen;pasteAtCloseEdge=hadClose;pasteEdgeMarker=hadMarker;
     }
     /* This is the TXT (plain) path: LivePaste refuses a plain document, so the clipboard string is
        inserted here as the whole paste. It lands on the document's own newline like every LivePaste

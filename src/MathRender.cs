@@ -209,6 +209,11 @@ internal sealed class MathElement : VisualLineElement {
     }
     internal string Latex { get { return latex; } }
     internal bool Display { get { return display; } }
+    // The drawn formula this element's run uses (the same cache entry), for hit tests against the picture.
+    internal MathVisual Picture() {
+        TextRunProperties properties = TextRunProperties;
+        return properties == null ? null : MathRender.Get(latex, display, properties.FontRenderingEmSize, properties.ForegroundBrush, family);
+    }
     public override TextRun CreateTextRun(int startVisualColumn, ITextRunConstructionContext context) {
         TextRunProperties properties = TextRunProperties;
         MathVisual visual = MathRender.Get(latex, display, properties.FontRenderingEmSize, properties.ForegroundBrush, family);

@@ -1,6 +1,6 @@
 ﻿using System;using System.Text;using System.Windows;using System.Windows.Controls;using System.Windows.Documents;
 namespace MDNote {public partial class MainWindow {
-bool? textMode;static bool newDocumentsText,alwaysEditing;MenuItem textModeMenu,newTextMenu,alwaysEditMenu;Button quickText;
+bool? textMode;static bool newDocumentsText,alwaysEditing;MenuItem textModeMenu,newTextMenu,alwaysEditMenu;Button quickText;FrameworkElement quickTextLabel;FrameworkElement quickTextIcon;bool quickTextCompact;
 // TXT->MD escapes every character that would read back as markup as an entity, and a backslash
 // becomes &#92; as well: a raw "\" would eat the character after it (`\*` lost its backslash on
 // the way back to TXT). The backslash replace must follow the "&" replace, otherwise the entity it
@@ -26,7 +26,48 @@ static string ReadableText(FlowDocument document){var result=new StringBuilder()
 static void PlainBlocks(BlockCollection blocks,StringBuilder result){PlainBlocks(blocks,result,0);}
 static void PlainBlocks(BlockCollection blocks,StringBuilder result,int depth){foreach(Block block in blocks){if(MarkdownWriter.IsAutoTableGap(block))continue;var paragraph=block as Paragraph;if(paragraph!=null){result.Append(ParagraphBody(paragraph.Inlines)).Append('\n');}else if(block is Section)PlainBlocks(((Section)block).Blocks,result,depth);else if(block is System.Windows.Documents.List){var list=(System.Windows.Documents.List)block;int number=list.StartIndex;foreach(ListItem item in list.ListItems){var content=new StringBuilder();PlainBlocks(item.Blocks,content,depth+1);string task=item.Tag as string;bool isTask=MarkdownWriter.TaskItem(item);string marker=isTask?(task=="task:x"?"☑ ":"☐ "):list.MarkerStyle==TextMarkerStyle.Decimal?(number+". "):list.MarkerStyle==TextMarkerStyle.None?"":"- ";result.Append(new string(' ',depth*2)).Append(marker).Append(content);number++;}}else if(block is Table){foreach(TableRowGroup group in ((Table)block).RowGroups)foreach(TableRow row in group.Rows){bool first=true;foreach(TableCell cell in row.Cells){if(!first)result.Append('\t');first=false;var content=new StringBuilder();PlainBlocks(cell.Blocks,content,depth);result.Append(content.ToString().TrimEnd('\n').Replace("\n"," "));}result.Append('\n');}}}}
 
-void BuildTextQuickButton(){var parent=quickDark.Parent as Panel;if(parent==null)return;quickText=new Button {Content=Ui.TxtIcon(),ToolTip="TXT 모드"};Ui.ToggleChrome(quickText,true);/* b41: same RC8 22 px bordered square as the dark toggle */quickText.Click+=delegate{ToggleTextMode();};parent.Children.Insert(parent.Children.IndexOf(quickDark),quickText);UpdateTextModeMenu();PolishToolbar();}
+/* 2026-11-09 (user): the TXT toggle moved from the top toolbar to the status bar's right end. The
+   command, the Tag=Active state and the shortcut/menu entry are the old ones; only the home and the
+   chrome changed. It is docked Right, so the status text growing or shrinking never moves it, and
+   the wide face is the bare "TXT" label (a file type, never translated). The chrome is the 목차
+   button's FormatViewButton: 22 px high, 1 px ButtonLine outline, 6 px radius, the shared
+   hover/pressed scales and the app's ActiveFill/ActiveInk pair when TXT mode is on. */
+void BuildTextQuickButton(){
+    var row=statusBar==null?null:statusBar.Child as DockPanel;if(row==null)return;
+    /* 11-09 (user): the bare "TXT" left the box half empty; the T glyph now leads like the 목차/원문 glyphs, and the label is "TXT" beside a page-with-lines glyph (user: "T .txt" read oddly) */
+    var txtGlyph=Ui.CenteredInkIcon("txtDoc",16,0.5);txtGlyph.Margin=new Thickness(0,0,4,0);txtGlyph.VerticalAlignment=VerticalAlignment.Center;
+    var txtRow=new StackPanel {Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center};txtRow.Children.Add(txtGlyph);txtRow.Children.Add(new TextBlock {Text="TXT",VerticalAlignment=VerticalAlignment.Center,RenderTransform=new System.Windows.Media.TranslateTransform(0,1)});/* capitals without descenders read high beside the Hangul labels: 1 px down (user 11-09) */txtRow.RenderTransform=new System.Windows.Media.TranslateTransform(-0.5,0);/* user 11-09: a half pixel left */quickTextLabel=txtRow;
+    quickText=new Button {Content=quickTextLabel,Focusable=false,UseLayoutRounding=true,SnapsToDevicePixels=true,VerticalAlignment=VerticalAlignment.Center,HorizontalAlignment=HorizontalAlignment.Right};
+    quickText.Style=(Style)Resources["FormatViewButton"];quickText.Margin=new Thickness(0);
+    quickText.ToolTip=TextToggleTip();
+    System.Windows.Automation.AutomationProperties.SetName(quickText,T("TXT 모드"));
+    quickText.Click+=delegate{ToggleTextMode();};
+    DockPanel.SetDock(quickText,Dock.Right);
+    /* before the status text, the LastChildFill child, so the button keeps the bar's right edge */
+    row.Children.Insert(Math.Max(0,row.Children.Count-1),quickText);
+    /* the top row is the host 목차 reads, so this toggle crosses 520 px at the same moment; the bar
+       itself would be narrower while the 목차 panel is open */
+    statusBar.SizeChanged+=delegate{UpdateTextModeButtonLayout();};
+    UpdateTextModeButtonLayout();UpdateTextModeMenu();PolishToolbar();
+}
+/* Same compact rule as Ui.CompactToggleLabel: below CompactToggleHostWidth the label gives way to
+   the existing T glyph alone in the 22 px box the collapsed 원문/목차 toggles keep. */
+void UpdateTextModeButtonLayout(){
+    if(quickText==null)return;
+    FrameworkElement host=topBarHost!=null&&topBarHost.ActualWidth>0?topBarHost:statusBar;
+    double width=host==null?0:host.ActualWidth;
+    /* before the first layout (or while minimised) there is no width to judge: keep the current face */
+    if(width<=0)return;
+    bool compact=width<Ui.CompactToggleHostWidth;
+    if(compact==quickTextCompact)return;
+    quickTextCompact=compact;
+    if(compact){
+        if(quickTextIcon==null){quickTextIcon=Ui.CenteredInkIcon("txtT",14,0.5);quickTextIcon.HorizontalAlignment=HorizontalAlignment.Center;/* whole pixels only (a half-pixel shift smeared the strokes, user 11-09): centred across, 1 px low for the heavy bar */}/* ink-sized like the collapsed 원문 braces, so the T sits in the box centre (the scaled 24 px "type" slot leaned top-left) */
+        quickText.Padding=new Thickness(0);quickText.MinWidth=Ui.CompactToggleBox;quickText.Content=quickTextIcon;
+    }else{
+        quickText.ClearValue(Control.PaddingProperty);quickText.ClearValue(FrameworkElement.MinWidthProperty);quickText.Content=quickTextLabel;SyncViewButtonWidths();
+    }
+}
 void ToggleTextMode(){if(StoreGuardLive()){source.RunAfterComposition(ToggleTextModeNow);return;}ToggleTextModeNow();}
 // Conversion keeps the same source surface and records one mode-aware undo step.
 void ToggleTextModeNow(){if(documentOperationBusy)return;bool beforeEditing=editing,beforePreview=preview.IsChecked==true;if(!editing)SetMode(true);FinishComposition();FlushDocumentChanges();if(source.Document.TextLength>=256*1024){QueueModeConversion();return;}bool beforeMode=PlainText;string before=text;int caret=beforeMode?Canonical(before.Substring(0,source.CaretIndex)).Length:LivePlainCaret(before,source.CaretIndex,T("[이미지: "));string after=beforeMode?LiteralMarkdown(before):MarkdownPlainText.Convert(before,T("[이미지: "));CommitTextMode(beforeMode,before,after,caret,beforeEditing,beforePreview);}
@@ -122,6 +163,6 @@ void RollbackSaveConversionView(bool beforeEditing,bool beforePreview){
 void ReportAbortedTextConversion(){if(!saveInProgress||Program.IsSelfTest)return;EnsureVisibleForeground();MessageBox.Show(this,T("저장할 수 없습니다.\n")+T("변환 중에 보기나 문서가 바뀌어 저장하지 못했습니다. 다시 저장해 주세요."),"MDNote");}
 
 Border textBadge,statusBar;
-void UpdateTextModeMenu(){if(textModeMenu!=null)textModeMenu.IsChecked=PlainText;if(quickText!=null)quickText.Tag=PlainText?"Active":null;if(textBadge!=null)textBadge.Visibility=PlainText?Visibility.Visible:Visibility.Collapsed;if(statusBar!=null){if(PlainText)statusBar.SetResourceReference(Border.BackgroundProperty,"AccentSoft");else statusBar.ClearValue(Border.BackgroundProperty);}}
+void UpdateTextModeMenu(){if(textModeMenu!=null)textModeMenu.IsChecked=PlainText;if(quickText!=null){quickText.Tag=PlainText?"Active":null;quickText.ToolTip=TextToggleTip();}if(textBadge!=null)textBadge.Visibility=PlainText?Visibility.Visible:Visibility.Collapsed;if(statusBar!=null){if(PlainText)statusBar.SetResourceReference(Border.BackgroundProperty,"AccentSoft");else statusBar.ClearValue(Border.BackgroundProperty);}}
 void BuildTextModeMenu(MenuItem menu){alwaysEditMenu=new MenuItem {Header="항상 수정 기능 활성화",IsCheckable=true,IsChecked=alwaysEditing};alwaysEditMenu.Click+=delegate{alwaysEditing=alwaysEditMenu.IsChecked;SavePreferences();};menu.Items.Insert(1,alwaysEditMenu);textModeMenu=new MenuItem {Header="TXT 모드",IsCheckable=true};textModeMenu.Click+=delegate{ToggleTextMode();};menu.Items.Insert(2,textModeMenu);newTextMenu=new MenuItem {Header="새 문서는 항상 TXT 모드 활성화",IsCheckable=true,IsChecked=newDocumentsText};newTextMenu.Click+=delegate{newDocumentsText=newTextMenu.IsChecked;SavePreferences();};menu.Items.Insert(3,newTextMenu);}
 }}

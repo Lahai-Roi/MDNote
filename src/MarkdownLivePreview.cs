@@ -53,6 +53,9 @@ internal static class LiveCompositionGeometry {
         if (text.Properties.Length==0) return text.Default;
         int target=Math.Max(text.Map[0],relative-1),lo=0,hi=text.Properties.Length-1;
         while (lo<hi) { int middle=(lo+hi)/2;if (text.Map[middle]<target) lo=middle+1;else hi=middle; }
+        // A <kbd> pad shares the key's edge offset; its default properties must not stand in
+        // for the run the caret is drawn in (the composition font follows the visible run).
+        while (text.IsPad(lo) && lo+1<text.Properties.Length) lo++;
         return text.Properties[lo];
     }
     // Resolve the actual TextCharacters run, not TableRowElement's default properties
@@ -277,8 +280,17 @@ internal static partial class MarkdownLivePreview {
         // Host text lookup for the link hover tooltip ("Ctrl+클릭하여 열기 · <url>"); null keeps
         // the Korean wording, which offscreen shots and probes use.
         internal Func<string,string> Translate;
+        // Host status-line notice for quick view actions (the code block copy button). Null keeps
+        // the action silent, which offscreen shots and probes that build Settings themselves use.
+        internal Action<string> Notice;
         // A file open/convert is running: even checkboxes must not edit the document.
         internal bool Busy;
+        // The heading list the outline published for the in-document [TOC] box (null until the
+        // first scan; the session redraws when the reference changes).
+        internal TocData Toc;
+        // Host request to (re)build that list; called once per [TOC] line parse, on its own
+        // debounce, so a document without the marker never pays for an outline scan.
+        internal Action TocRequested;
         // Stage 2 of the live-as-basic audit: edit mode never reveals the caret line's
         // markup. Rendered stays rendered (Raw() is always false); the 원문 편집 toggle
         // detaches the session and still shows the source. Off keeps every reveal rule.
@@ -330,6 +342,9 @@ internal static partial class MarkdownLivePreview {
     const int ParseLimit = 16384;
     const int MaxSpans = 256;
     static readonly FontFamily CodeFamily = new FontFamily("Consolas, Malgun Gothic");
+    // The live code block's copy button (Ui holds the same Lucide data as the ribbon keys "copy"/"copied").
+    static readonly Geometry CopyIconGeometry = Geometry.Parse(Ui.CopyIconData);
+    static readonly Geometry CopyCheckGeometry = Geometry.Parse(Ui.CopyCheckData);
     internal static FontFamily InlineCodeFamily { get { return CodeFamily; } }
     // The detached raw view (원문 toggle) shows source text, not prose: a Korean UI face draws
     // ASCII symbols with its own wide forms (Malgun Gothic's '<' is 0.70em, Consolas' 0.55em),
@@ -381,6 +396,14 @@ internal static partial class MarkdownLivePreview {
     internal const double MinimumColumnWidth=140;
     // RowLayout's cell inset; Widths hold the TEXT width, TableWidths adds this padding.
     internal const double CellPadding=10.5;
+    // <kbd>'s box padding: .35 em of real layout space on each side (the hidden tag runs carry it
+    // through InvisibleElement's gap), and the box widens to the text band for a one-letter key.
+    internal const double KeyboardPadEm=.35;
+    // <sup>/<sub> baseline shift in ems of the body font size. A browser's superscript raises the
+    // small (0.75 em) run by about a third of the body size, a subscript drops it by a fifth; the
+    // glyphs are drawn there by BlockRenderer, never by WPF's BaselineAlignment.
+    internal const double ScriptShiftEm=.33;
+    internal const double SubScriptShiftEm=.2;
     // The per-column floor TableWidths gives every column. The per-column cap below no
     // longer limits a growing typed column (TableWidths bounds the table's total instead);
     // probes still read it, so a check and the layout keep one definition of a column's
@@ -748,6 +771,20 @@ internal static partial class MarkdownLivePreview {
         internal int ItemQuote;
         internal AlertKind ItemAlert;
         internal int ItemAlertLevel;
+        // GitHub-allowed block HTML: a stack of up to HtmlMaxLevels open containers, 4 bits a
+        // level in HtmlKinds (0 = none, see the HtmlK constants) and the ordered-list item count
+        // of that level in HtmlNumbers. HtmlSince is the line number that opened the outermost
+        // container; an unmatched open tag stops affecting the view after HtmlLineLimit lines.
+        internal int HtmlDepth;
+        internal long HtmlKinds;
+        internal long HtmlNumbers;
+        internal int HtmlSince;
+        internal int HtmlKindAt(int level) { return (int)((HtmlKinds >> (level * 4)) & 15); }
+        internal int HtmlNumberAt(int level) { return (int)((HtmlNumbers >> (level * 4)) & 15); }
+        internal void HtmlSet(int level, int kind, int number) {
+            HtmlKinds = (HtmlKinds & ~(15L << (level * 4))) | ((long)kind << (level * 4));
+            HtmlNumbers = (HtmlNumbers & ~(15L << (level * 4))) | ((long)number << (level * 4));
+        }
         // An open display-math block ("$$" ... "$$" or a ```math fence that closes within
         // MathRender.BlockLines): the lines still to come, the closer included (0 = none), and
         // the opener line. Lines inside are formula source: no fence, list or table state.
@@ -759,13 +796,209 @@ internal static partial class MarkdownLivePreview {
                 ListGap == other.ListGap && Setext == other.Setext && Quote == other.Quote && QuoteParagraph == other.QuoteParagraph &&
                 Alert == other.Alert && AlertLevel == other.AlertLevel &&
                 ItemQuote == other.ItemQuote && ItemAlert == other.ItemAlert && ItemAlertLevel == other.ItemAlertLevel &&
+                HtmlDepth == other.HtmlDepth && HtmlKinds == other.HtmlKinds && HtmlNumbers == other.HtmlNumbers &&
+                HtmlSince == other.HtmlSince &&
                 (List == other.List || List != null && List.Same(other.List));
         }
+    }
+
+    // YAML front matter (Obsidian / Jekyll / Hugo): the first line is exactly "---" and a later
+    // line exactly "---" or "..." closes it within the first 200 lines. The range is cached: an
+    // edit invalidates it only when it lands inside the watched range (the block itself, line 1,
+    // or - while a bare "---" opener has no closer yet - the first 200 lines). Typing anywhere
+    // else pays one integer compare, and BlockCache.Scan plus ParseLine read this one answer.
+    internal sealed class FrontMatterCache {
+        readonly TextDocument document;
+        int endLine = -1;
+        bool candidate;
+        // The end offset of the last line an edit must touch to change the answer (line 1 when
+        // there is no opener, the closing line, or line 200 while a bare opener has no closer).
+        int watchEnd;
+        // Bumped whenever the answered range really moves (see Scan). A LineInfo stores the value
+        // it was parsed under (Info) and is dropped when it has moved: the view can build lines
+        // while a whole-document replace is still in flight, and those parses answer for the text
+        // they saw, not for the text now on screen.
+        int generation;
+        // The last answered end line (-1 before the first scan). A rescan that returns the same
+        // value (typing a YAML value, say) must not bump the generation: that would re-parse the
+        // whole viewport on every keystroke inside the block.
+        int published = -1;
+        internal FrontMatterCache(TextDocument document) { this.document = document; }
+        internal int Generation { get { return generation; } }
+        internal int EndLine { get { if (endLine < 0) Scan(); return endLine; } }
+        internal void Reset() { endLine = -1; candidate = false; watchEnd = 0; }
+        void Scan() {
+            candidate = IsFrontMatterOpener(document);
+            int next = candidate ? FrontMatterEnd(document) : 0;
+            if (published >= 0 && next != published) generation++;
+            published = next;
+            endLine = next;
+            if (endLine > 0) watchEnd = document.GetLineByNumber(endLine).EndOffset;
+            else if (candidate) watchEnd = document.GetLineByNumber(Math.Min(200, document.LineCount)).EndOffset;
+            else watchEnd = document.GetLineByNumber(1).EndOffset;
+        }
+        // The cached closing line before an edit that may change the range (-1 when the cached
+        // answer cannot change). The caller re-reads EndLine and rebuilds the parse cache only
+        // when the answer really moved.
+        internal int Invalidate(DocumentChangeEventArgs e) {
+            if (endLine < 0) return -1;
+            if (e.Offset > watchEnd) return -1;
+            int old = endLine;
+            Reset();
+            return old;
+        }
+    }
+
+    // ---- GitHub-allowed block HTML ----------------------------------------------------------
+    // A stack of open containers, at most HtmlMaxLevels deep. The kinds fit four bits each, so
+    // one long holds the whole stack and another its ordered-list counters (15 items a list).
+    const int HtmlMaxLevels = 8;
+    const int HtmlLineLimit = 200;
+    const int HtmlDiv = 1, HtmlDivCenter = 2, HtmlDivRight = 3;
+    const int HtmlP = 4, HtmlPCenter = 5, HtmlPRight = 6, HtmlCenter = 7;
+    const int HtmlDetails = 8, HtmlQuoteTag = 9;
+    const int HtmlUl = 10, HtmlOl = 11, HtmlDl = 12, HtmlFigure = 13, HtmlPre = 14, HtmlPicture = 15;
+    static int HtmlKindAt(long kinds, int level) { return (int)((kinds >> (level * 4)) & 15); }
+    static int HtmlNumberAt(long numbers, int level) { return (int)((numbers >> (level * 4)) & 15); }
+    static long HtmlPack(long packed, int level, int value) {
+        return (packed & ~(15L << (level * 4))) | ((long)value << (level * 4));
+    }
+    static int HtmlOpenKind(InlineHtml.Tag tag, string text) {
+        switch (tag.Name) {
+            case "div": {
+                string align = InlineHtml.Attribute(text, tag, "align");
+                if (String.Equals(align, "center", StringComparison.OrdinalIgnoreCase)) return HtmlDivCenter;
+                if (String.Equals(align, "right", StringComparison.OrdinalIgnoreCase)) return HtmlDivRight;
+                return HtmlDiv;
+            }
+            case "p": {
+                string align = InlineHtml.Attribute(text, tag, "align");
+                if (String.Equals(align, "center", StringComparison.OrdinalIgnoreCase)) return HtmlPCenter;
+                if (String.Equals(align, "right", StringComparison.OrdinalIgnoreCase)) return HtmlPRight;
+                return HtmlP;
+            }
+            case "center": return HtmlCenter;
+            case "details": return HtmlDetails;
+            case "blockquote": return HtmlQuoteTag;
+            case "ul": return HtmlUl;
+            case "ol": return HtmlOl;
+            case "dl": return HtmlDl;
+            case "figure": return HtmlFigure;
+            case "pre": return HtmlPre;
+            case "picture": return HtmlPicture;
+            default: return 0;
+        }
+    }
+    static bool HtmlKindCloses(int kind, string name) {
+        switch (name) {
+            case "div": return kind == HtmlDiv || kind == HtmlDivCenter || kind == HtmlDivRight;
+            case "p": return kind == HtmlP || kind == HtmlPCenter || kind == HtmlPRight;
+            case "center": return kind == HtmlCenter;
+            case "details": return kind == HtmlDetails;
+            case "blockquote": return kind == HtmlQuoteTag;
+            case "ul": return kind == HtmlUl;
+            case "ol": return kind == HtmlOl;
+            case "dl": return kind == HtmlDl;
+            case "figure": return kind == HtmlFigure;
+            case "pre": return kind == HtmlPre;
+            case "picture": return kind == HtmlPicture;
+            default: return false;
+        }
+    }
+    // The block state after one line of block HTML. Only a tag-only line opens or closes a
+    // container; "<li> ..." of either shape advances an ordered list's counter. A stack older
+    // than HtmlLineLimit lines is dropped, so an unmatched open tag cannot run the whole document.
+    static void HtmlScanLine(string text, int lineNumber, ref int depth, ref long kinds, ref long numbers, ref int since) {
+        if (depth > 0 && since > 0 && lineNumber - since > HtmlLineLimit) { depth = 0; kinds = 0; numbers = 0; since = 0; }
+        if (text == null || text.Length < 3) return;
+        bool inPre = false;
+        for (int i = 0; i < depth; i++) if (HtmlKindAt(kinds, i) == HtmlPre) { inPre = true; break; }
+        int start;
+        InlineHtml.Tag lineTag = InlineHtml.BlockTagLine(text, out start);
+        if (inPre && !(lineTag != null && lineTag.Closing && lineTag.Name == "pre")) return;
+        if (lineTag != null) {
+            if (lineTag.Closing) {
+                int found = -1;
+                for (int i = depth - 1; i >= 0; i--) if (HtmlKindCloses(HtmlKindAt(kinds, i), lineTag.Name)) { found = i; break; }
+                if (found >= 0) {
+                    depth = found;
+                    if (depth == 0) since = 0;
+                }
+                return;
+            }
+            if (lineTag.Name == "li") { HtmlCountItem(ref kinds, ref numbers, depth); return; }
+            if (lineTag.Name == "hr") return;
+            int open = HtmlOpenKind(lineTag, text);
+            if (open <= 0 || depth >= HtmlMaxLevels) return;
+            kinds = HtmlPack(kinds, depth, open);
+            numbers = HtmlPack(numbers, depth, 0);
+            depth++;
+            if (depth == 1) since = lineNumber;
+            return;
+        }
+        // "<li>text</li>" is one line: only the list counter moves.
+        InlineHtml.Tag lead = InlineHtml.LeadingBlockTag(text, out start);
+        if (lead != null && !lead.Closing && lead.Name == "li") HtmlCountItem(ref kinds, ref numbers, depth);
+    }
+    static void HtmlCountItem(ref long kinds, ref long numbers, int depth) {
+        for (int i = depth - 1; i >= 0; i--) {
+            int kind = HtmlKindAt(kinds, i);
+            if (kind == HtmlUl) return;
+            if (kind == HtmlOl) {
+                int number = HtmlNumberAt(numbers, i);
+                if (number < 15) numbers = HtmlPack(numbers, i, number + 1);
+                return;
+            }
+        }
+    }
+    static BlockState HtmlCarry(BlockState before, BlockState next) {
+        next.HtmlDepth = before.HtmlDepth;
+        next.HtmlKinds = before.HtmlKinds;
+        next.HtmlNumbers = before.HtmlNumbers;
+        next.HtmlSince = before.HtmlSince;
+        return next;
+    }
+    // 1 = center, 2 = right, 0 = no alignment, from a block tag's own attributes (<center> is
+    // always centered; div/p read align="...").
+    static int HtmlAlignTag(InlineHtml.Tag tag, string text) {
+        if (tag.Name == "center") return 1;
+        string align = InlineHtml.Attribute(text, tag, "align");
+        if (String.Equals(align, "center", StringComparison.OrdinalIgnoreCase)) return 1;
+        if (String.Equals(align, "right", StringComparison.OrdinalIgnoreCase)) return 2;
+        return 0;
+    }
+    static int HtmlAlignOf(BlockState state) {
+        for (int i = state.HtmlDepth - 1; i >= 0; i--) {
+            int kind = state.HtmlKindAt(i);
+            if (kind == HtmlDivCenter || kind == HtmlPCenter || kind == HtmlCenter) return 1;
+            if (kind == HtmlDivRight || kind == HtmlPRight) return 2;
+        }
+        return 0;
+    }
+    static int HtmlCountOf(BlockState state, int wanted) {
+        int count = 0;
+        for (int i = 0; i < state.HtmlDepth; i++) if (state.HtmlKindAt(i) == wanted) count++;
+        return count;
+    }
+    static bool HtmlHas(BlockState state, int wanted) {
+        for (int i = 0; i < state.HtmlDepth; i++) if (state.HtmlKindAt(i) == wanted) return true;
+        return false;
+    }
+    // 1 = <ul>, 2 = <ol>; number is the next item's number for an ordered list.
+    static int HtmlListOf(BlockState state, out int number) {
+        number = 1;
+        for (int i = state.HtmlDepth - 1; i >= 0; i--) {
+            int kind = state.HtmlKindAt(i);
+            if (kind == HtmlUl) return 1;
+            if (kind == HtmlOl) { number = state.HtmlNumberAt(i) + 1; return 2; }
+        }
+        return 0;
     }
 
     // End-of-line states and validity use compressed runs, not an object per document line.
     internal sealed class BlockCache : ILineTracker, IDisposable {
         readonly TextDocument document;
+        internal readonly FrontMatterCache FrontMatter;
         readonly CompressingTreeList<BlockState> states = new CompressingTreeList<BlockState>(delegate(BlockState a, BlockState b) { return a.Equals(b); });
         readonly CompressingTreeList<bool> valid = new CompressingTreeList<bool>(delegate(bool a, bool b) { return a == b; });
         readonly WeakLineTracker tracker;
@@ -773,10 +1006,12 @@ internal static partial class MarkdownLivePreview {
 
         internal BlockCache(TextDocument document) {
             this.document = document;
+            FrontMatter = new FrontMatterCache(document);
             Reset();
             tracker = WeakLineTracker.Register(document, this);
         }
         void Reset() {
+            FrontMatter.Reset();
             states.Clear();
             states.InsertRange(0, document.LineCount + 1, new BlockState());
             valid.Clear();
@@ -820,20 +1055,28 @@ internal static partial class MarkdownLivePreview {
             }
         }
         BlockState Scan(DocumentLine line, BlockState before) {
+            // Front matter is not Markdown: no fence, list, quote, setext or table state may leak
+            // out of it into the body below (a "```" in a YAML value would otherwise turn the rest
+            // of the document into code).
+            if (FrontMatter.EndLine > 0 && line.LineNumber <= FrontMatter.EndLine) return new BlockState();
             // Inside a display-math block every line is formula source up to the closer.
-            if (before.Math > 0) return before.Math == 1 ? new BlockState() : new BlockState { Math=before.Math - 1, MathStart=before.MathStart };
+            if (before.Math > 0) return HtmlCarry(before, before.Math == 1 ? new BlockState() : new BlockState { Math=before.Math - 1, MathStart=before.MathStart });
             char fence;
             int length;
             bool tailBlank;
             ReadFence(document, line, out fence, out length, out tailBlank);
             if (before.Fence != '\0') {
-                if (fence == before.Fence && length >= before.FenceLength && tailBlank) return new BlockState();
+                if (fence == before.Fence && length >= before.FenceLength && tailBlank) return HtmlCarry(before, new BlockState());
                 return before;
             }
             int math = MathOpen(document, line, before);
-            if (math > 0) return new BlockState { Math=math, MathStart=line };
-            if (length >= 3) return new BlockState { Fence=fence, FenceLength=length };
+            if (math > 0) return HtmlCarry(before, new BlockState { Math=math, MathStart=line });
+            if (length >= 3) return HtmlCarry(before, new BlockState { Fence=fence, FenceLength=length });
             string text = ShortText(document, line);
+            // Block HTML state: carried through code and math lines above, read from the text here.
+            int htmlDepth = before.HtmlDepth, htmlSince = before.HtmlSince;
+            long htmlKinds = before.HtmlKinds, htmlNumbers = before.HtmlNumbers;
+            HtmlScanLine(text, line.LineNumber, ref htmlDepth, ref htmlKinds, ref htmlNumbers, ref htmlSince);
             bool pipe = HasTablePipe(text);
             bool table = pipe && (before.Table || NextIsDelimiter(document, line));
             // Block quote state for the next line. A line opens a quote with its ">" markers;
@@ -926,7 +1169,8 @@ internal static partial class MarkdownLivePreview {
                 TableColumns=tableColumns,List=list,ListGap=listGap,
                 Setext=!table && line.Length <= ParseLimit && SetextText(text, before.Setext),
                 Quote=quote, QuoteParagraph=quoteParagraph, Alert=alert, AlertLevel=alertLevel,
-                ItemQuote=itemQuote, ItemAlert=itemAlert, ItemAlertLevel=itemAlertLevel };
+                ItemQuote=itemQuote, ItemAlert=itemAlert, ItemAlertLevel=itemAlertLevel,
+                HtmlDepth=htmlDepth, HtmlKinds=htmlKinds, HtmlNumbers=htmlNumbers, HtmlSince=htmlSince };
         }
         public void BeforeRemoveLine(DocumentLine line) {
             int number = line.LineNumber;
@@ -972,6 +1216,97 @@ internal static partial class MarkdownLivePreview {
         else if (offset > document.TextLength) { offset = document.TextLength; length = 0; }
         if (length > document.TextLength - offset) length = document.TextLength - offset;
         return document.GetText(offset, length);
+    }
+
+    // ---- YAML front matter ----------------------------------------------------------------
+    // The one detection rule every reader shares (block cache, line parse, outline, print, HTML
+    // export and the status counter): line 1 is exactly "---", and a later line exactly "---" or
+    // "..." closes it within the first 200 lines. Line 1 is checked before anything else is read,
+    // so a document without front matter pays three character compares.
+    internal static bool IsFrontMatterOpener(string text) {
+        if (text == null || text.Length < 3) return false;
+        if (text[0] != '-' || text[1] != '-' || text[2] != '-') return false;
+        return text.Length == 3 || text[3] == '\r' || text[3] == '\n';
+    }
+    static bool IsFrontMatterOpener(ITextSource source) {
+        if (source == null || source.TextLength < 3) return false;
+        if (source.GetCharAt(0) != '-' || source.GetCharAt(1) != '-' || source.GetCharAt(2) != '-') return false;
+        if (source.TextLength == 3) return true;
+        char next = source.GetCharAt(3);
+        return next == '\r' || next == '\n';
+    }
+    // The closing line number (0 = none) and, from ScanFrontMatter, the offset just past the
+    // closing line (what the status counter subtracts).
+    internal static int FrontMatterEnd(ITextSource source) {
+        int endLine;
+        ScanFrontMatter(source, out endLine);
+        return endLine;
+    }
+    internal static int FrontMatterOffset(ITextSource source) {
+        int endLine;
+        return ScanFrontMatter(source, out endLine);
+    }
+    // A text string: the cheap opener test first, so only a document that really starts with the
+    // delimiter pays for the source wrapper. The status line asks on every caret move, and a
+    // string is immutable, so the last answer is reused until the edit hands over a new instance.
+    static string frontMatterMemoText;
+    static int frontMatterMemoEnd, frontMatterMemoOffset;
+    internal static int FrontMatterEnd(string text) {
+        if (!IsFrontMatterOpener(text)) return 0;
+        if (Object.ReferenceEquals(text, frontMatterMemoText)) return frontMatterMemoEnd;
+        int endLine;
+        frontMatterMemoOffset = ScanFrontMatter(new StringTextSource(text), out endLine);
+        frontMatterMemoEnd = endLine;
+        frontMatterMemoText = text;
+        return endLine;
+    }
+    internal static int FrontMatterOffset(string text) {
+        if (!IsFrontMatterOpener(text)) return 0;
+        FrontMatterEnd(text);
+        return frontMatterMemoOffset;
+    }
+    // The same rule over already-split lines (print, HTML export).
+    internal static int FrontMatterEnd(string[] lines) {
+        if (lines == null || lines.Length < 2 || !String.Equals(lines[0], "---", StringComparison.Ordinal)) return 0;
+        int last = Math.Min(lines.Length, 200);
+        for (int i = 1; i < last; i++) if (String.Equals(lines[i], "---", StringComparison.Ordinal) || String.Equals(lines[i], "...", StringComparison.Ordinal)) return i + 1;
+        return 0;
+    }
+    static int ScanFrontMatter(ITextSource source, out int endLine) {
+        endLine = 0;
+        if (!IsFrontMatterOpener(source)) return 0;
+        int length = source.TextLength;
+        int p = 3, line = 1;
+        while (line < 200) {
+            if (p >= length) return 0;
+            char newline = source.GetCharAt(p);
+            if (newline == '\r') { p++; if (p < length && source.GetCharAt(p) == '\n') p++; }
+            else if (newline == '\n') p++;
+            else return 0;
+            // A trailing line break opens an empty last line, which cannot close the block.
+            if (p >= length) return 0;
+            line++;
+            int count = 0;
+            bool dashes = true, dots = true;
+            while (p < length) {
+                char c = source.GetCharAt(p);
+                if (c == '\r' || c == '\n') break;
+                count++;
+                if (count > 3) { dashes = false; dots = false; }
+                else { if (c != '-') dashes = false; if (c != '.') dots = false; }
+                p++;
+            }
+            if (count == 3 && (dashes || dots)) {
+                // The closing line's own line break is part of the front matter the counter drops.
+                if (p < length) {
+                    if (source.GetCharAt(p) == '\r') { p++; if (p < length && source.GetCharAt(p) == '\n') p++; }
+                    else p++;
+                }
+                endLine = line;
+                return p;
+            }
+        }
+        return 0;
     }
 
     // The number of lines that follow a display-math opener, the closer included, or 0 when the
@@ -1150,7 +1485,7 @@ internal static partial class MarkdownLivePreview {
     }
 
     [Flags]
-    internal enum Style { None=0, Bold=1, Italic=2, Strike=4, Code=8, Link=16, Superscript=32, Muted=64, Small=128, SemiBold=256 }
+    internal enum Style { None=0, Bold=1, Italic=2, Strike=4, Code=8, Link=16, Superscript=32, Muted=64, Small=128, SemiBold=256, Highlight=512, Subscript=1024, Underline=2048, Keyboard=4096, Dotted=8192, HtmlSmall=16384, HtmlSup=32768, HtmlSub=65536 }
     internal struct StyledPart {
         internal int Start, Length;
         internal Style Style;
@@ -1160,12 +1495,12 @@ internal static partial class MarkdownLivePreview {
         // font size, like the basic view's em/% rules.
         internal double SizeEm;
     }
-    internal enum ReplacementKind { Hidden, Spacer, Bullet, Number, Task, Column, Image, Glyph, LineBreak, Math, Alert }
+    internal enum ReplacementKind { Hidden, Spacer, Bullet, Number, Task, Column, Image, Glyph, LineBreak, Math, Alert, Toc, Backref }
     internal struct Replacement {
         // Alert: Level is the AlertKind, Label the default title the element draws next to its icon
         // (empty when the marker line carries a title of its own, which stays ordinary text).
         internal int Start, Length, Level, Column;
-        internal double Width;
+        internal double Width, ImageWidth, ImageHeight;
         internal string Label, Source;
         internal ReplacementKind Kind;
         // A structural line prefix (#, >, a list bullet/number/checkbox). Only this run is
@@ -1178,6 +1513,12 @@ internal static partial class MarkdownLivePreview {
         // An ATX heading's hidden "# " prefix: the element built for it is as wide as the heading
         // level mark plus its gap, so the heading text starts right of the mark (HeadingMark).
         internal bool Mark;
+        // Glyph only: the label is an emoji shortcode's character (EmojiElement draws it with the
+        // emoji face), not an entity or other inline glyph.
+        internal bool Emoji;
+        // Hidden only: real layout width of this run in ems (a <kbd> tag's box padding, one side
+        // each). The element turns it into pixels at its own font size (heading scale follows).
+        internal double PadEm;
     }
     internal struct Cell {
         internal int Start, End;
@@ -1186,7 +1527,29 @@ internal static partial class MarkdownLivePreview {
         internal int Start, Length;
         internal string Url;
     }
+    // One row of an in-document [TOC]: a heading from the outline panel's own scan (never a
+    // second document walk). Offset belongs to TocData.Version and is mapped on click.
+    internal sealed class TocEntry {
+        internal string Title;
+        internal int Level;
+        internal int Offset;
+    }
+    // The heading list the outline last published, with the version its offsets were read at.
+    // The live session holds the current one; a click maps an offset to the document's version.
+    internal sealed class TocData {
+        internal readonly TocEntry[] Entries;
+        internal readonly ITextSourceVersion Version;
+        internal readonly TextDocument Document;
+        internal TocData(TocEntry[] entries,ITextSourceVersion version,TextDocument document) {
+            Entries=entries;Version=version;Document=document;
+        }
+    }
+    internal sealed class HintPart {
+        internal int Start, Length;
+        internal string Text;
+    }
     internal sealed class LineInfo {
+        internal List<HintPart> Hints;
         internal string Text;
         internal int Heading, QuoteLevels, ListLevel;
         // Setext: this line is a heading because the next line underlines it; the
@@ -1196,6 +1559,9 @@ internal static partial class MarkdownLivePreview {
         // A "[id]: url" reference definition line: muted source, and in the no-reveal mode
         // folded to nothing unless the caret is on it (Session.HideReference).
         internal bool RefDefinition;
+        // A "[TOC]" line alone on its line: the box of the document's headings takes the line
+        // (Live, off the caret) or follows its muted marker row (Basic, HideMarkers).
+        internal bool Toc;
         internal DocumentLine TableStart;
         // A table under a list item ("- item" then "  | a | b |") is drawn at the item's body x,
         // the same 18 px per nesting level the list markers use.
@@ -1215,6 +1581,22 @@ internal static partial class MarkdownLivePreview {
         // Stage 3a: the run has no caret stop of its own, so the line starts at its text.
         internal int LeadEnd;
         internal bool Quote, Code, FenceLine, Rule, Table, Header, Delimiter;
+        // YAML front matter ("---" ... "---"/"...", the first 200 lines): a muted box. The two
+        // delimiter lines are structure like fences - hidden off the caret, shown on it - and carry
+        // FrontMatterFence so the basic view's caret keys step over their blank band.
+        internal bool FrontMatter, FrontMatterFence;
+        // The FrontMatterCache generation this line was parsed against. A line parsed while a
+        // whole-document replace was still in flight carries an older answer, and Info drops it.
+        internal int FrontGen;
+        // GitHub-allowed block HTML. HtmlTagLine: the line is one block tag (a blank row of text
+        // height while the caret is elsewhere; the caret line shows its source in both views).
+        // The rest comes from the block stack: Align 1 =
+        // center, 2 = right; Quote and Details are how many open containers indent this line
+        // (0.9 em each, with a bar); HtmlIndentEm is that combined indent. ListKind 1 = <ul>,
+        // 2 = <ol> (ListNumber the next item's number).
+        internal bool HtmlTagLine, HtmlInPre;
+        internal int HtmlAlign, HtmlQuote, HtmlDetailDepth, HtmlListKind, HtmlListNumber;
+        internal double HtmlIndentEm;
         // Display math. MathCount > 0: this line opens a block of that many more lines (the
         // closer included) whose source is MathLatex. MathRemaining > 0: this line is inside such
         // a block (itself included; 1 = the closer) and MathOpener is the opener line. A one-line
@@ -1252,6 +1634,10 @@ internal static partial class MarkdownLivePreview {
         internal void Hide(int start, int length) {
             if (length > 0) Replacements.Add(new Replacement { Start=start, Length=length, Kind=ReplacementKind.Hidden });
         }
+        // A hidden run that still takes layout width: the side padding of a <kbd> box.
+        internal void HidePad(int start, int length, double padEm) {
+            if (length > 0) Replacements.Add(new Replacement { Start=start, Length=length, Kind=ReplacementKind.Hidden, PadEm=padEm });
+        }
         internal void HidePrefix(int start, int length) {
             if (length > 0) Replacements.Add(new Replacement { Start=start, Length=length, Kind=ReplacementKind.Hidden, Prefix=true });
         }
@@ -1270,7 +1656,7 @@ internal static partial class MarkdownLivePreview {
     }
 
     internal sealed class Palette {
-        internal readonly Brush Background, Foreground, Muted, Link, Code, Rule, InlineCode, TableHead, TableCell, QuoteText, QuoteBar;
+        internal readonly Brush Background, Foreground, Muted, Link, Code, Rule, InlineCode, Highlight, TableHead, TableCell, QuoteText, QuoteBar;
         // The alert types' colours, indexed by (int)AlertKind (index 0, None, is the quote bar's).
         internal readonly Brush[] Alert = new Brush[6];
         internal Palette(bool dark, Color? textColor) {
@@ -1282,6 +1668,7 @@ internal static partial class MarkdownLivePreview {
             Link = BrushOf(dark ? "#8AB4F8" : "#1558B0");
             Code = BrushOf(dark ? "#3D434E" : "#F0F2F5");
             InlineCode = BrushOf(dark ? "#495363" : "#E1E6EE");
+            Highlight = BrushOf(dark ? "#6B5A1A" : "#FFF1A8");
             QuoteText = BrushOf(dark ? "#DCE0E6" : "#687078");
             QuoteBar = BrushOf(dark ? "#98A2B5" : "#BAC1CA");
             TableHead = BrushOf(dark ? "#444D5C" : "#E1E7EE");
@@ -1594,7 +1981,7 @@ internal static partial class MarkdownLivePreview {
                         continue;
                     }
                 }
-                if (c == '*' || c == '_' || c == '~' || c == '`') continue;
+                if (c == '*' || c == '_' || c == '~' || c == '=' || c == '`') continue;
                 width += Advance(c, header);
             }
             return width * size;
@@ -1641,6 +2028,16 @@ internal static partial class MarkdownLivePreview {
         internal readonly bool Plain;
         // Text indexes of BreakCharacter, null when the cell has no <br>.
         internal readonly bool[] Breaks;
+        // A <kbd> tag's box padding is one synthetic text position per tag (PadCharacter). Its
+        // run (CellPadRun) takes the same .35 em the hidden tag takes on an ordinary line, so
+        // the cell's own measure and wrap include the space the key box is drawn in. The index
+        // is never a caret stop and never drawn; null when the cell has no <kbd>.
+        internal const char PadCharacter=(char)0xFFF9;
+        internal readonly bool[] Pads;
+        // True where the pad comes from a closing </kbd> tag. Its position maps to the tag's
+        // own start (the right edge of the box); an opening tag's pad maps to the key's first
+        // character, which keeps that character's caret spot.
+        internal readonly bool[] PadClose;
         // An image inside the cell is one synthetic text position (ImageCharacter) drawing a
         // CellImageRun; ImageSlots is null when the cell has no image.
         internal const char ImageCharacter=(char)0xFFFC;
@@ -1674,9 +2071,12 @@ internal static partial class MarkdownLivePreview {
             for (int p=Math.Max(0,index);p<Breaks.Length;p++) if (Breaks[p]) return p;
             return -1;
         }
+        internal bool IsPad(int index) { return Pads!=null && index>=0 && index<Pads.Length && Pads[index]; }
+        internal bool IsClosePad(int index) { return PadClose!=null && index>=0 && index<PadClose.Length && PadClose[index]; }
+        internal TextRun PadRun(TextRunProperties properties) { return new CellPadRun(properties); }
         internal CellText(CellText previous,LineInfo info,Cell cell) {
             Source=info.Text;SourceStart=cell.Start;SourceLength=cell.End-cell.Start;Plain=previous.Plain;
-            Default=previous.Default;Text=previous.Text;Properties=previous.Properties;Breaks=previous.Breaks;
+            Default=previous.Default;Text=previous.Text;Properties=previous.Properties;Breaks=previous.Breaks;Pads=previous.Pads;PadClose=previous.PadClose;
             ImageSlots=previous.ImageSlots;ImageBitmaps=previous.ImageBitmaps;ImageWidths=previous.ImageWidths;ImageHeights=previous.ImageHeights;
             MathSlots=previous.MathSlots;MathVisuals=previous.MathVisuals;
             ContentWidth=previous.ContentWidth;
@@ -1688,7 +2088,7 @@ internal static partial class MarkdownLivePreview {
         // prefix of the new one, so only the appended source characters are added.
         internal CellText(CellText previous,LineInfo info,Cell cell,int appended) {
             Source=info.Text;SourceStart=cell.Start;SourceLength=cell.End-cell.Start;Plain=true;
-            Default=previous.Default;Breaks=null;ContentWidth=previous.ContentWidth;
+            Default=previous.Default;Breaks=null;Pads=previous.Pads;PadClose=previous.PadClose;ContentWidth=previous.ContentWidth;
             int from=previous.SourceStart+previous.SourceLength;
             Text=String.Concat(previous.Text,info.Text.Substring(from,appended));
             Map=new int[Text.Length+1];
@@ -1727,15 +2127,27 @@ internal static partial class MarkdownLivePreview {
                     value.SetTypeface(new Typeface((style.Style & Style.Code)!=0 ? CodeFamily : face.FontFamily,
                         (style.Style & Style.Italic)!=0 ? FontStyles.Italic : face.Style,
                         (style.Style & Style.Bold)!=0 ? FontWeights.ExtraBold : face.Weight, face.Stretch));
-                    if ((style.Style & Style.Strike)!=0) value.SetTextDecorations(TextDecorations.Strikethrough);
                     if ((style.Style & Style.Link)!=0) value.SetForegroundBrush(session.Colors.Link);
-                    if ((style.Style & Style.Code)!=0) value.SetBackgroundBrush(session.Colors.InlineCode);
+                    // A key's box is drawn by BlockRenderer (DrawKeyboardRange) and the text
+                    // layer paints a run's background above it, so the inline-code shade would
+                    // cover the box's own edges. MarkdownTransformer clears that shade on an
+                    // ordinary line the same way (a nested highlight stays); the revealed (raw)
+                    // row keeps the source look.
+                    if ((style.Style & Style.Code)!=0) {
+                        if ((style.Style & Style.Keyboard)!=0 && !raw) {
+                            if (Object.ReferenceEquals(value.BackgroundBrush, session.Colors.InlineCode)) value.SetBackgroundBrush(null);
+                        } else value.SetBackgroundBrush(session.Colors.InlineCode);
+                    }
+                    if ((style.Style & Style.Highlight)!=0) value.SetBackgroundBrush(session.Colors.Highlight);
                     if (style.Color!=null) value.SetForegroundBrush(style.Color);
                     if (style.Size>0) value.SetFontRenderingEmSize(style.Size);
+                    else if (style.SizeEm>0) value.SetFontRenderingEmSize(Math.Max(6, Math.Min(120, session.Options.FontSize * style.SizeEm)));
+                    HtmlProperties(value, style.Style, session.Colors.Muted);
                     sourceProperties[p-cell.Start]=value;
                 }
             }
             int replacement=0;
+            var pads=new List<int>();var padCloses=new List<bool>();
             for (int p=cell.Start;p<cell.End;) {
                 if (!imeDone && p>=info.ImeAt) {
                     imeDone=true;imeStart=text.Length;
@@ -1753,6 +2165,18 @@ internal static partial class MarkdownLivePreview {
                     }
                     if (item.Start==p && (item.Kind==ReplacementKind.Hidden || item.Kind==ReplacementKind.Glyph)) {
                         if (item.Kind==ReplacementKind.Glyph) foreach (char c in item.Label) { text.Append(c); map.Add(p); properties.Add(sourceProperties[p-cell.Start]); }
+                        else if (item.PadEm>0) {
+                            // A <kbd> tag: one padding position beside the key. It reserves real
+                            // layout width (CellPadRun) so the cell measures and wraps with the
+                            // box. The opening tag maps to the key's first character (the caret
+                            // keeps that spot); the closing tag maps to its own start, where the
+                            // projection anchors the box's right edge.
+                            bool closing = p+1<info.Text.Length && info.Text[p+1]=='/';
+                            pads.Add(text.Length);padCloses.Add(closing);
+                            text.Append(PadCharacter);
+                            map.Add(closing ? p : Math.Min(cell.End,item.Start+item.Length));
+                            properties.Add(sourceProperties[p-cell.Start]);
+                        }
                         p=Math.Min(cell.End,p+item.Length); continue;
                     }
                     if (item.Start==p && item.Kind==ReplacementKind.Image) {
@@ -1763,6 +2187,9 @@ internal static partial class MarkdownLivePreview {
                         double width, height;
                         BitmapSource bitmap=session.CellBitmap(item.Source,out width,out height);
                         if (bitmap!=null) {
+                            if (item.ImageWidth > 0 || item.ImageHeight > 0)
+                                InlineHtml.ImageSize(bitmap.Width, bitmap.Height, item.ImageWidth, item.ImageHeight,
+                                    contentWidth > 0 ? contentWidth : 700, out width, out height);
                             images.Add(text.Length); bitmaps.Add(bitmap); widths.Add(width); heights.Add(height);
                             text.Append(ImageCharacter); map.Add(p); properties.Add(sourceProperties[p-cell.Start]);
                             p=Math.Min(cell.End,p+item.Length); continue;
@@ -1793,6 +2220,14 @@ internal static partial class MarkdownLivePreview {
                 var marks=new bool[Text.Length];
                 foreach (int at in breaks) marks[at]=true;
                 Breaks=marks;
+            }
+            if (pads.Count>0) {
+                var marks=new bool[Text.Length];
+                for (int i=0;i<pads.Count;i++) { int at=pads[i]; if (at>=0 && at<marks.Length) marks[at]=true; }
+                Pads=marks;
+                var closes=new bool[Text.Length];
+                for (int i=0;i<pads.Count;i++) { int at=pads[i]; if (at>=0 && at<closes.Length) closes[at]=padCloses[i]; }
+                PadClose=closes;
             }
             if (images.Count>0) {
                 ImageSlots=new int[Text.Length];
@@ -1825,9 +2260,10 @@ internal static partial class MarkdownLivePreview {
             // A break ends the text line after consuming its own position; the next text
             // line continues with the following run. Never draw the marker itself.
             if (IsBreak(index)) return new TextEndOfLine(1);
+            if (IsPad(index)) return PadRun(Properties[index]);
             if (IsImage(index)) return ImageRun(index,Properties[index]);
             if (IsMath(index)) return MathRun(index,Properties[index]);
-            int end=index+1; while (end<Text.Length && end<FormatEnd && Properties[end]==Properties[index] && !IsBreak(end) && !IsImage(end) && !IsMath(end)) end++;
+            int end=index+1; while (end<Text.Length && end<FormatEnd && Properties[end]==Properties[index] && !IsBreak(end) && !IsImage(end) && !IsMath(end) && !IsPad(end)) end++;
             return new TextCharacters(Text,index,end-index,Properties[index]);
         }
         public override TextSpan<CultureSpecificCharacterBufferRange> GetPrecedingText(int limit) {
@@ -1912,6 +2348,27 @@ internal static partial class MarkdownLivePreview {
             context.DrawDrawing(visual.Drawing);
             context.Pop();
         }
+    }
+    // A <kbd> tag's box padding inside a table cell: one cell text position with a fixed .35 em
+    // advance and no ink, so the cell's own measurement and wrap include the space the box is
+    // drawn in exactly as the hidden tag's InvisibleElement gap does on an ordinary line. The
+    // same size as the pad's own run properties (the tag position's font), never the line's.
+    internal sealed class CellPadRun : TextEmbeddedObject {
+        readonly TextRunProperties properties;
+        readonly double width;
+        internal CellPadRun(TextRunProperties properties) {
+            this.properties=properties;
+            width=properties==null ? 0 : properties.FontRenderingEmSize*KeyboardPadEm;
+        }
+        public override int Length { get { return 1; } }
+        public override TextRunProperties Properties { get { return properties; } }
+        public override CharacterBufferReference CharacterBufferReference { get { return new CharacterBufferReference(); } }
+        public override LineBreakCondition BreakBefore { get { return LineBreakCondition.BreakRestrained; } }
+        public override LineBreakCondition BreakAfter { get { return LineBreakCondition.BreakRestrained; } }
+        public override bool HasFixedSize { get { return true; } }
+        public override TextEmbeddedObjectMetrics Format(double remainingParagraphWidth) { return new TextEmbeddedObjectMetrics(width,0,0); }
+        public override Rect ComputeBoundingBox(bool rightToLeft, bool sideways) { return Rect.Empty; }
+        public override void Draw(DrawingContext context, Point origin, bool rightToLeft, bool sideways) { }
     }
     internal struct CellSlice { internal int Start, Length; internal double Width, Height, Baseline; }
     internal struct CellMetric { internal double Preferred, Minimum; }
@@ -2064,6 +2521,10 @@ internal static partial class MarkdownLivePreview {
     internal sealed class TableProjection {
         internal readonly List<TableToken> Tokens=new List<TableToken>();
         internal readonly List<int> Map=new List<int>();
+        // Parallel to Map: false where the column is a <kbd> pad position. A pad column can
+        // carry a hidden tag's offset (the closing tag's start, so the renderer can name the
+        // box's right edge) but it is never a caret stop of its own.
+        internal readonly List<bool> Stop=new List<bool>();
         internal readonly int[] Reverse;
         // Per cell, the projection column where each physical row's text starts, in row order.
         // Visual columns are row-major (physical row -> cell), so this is the only reliable way
@@ -2130,14 +2591,27 @@ internal static partial class MarkdownLivePreview {
                         var token=new TableToken { Length=slice.Length,Text=text,TextStart=slice.Start };
                         token.Start=Map.Count; Tokens.Add(token);
                         // A composition string's characters share the caret's source offset; the caret stop of that offset is AFTER them.
-                        for (int p=slice.Start;p<slice.Start+slice.Length;p++) { int offset=text.Map[p]; if (!text.IsIme(p)) Set(offset,Map.Count); Map.Add(offset); }
+                        // A <kbd> pad position gets its column but no stop of its own: the key's
+                        // characters keep exactly the stops they had without the padding. A closing
+                        // tag's pad claims the tag's own start as its canonical column, so the
+                        // renderer can read the box's right edge off the key's end offset (the
+                        // open tag's pad stays uncoded and the first key character owns that spot).
+                        for (int p=slice.Start;p<slice.Start+slice.Length;p++) {
+                            int offset=text.Map[p];
+                            if (text.IsPad(p)) { if (text.IsClosePad(p)) Set(offset,Map.Count); }
+                            else if (!text.IsIme(p)) Set(offset,Map.Count);
+                            Map.Add(offset);Stop.Add(!text.IsPad(p));
+                        }
                         // A slice ending on a cell <br> ends at the hidden tag's source
                         // position (the marker's map entry), so the caret stop before the
                         // break stays on this row and the next row's first character owns
                         // its own stop.
                         int endOffset=text.Map[slice.Start+slice.Length];
                         // A slice that ends before or inside the composition string must not claim the offset (it is the stop after the string).
-                        if (!text.IsIme(slice.Start+slice.Length)) Set(endOffset,Map.Count);
+                        // A slice that ends on a <kbd> pad hands its boundary to the pad's hidden
+                        // tag offset; claiming the end column for it would draw a caret stop for
+                        // markup, and the next slice's own character sets the stop instead.
+                        if (!text.IsIme(slice.Start+slice.Length) && !text.IsPad(slice.Start+slice.Length)) Set(endOffset,Map.Count);
                         // The following gap belongs to the next cell. Keep the end
                         // of this slice mapped to itself, not to that gap's source.
                         // When nothing follows on this visual row, the line break itself
@@ -2168,7 +2642,7 @@ internal static partial class MarkdownLivePreview {
             // shows the pipes, so its end is a real source position and keeps its own stop.
             int lastStop=Source.Length;
             if (!row.Raw && info.Cells!=null && info.Cells.Count>0) lastStop=info.Cells[info.Cells.Count-1].End;
-            Map.Add(lastStop);
+            Map.Add(lastStop);Stop.Add(true);
             Set(lastStop,Map.Count-1);
             // Hidden inline syntax maps to the next visible character in its own cell.
             int next=Map.Count-1;
@@ -2202,8 +2676,12 @@ internal static partial class MarkdownLivePreview {
                     if (row.Texts[c].IsIme(boundary)) continue;
                     int offset=row.Texts[c].Map[boundary];
                     if (offset<0 || offset>=Reverse.Length) continue;
-                    // Slice r+1's first TEXT column comes from its own start column.
+                    // Slice r+1's first TEXT column comes from its own start column. A slice that
+                    // starts inside a <kbd> padding has its pad positions first; they carry no
+                    // caret stop, so the stop is the key's first real character after them (a
+                    // pad's own map value is the tag's end, which that character also owns).
                     int column=columns[r+1];
+                    for (int p=boundary;p<slices[r+1].Start+slices[r+1].Length && row.Texts[c].IsPad(p);p++) column++;
                     // The column must still be owned by the element (a column at VisualLength
                     // itself resolves to the line length, not to an offset) and must carry this
                     // very offset in the column -> offset map.
@@ -2212,12 +2690,13 @@ internal static partial class MarkdownLivePreview {
                 }
             }
         }
+        internal bool IsStop(int column) { return column>=0 && column<Stop.Count && Stop[column]; }
         void Set(int source, int column) { if(source>=0 && source<Reverse.Length && Reverse[source]<0)Reverse[source]=column; }
-        void Add(TableToken token,int source) { token.Start=Map.Count; Tokens.Add(token); Map.Add(source); }
+        void Add(TableToken token,int source) { token.Start=Map.Count; Tokens.Add(token); Map.Add(source); Stop.Add(true); }
         void Hidden(int a,int b,bool raw) {
             if (!raw || b<=a) return;
             var token=new TableToken {Start=Map.Count,Length=b-a,Hidden=true}; Tokens.Add(token);
-            for(int p=a;p<b;p++) { Set(p,Map.Count); Map.Add(p); }
+            for(int p=a;p<b;p++) { Set(p,Map.Count); Map.Add(p); Stop.Add(true); }
         }
     }
     internal sealed class TableRowElement : VisualLineElement {
@@ -2240,7 +2719,7 @@ internal static partial class MarkdownLivePreview {
         internal bool HasStop(int source) {
             if (source<0 || source>DocumentLength) return false;
             int at=projection.Reverse[source];
-            return at>=0 && at<=VisualLength && projection.Map[at]==source && StopsAt(projection.Source,source,CaretPositioningMode.Normal);
+            return at>=0 && at<=VisualLength && projection.Map[at]==source && projection.IsStop(at) && StopsAt(projection.Source,source,CaretPositioningMode.Normal);
         }
         // The caret-stop rule TextUtilities.GetNextCaretPosition applies to every plain line:
         // never in the middle of a surrogate pair (TextUtilities.cs:331), and outside
@@ -2384,9 +2863,27 @@ internal static partial class MarkdownLivePreview {
             // The caret of a composition drawn in this cell stands AFTER the string, which has no source of its own.
             if (text.ImeLength>0 && source==text.Map[text.ImeStart]) return text.ImeStart+text.ImeLength;
             if (source==last) return text.Text.Length;
-            for (int p=0;p<text.Text.Length;p++) if (text.Map[p]==source && !text.IsBreak(p)) return p;
-            for (int p=0;p<=text.Text.Length;p++) if (text.Map[p]==source) return p;
+            // An opening tag's <kbd> pad shares the source offset of the key's first character,
+            // so it must not answer for that offset: the character keeps the text index it had
+            // before the padding existed (the caret and Up/Down geometry). A closing tag's pad
+            // names the tag's own start, which no visible character owns; answering there lets a
+            // press on the box's right padding draw its caret at the pad instead of the cell end.
+            for (int p=0;p<text.Text.Length;p++) if (text.Map[p]==source && !text.IsBreak(p) && !(text.IsPad(p) && !text.IsClosePad(p))) return p;
+            for (int p=0;p<=text.Text.Length;p++) if (text.Map[p]==source && !(text.IsPad(p) && !text.IsClosePad(p))) return p;
             return -1;
+        }
+        // Width the cell text reserves for the <kbd> padding at a key's first text position, or 0
+        // when there is none. The renderer draws the box with this same width, so its left edge
+        // sits on the padding the cell measured even if the cell font differs from the line's.
+        internal double KeyboardPad(int sourceStart) {
+            int cell=CellAt(Info,sourceStart);
+            CellText text=Row.Texts!=null && cell>=0 && cell<Row.Texts.Length ? Row.Texts[cell] : null;
+            if (text==null) return 0;
+            for (int p=0;p<text.Text.Length;p++) {
+                if (!text.IsPad(p) || text.Map[p]!=sourceStart) continue;
+                return text.Properties[p].FontRenderingEmSize*KeyboardPadEm;
+            }
+            return 0;
         }
         // X of a text index inside the cell's own slice, for Up/Down to keep the column.
         internal double CellX(VisualLine visual,int cell,int slice,int textIndex) {
@@ -2466,8 +2963,10 @@ internal static partial class MarkdownLivePreview {
             if(token.Text.IsImage(index))return token.Text.ImageRun(index,token.Text.Properties[index]);
             // An inline formula is one object position as well; the span behind it is hidden source.
             if(token.Text.IsMath(index))return token.Text.MathRun(index,token.Text.Properties[index]);
+            // A <kbd> padding position is its own fixed-width object (no glyph, no ink).
+            if(token.Text.IsPad(index))return token.Text.PadRun(token.Text.Properties[index]);
             TextRunProperties properties=token.Text.Properties[index]; int length=1;
-            while(length<count && token.Text.Properties[index+length]==properties && !token.Text.IsBreak(index+length) && !token.Text.IsImage(index+length) && !token.Text.IsMath(index+length))length++;
+            while(length<count && token.Text.Properties[index+length]==properties && !token.Text.IsBreak(index+length) && !token.Text.IsImage(index+length) && !token.Text.IsMath(index+length) && !token.Text.IsPad(index+length))length++;
             return new TextCharacters(token.Text.Text,index,length,properties);
         }
         public override int GetNextCaretPosition(int column,LogicalDirection direction,CaretPositioningMode mode) {
@@ -2487,7 +2986,7 @@ internal static partial class MarkdownLivePreview {
             int stepOffset=direction==LogicalDirection.Forward ? 1 : -1;
             for(int source=from;source>=0 && source<=DocumentLength;source+=stepOffset) {
                 int at=projection.Reverse[source];
-                if (at<0 || at>VisualLength || projection.Map[at]!=source)continue;
+                if (at<0 || at>VisualLength || projection.Map[at]!=source || !projection.IsStop(at))continue;
                 if (source==from && rel>=0 && rel<=VisualLength && (direction==LogicalDirection.Forward ? at<=rel : at>=rel))continue;
                 if (mode==CaretPositioningMode.Normal || mode==CaretPositioningMode.EveryCodepoint || source==0 || source==DocumentLength ||
                     char.IsWhiteSpace(projection.Source[source-1])!=char.IsWhiteSpace(projection.Source[source])) {
@@ -2567,6 +3066,11 @@ internal static partial class MarkdownLivePreview {
         readonly bool oldRectangularSelection;
         VisualLine[] visible = new VisualLine[0];
         int caretLine, selectionStart, selectionEnd;
+        // The caret offset the previous ActiveChange applied. One reveal rule reads the offset, not
+        // the line: the document-end stop after a display formula block that closes the document is
+        // a single offset at the end of the closer's own line (MathEndCaretOutside). A same-line
+        // move onto or off that stop changes what is drawn, so ApplyActiveChange compares this too.
+        int activeOffset;
         // The caret line the previous ActiveChange applied. A caret pulled back out of a hidden
         // fence line moves to the side it came from, so Up and Down both step over the blank band.
         int lastActiveLine;
@@ -2585,6 +3089,37 @@ internal static partial class MarkdownLivePreview {
         bool linkCursorSet;
         object oldLinkCursor;
         internal int LinkHoverChecks;
+        // In-document [TOC]: the heading list the outline last published. The session swaps it
+        // on Update (reference compare) and redraws; a line parse asks the host for a scan only
+        // when a "[TOC]" marker line exists, so other documents pay nothing.
+        internal TocData Toc;
+        internal bool TocSeen;
+        // Footnote definitions and first references for the link tooltip and the definition's
+        // back arrow. Built on the first hover/click of a footnote link and dropped by every
+        // document change, so typing never walks the document.
+        sealed class FootnoteEntry {
+            internal int LineNumber;
+            internal int BodyStart;
+            internal int FirstReference=-1;
+        }
+        Dictionary<string,FootnoteEntry> footnotes;
+        object footnotesVersion;
+        // A click on a [TOC] row: the host moves the caret to that heading like an outline click.
+        internal event Action<int> TocJump;
+        // Every document change, with its arguments. The host keeps the outline heading list
+        // fresh for the TOC while the document uses one (OutlineMayChange decides cheaply).
+        internal event Action<DocumentChangeEventArgs> Edited;
+        // Fenced code block copy button: the block under the pointer (opener line, first and last
+        // line numbers; -1 = none) and whether the pointer is on the 22 px icon square. Found from
+        // the block cache when the pointer enters a block, then O(1) while it stays inside.
+        int codeCopyFirst=-1,codeCopyLast=-1,codeCopyOpener=-1;
+        bool codeCopyOnIcon;
+        // The opener whose icon shows the check mark after a copy, cleared by its own 1.2 s timer.
+        int codeCopyFlash=-1;
+        DispatcherTimer codeCopyTimer;
+        internal int CodeCopyOpener { get { return codeCopyOpener; } }
+        internal bool CodeCopyOnIcon { get { return codeCopyOnIcon; } }
+        internal bool CodeCopyCheck { get { return codeCopyFlash >= 0 && codeCopyFlash == codeCopyOpener; } }
         // The document's link reference definitions ("[id]: url") for shortcut reference links
         // ("[label]"). A line scan fills the set; a small document scans on the spot, a large one
         // after typing settles, and every parse reuses the last set until the document changes.
@@ -2672,6 +3207,7 @@ internal static partial class MarkdownLivePreview {
             Editor = editor;
             View = editor.TextArea.TextView;
             Options = options;
+            Toc = options.Toc;
             markersWereHidden = options.HideMarkers;
             imageLabel = ImageLabelOf(options);
             attachedSessions.Add(this);
@@ -2699,6 +3235,7 @@ internal static partial class MarkdownLivePreview {
             imageBase = options.BaseDirectory;
             images = new ImageCache(this);
             ReadActive(out caretLine, out selectionStart, out selectionEnd);
+            activeOffset = Editor.TextArea.Caret.Offset;
             lastActiveLine = caretLine;
             struts = new StrutGenerator(this);
             markers = new MarkerGenerator(this);
@@ -2721,6 +3258,9 @@ internal static partial class MarkdownLivePreview {
             View.SizeChanged += ViewSizeChanged;
             Editor.TextArea.Caret.PositionChanged += ActiveChanged;
             Editor.TextArea.SelectionChanged += ActiveChanged;
+            // Attached before the editor's own press handling: a click on the copy icon is taken
+            // here, so no caret is placed and no selection starts.
+            Editor.TextArea.PreviewMouseLeftButtonDown += CodeCopyMouseDown;
             Editor.TextArea.PreviewMouseLeftButtonDown += TextAreaPreviewMouseDown;
             Editor.TextArea.PreviewMouseLeftButtonUp += TextAreaPreviewMouseUp;
             Editor.TextArea.PreviewMouseMove += TableCaretDrag;
@@ -2744,6 +3284,7 @@ internal static partial class MarkdownLivePreview {
             Editor.TextArea.TextEntering += TableGapEntering;
             Editor.TextArea.TextEntering += HiddenFenceEntering;
             Editor.TextArea.PreviewMouseLeftButtonDown += FenceRowMouseDown;
+            Editor.TextArea.PreviewMouseLeftButtonDown += MathEndMouseDown;
             Editor.TextArea.TextEntering += SetextRuleEntering;
             Editor.TextArea.TextEntering += FenceEnterEntering;
             Editor.PreviewKeyDown += FenceEnterKeyDown;
@@ -2773,6 +3314,8 @@ internal static partial class MarkdownLivePreview {
             // A composition string inside a table cell is drawn as cell text (CellText, LiveTableCaret.cs): the editor tells the session when it changes.
             Editor.ImeStringChanged = ImeStringChangedInTable;
             Editor.ImeCellSpan = ImeCompositionSpan;
+            Editor.ImeSpanBackground = ImeSpanBackgroundAt;
+            Editor.ImeStyleOffset = ImeStyleOffsetAt;
             LiveHandlerSets++;
         }
 
@@ -2822,6 +3365,7 @@ internal static partial class MarkdownLivePreview {
             // The text under a still pointer changes on a wheel scroll and no move event follows,
             // so a shown tooltip would describe the wrong link.
             hoverOffset=-1;HideLinkTip();SetLinkCursor(false);
+            ClearCodeCopyHover();
             CompositionScrolled(sender,e);
         }
         void FinishInputLayout() {
@@ -3017,11 +3561,31 @@ internal static partial class MarkdownLivePreview {
             }
             // The no-reveal mode (Settings.HideMarkers) keeps every line formatted in edit
             // mode too; only the 원문 편집 toggle, which detaches this session, shows source.
-            // The one exception is the caret's own unclosed opening fence: that line is still
-            // being typed ("```python" before Enter), so it is shown as source (EditableFence).
-            if (Options.HideMarkers) return line.LineNumber == caretLine && EditableFence(line);
+            // Two exceptions show the caret line's own source: an unclosed opening fence, which
+            // is still being typed ("```python" before Enter, EditableFence), and a block tag
+            // line, which is otherwise a blank row, so its tag stays readable and editable.
+            if (Options.HideMarkers) return line.LineNumber == caretLine && (EditableFence(line) || Info(line).HtmlTagLine);
             int number = line.LineNumber;
             return number == caretLine || (HasSelectionLines(selectionStart, selectionEnd) && number >= selectionStart && number <= selectionEnd);
+        }
+        // A "[TOC]" line was parsed: the document uses an in-place table of contents, so the host
+        // may build the outline's heading list. The host debounces its scan and skips a current
+        // list, so a repeated parse costs one delegate call, never a document walk.
+        internal void NoteTocLine() {
+            if (disposed) return;
+            TocSeen = true;
+            Action request = Options == null ? null : Options.TocRequested;
+            if (request != null) request();
+        }
+        // The cached YAML front matter range (closing line number, 0 = none) and membership. Both
+        // read the block cache's one answer; parsing a line pays one compare after the first scan.
+        internal int FrontMatterEnd { get { return blocks.FrontMatter.EndLine; } }
+        // The answer's generation: it moves whenever the range may have changed, so every line
+        // parsed against an older answer is re-parsed (Info) instead of being drawn from it.
+        internal int FrontGeneration { get { return blocks.FrontMatter.Generation; } }
+        internal bool IsFrontMatter(int number) {
+            int end = blocks.FrontMatter.EndLine;
+            return end > 0 && number >= 1 && number <= end;
         }
         // First and last line number of the display-math block this line belongs to (a one-line
         // "$$ x $$" is a block of one line).
@@ -3046,7 +3610,24 @@ internal static partial class MarkdownLivePreview {
         bool MathBlockActive(LineInfo info, DocumentLine line) {
             int first, last;
             MathRange(info, line, out first, out last);
-            return BlockActive(first, last, caretLine, selectionStart, selectionEnd);
+            if (!BlockActive(first, last, caretLine, selectionStart, selectionEnd)) return false;
+            return !MathEndCaretOutside(info, last);
+        }
+        // The document-end stop of a block that closes the document is after the block. The rendered
+        // block folds its closer away, so that offset (a click below the last text row, Ctrl+End) has
+        // no source row of its own: on a document whose last line is the closing "$$" / fence with
+        // no line break after it, the offset sits at the end of the closer's line only because that
+        // line has no delimiter. Revealing the whole formula there turned a block that ends the
+        // document into its source, while the same file with one trailing line break kept the
+        // formula (the caret then rests on the empty line after the block). A caret on any line of
+        // the block still reveals it, and typing at this stop inserts at the same offset either way.
+        bool MathEndCaretOutside(LineInfo info, int last) {
+            if (info.MathCount <= 0 && info.MathRemaining <= 0) return false;
+            if (caretLine != last) return false;
+            if (last < 1 || last > Document.LineCount) return false;
+            if (!Editor.TextArea.Selection.IsEmpty) return false;
+            if (Editor.TextArea.Caret.Offset != Document.TextLength) return false;
+            return Document.GetLineByNumber(last).DelimiterLength == 0;
         }
         // The no-reveal mode keeps the caret's line formatted, so an inline formula shows its source
         // only while the caret touches it (inside it or at either edge) or a selection overlaps it.
@@ -3060,6 +3641,56 @@ internal static partial class MarkdownLivePreview {
                 if (mathAvailable == null) mathAvailable = delegate { return Math.Max(0, View.ActualWidth - 24); };
                 return mathAvailable;
             }
+        }
+        // The leading pad that centers (or right-aligns) one block-HTML content line: the view
+        // width the display formula centres itself in, less the line's visible width. Long lines
+        // that would wrap get no pad and stay left aligned. Measured only for aligned lines.
+        internal double HtmlAlignPad(LineInfo info) {
+            if (info.HtmlAlign <= 0 || info.Table) return 0;
+            double available = Math.Max(0, MathAvailable() - Options.FontSize * info.HtmlIndentEm);
+            double width = HtmlVisibleWidth(info);
+            // A heading's level mark sits left of the text and is part of the centered group.
+            if (width > 0 && info.Heading > 0 && Options.HeadingMarks) width += HeadingShift(info.Heading);
+            if (width <= 0 || width >= available - 2) return 0;
+            return info.HtmlAlign == 2 ? available - width : (available - width) / 2;
+        }
+        double HtmlVisibleWidth(LineInfo info) {
+            string text = info.Text;
+            if (text == null || text.Length == 0) return 0;
+            double width = 0;
+            var visible = new StringBuilder(text.Length);
+            int at = 0;
+            foreach (Replacement replacement in info.Replacements) {
+                int start = Math.Max(0, Math.Min(replacement.Start, text.Length));
+                if (start > at) visible.Append(text, at, start - at);
+                int end = Math.Max(start, Math.Min(start + replacement.Length, text.Length));
+                if (end > at) at = end;
+                if (replacement.Kind == ReplacementKind.Hidden) continue;
+                if (replacement.Kind == ReplacementKind.Spacer) {
+                    width += replacement.Scaled ? replacement.Width * Options.FontSize : replacement.Width;
+                    continue;
+                }
+                if (replacement.Kind == ReplacementKind.Image) {
+                    Image picture = ImageObject(replacement) as Image;
+                    if (picture != null && picture.Width > 0) width += picture.Width + 4;
+                    continue;
+                }
+                if (replacement.Kind == ReplacementKind.Glyph || replacement.Kind == ReplacementKind.Bullet ||
+                    replacement.Kind == ReplacementKind.Number || replacement.Kind == ReplacementKind.Alert) {
+                    string label = replacement.Kind == ReplacementKind.Bullet ? "•" : replacement.Label;
+                    if (!String.IsNullOrEmpty(label)) visible.Append(label);
+                    continue;
+                }
+                visible.Append(' ');
+            }
+            if (at < text.Length) visible.Append(text, at, text.Length - at);
+            if (visible.Length == 0) return width;
+            double size = Options.FontSize * HeadingScale[Math.Max(0, Math.Min(6, info.Heading))];
+            FontFamily family = info.Code ? CodeFamily : new FontFamily(Options.Family);
+            Typeface face = new Typeface(family, FontStyles.Normal, info.Heading > 0 ? FontWeights.Bold : FontWeights.Normal, FontStretches.Normal);
+            var formatted = new FormattedText(visible.ToString(), CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
+                face, size, Colors.Foreground);
+            return width + formatted.WidthIncludingTrailingWhitespace;
         }
         internal bool MathTouched(DocumentLine line, Replacement formula) {
             if (formula.Kind != ReplacementKind.Math || formula.Level != 0) return false;
@@ -3483,12 +4114,20 @@ internal static partial class MarkdownLivePreview {
                 string.Equals(nextImageLabel, imageLabel, StringComparison.Ordinal)) {
                 // HeadingMarks changes the heading prefix/setext element widths and the marks drawn, so the
                 // visible visual lines are rebuilt (View.Redraw), not the whole document.
-                bool reveal = next.ReadOnly != Options.ReadOnly || next.HideMarkers != markersWereHidden || next.HeadingMarks != Options.HeadingMarks || next.HeadingHash != Options.HeadingHash;
+                bool markersChanged = next.HideMarkers != markersWereHidden;
+                bool reveal = next.ReadOnly != Options.ReadOnly || markersChanged || next.HeadingMarks != Options.HeadingMarks || next.HeadingHash != Options.HeadingHash;
                 bool markersTurnedOn = next.HideMarkers && !markersWereHidden;
                 markersWereHidden = next.HideMarkers;
                 Options = next;
+                ClearCodeCopyHover();
                 ApplyHideMarkersInteraction(markersTurnedOn);
+                // A block tag line carries a muted source style only in Basic (the hidden run is
+                // the same in both modes), so the cached LineInfos of the two modes cannot be shared.
+                if (markersChanged) { lines.Clear(); previousRowLine = null; previousRow = null; }
                 if (reveal) { ClearReferenceSections(); View.Redraw(); }
+                // The outline published a new heading list: the [TOC] element redraws from it
+                // (its height changes, so the visual lines must be rebuilt).
+                if (!Object.ReferenceEquals(next.Toc, Toc)) { Toc = next.Toc; View.Redraw(); }
                 QueueCaretGuard();
                 return;
             }
@@ -3497,6 +4136,8 @@ internal static partial class MarkdownLivePreview {
             bool markersSwitched = next.HideMarkers && !markersWereHidden;
             markersWereHidden = next.HideMarkers;
             Options = next;
+            Toc = next.Toc;
+            ClearCodeCopyHover();
             imageLabel = nextImageLabel;
             ApplyHideMarkersInteraction(markersSwitched);
             QueueCaretGuard();
@@ -3585,11 +4226,22 @@ internal static partial class MarkdownLivePreview {
             int oldTouchLine = mathTouchLine;
             mathTouch = nextTouch;
             mathTouchLine = nextTouch < 0 ? 0 : nextCaret;
-            if (nextCaret == caretLine && nextStart == selectionStart && nextEnd == selectionEnd && !touchChanged) return;
+            // A display formula block can flip its reveal on the caret's offset alone: the
+            // document-end stop after a block that closes the document is one offset at the end of
+            // the closer's own line, so moving onto or off it never changes the line number
+            // (MathEndCaretOutside reads the offset). Let such a move through to the redraw pass.
+            int nextOffset = Editor.TextArea.Caret.Offset;
+            bool endStopMoved = nextOffset != activeOffset && selectionStart == 0 && nextStart == 0 &&
+                (nextOffset == Document.TextLength || activeOffset == Document.TextLength);
+            if (nextCaret == caretLine && nextStart == selectionStart && nextEnd == selectionEnd && !touchChanged && !endStopMoved) {
+                activeOffset = nextOffset;
+                return;
+            }
             int oldCaretLine = caretLine, oldStart = selectionStart, oldEnd = selectionEnd;
             caretLine = nextCaret;
             selectionStart = nextStart;
             selectionEnd = nextEnd;
+            activeOffset = nextOffset;
             // A caret moved through the API/keyboard can target a currently collapsed delimiter.
             DocumentLine caretDocumentLine=Document.GetLineByNumber(nextCaret);
             if(Raw(caretDocumentLine)&&caretDocumentLine.PreviousLine!=null)PrepareDelimiter(caretDocumentLine.PreviousLine,false);
@@ -3623,6 +4275,10 @@ internal static partial class MarkdownLivePreview {
                     int blockFirst, blockLast;
                     MathRange(first,line.FirstDocumentLine,out blockFirst,out blockLast);
                     changed=BlockActive(blockFirst,blockLast,oldCaretLine,oldStart,oldEnd)!=BlockActive(blockFirst,blockLast,nextCaret,nextStart,nextEnd);
+                    // The document-end stop of a block that closes the document renders like a caret
+                    // outside the block (MathEndCaretOutside): arriving on or leaving that closer line
+                    // flips the reveal although both line numbers lie inside the block's range.
+                    if (!changed && (first.MathCount>0 || first.MathRemaining>0) && (oldCaretLine==blockLast || nextCaret==blockLast)) changed=true;
                 }
                 if(first.Header||first.Setext){
                     changed|=Active(number+1,oldCaretLine,oldStart,oldEnd)!=Active(number+1,nextCaret,nextStart,nextEnd);
@@ -3633,6 +4289,36 @@ internal static partial class MarkdownLivePreview {
                 if (redraw == null) redraw = new List<VisualLine>();
                 redraw.Add(line);
                 if (anchorNumber > 0 && number < anchorNumber) above = true;
+            }
+            // A second caret move in the same turn (Line then Column, a command) can arrive before
+            // the layout the first move queued: `visible` still lists the block's disposed visual
+            // line then, so the loop above never reaches the block the document-end stop belongs to
+            // and the measure that follows would reuse the stale source line. Ask the view for that
+            // block's visual line by its first line, so the reveal flip still folds and repaints it.
+            if (endStopMoved) {
+                LineInfo stopInfo = Info(caretDocumentLine);
+                if (stopInfo.MathCount > 0 || stopInfo.MathRemaining > 0) {
+                    DocumentLine stopOpener = stopInfo.MathCount > 0 ? caretDocumentLine : stopInfo.MathOpener;
+                    if (stopOpener != null && !stopOpener.IsDeleted) {
+                        int stopFirst, stopLast;
+                        MathRange(stopInfo, caretDocumentLine, out stopFirst, out stopLast);
+                        bool listed = false;
+                        foreach (VisualLine seen in visible) {
+                            if (seen.IsDisposed || seen.FirstDocumentLine.IsDeleted) continue;
+                            int seenNumber = seen.FirstDocumentLine.LineNumber;
+                            if (seenNumber >= stopFirst && seenNumber <= stopLast) { listed = true; break; }
+                        }
+                        if (!listed) {
+                            PrepareMath(stopOpener, !Raw(stopOpener));
+                            VisualLine stopLine = View.GetVisualLine(stopFirst);
+                            if (stopLine != null && !stopLine.IsDisposed) {
+                                if (redraw == null) redraw = new List<VisualLine>();
+                                redraw.Add(stopLine);
+                                if (anchorNumber > 0 && stopFirst < anchorNumber) above = true;
+                            }
+                        }
+                    }
+                }
             }
             if (redraw == null) return;
             double before = 0;
@@ -3664,7 +4350,7 @@ internal static partial class MarkdownLivePreview {
         void TextAreaPreviewMouseDown(object sender, MouseButtonEventArgs e) {
             if (disposed || e.Handled) return;
             hoverOffset=-1;HideLinkTip();SetLinkCursor(false);
-            if (TryCheckbox(e) || TryLink(e)) { e.Handled = true; return; }
+            if (TryTocPress(e) || TryCheckbox(e) || TryLink(e)) { e.Handled = true; return; }
             if (e.ClickCount >= 2 && TryMultiClick(e.ClickCount)) {
                 if (e.ClickCount == 2) {
                     // The second press of a double click starts a word drag on the word it
@@ -4094,13 +4780,30 @@ internal static partial class MarkdownLivePreview {
             int lo=0,hi=text.Text.Length;
             while (lo<hi) { int mid=(lo+hi)/2; if (text.Map[mid]<relative) lo=mid+1;else hi=mid; }
             int at=lo;
+            // A <kbd> pad is layout space, not a character of the cell's words: the hit steps
+            // over the pad positions to the neighbouring visible character, so a double click
+            // on a key still selects the word it sits in (and not just the key alone).
+            while (at<text.Text.Length && text.IsPad(at)) at++;
             int from=at,to=at;
-            char left=at>0 ? text.Text[at-1] : '\0';
+            int leftAt=at-1;
+            while (leftAt>=0 && text.IsPad(leftAt)) leftAt--;
+            char left=leftAt>=0 ? text.Text[leftAt] : '\0';
             char right=at<text.Text.Length ? text.Text[at] : '\0';
             if (WordBoundary.IsWordChar(left)||WordBoundary.IsWordChar(right)) {
-                if (WordBoundary.IsWordChar(left)) from=at-1;
-                while (from>0 && WordBoundary.IsWordChar(text.Text[from-1])) from--;
-                while (to<text.Text.Length && WordBoundary.IsWordChar(text.Text[to])) to++;
+                if (WordBoundary.IsWordChar(left)) {
+                    from=leftAt;
+                    while (from>0) {
+                        int previous=from-1;
+                        while (previous>=0 && text.IsPad(previous)) previous--;
+                        if (previous<0 || !WordBoundary.IsWordChar(text.Text[previous])) break;
+                        from=previous;
+                    }
+                }
+                while (to<text.Text.Length) {
+                    if (text.IsPad(to)) { to++; continue; }
+                    if (!WordBoundary.IsWordChar(text.Text[to])) break;
+                    to++;
+                }
             }
             start=baseOffset+text.Map[from];
             end=baseOffset+text.Map[to];
@@ -4128,9 +4831,11 @@ internal static partial class MarkdownLivePreview {
             clickLength = Document.TextLength;
             clickTicks = Environment.TickCount;
         }
+        // user32 directly: SystemInformation.DoubleClickTime would load WinForms (~17MB) on the first double-click.
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern uint GetDoubleClickTime();
         bool TryMultiClick(int count) {
             if (clickWordStart < 0 || Keyboard.Modifiers != ModifierKeys.None) return false;
-            int limit = 2 * System.Windows.Forms.SystemInformation.DoubleClickTime;
+            int limit = 2 * (int)GetDoubleClickTime();
             if (Document.TextLength != clickLength || unchecked(Environment.TickCount - clickTicks) > limit) { clickWordStart = -1; return false; }
             int start = count == 2 ? clickWordStart : clickLineStart;
             int end = Math.Min(Document.TextLength, count == 2 ? clickWordEnd : clickLineEnd);
@@ -4573,6 +5278,19 @@ internal static partial class MarkdownLivePreview {
             // the caret always moves to the neighbouring line on the side it came from. An
             // unclosed opening fence is the line being typed and keeps the caret (EditableFence).
             if (info.FenceLine && EditableFence(line)) return;
+            // A front matter delimiter is drawn as nothing in the basic view (its row keeps the
+            // text line's height), so a caret that lands in that blank band goes to the content on
+            // the side it came from, the way a fence row sends it to the neighbouring line.
+            if (info.FrontMatterFence && !Raw(line)) {
+                int target = FrontMatterCaretTarget(line,lastActiveLine<=line.LineNumber);
+                if (target == caret.Offset) return;
+                hiddenCaretGuarded=true;
+                try {
+                    caret.Offset=target;
+                    RevalidateCaretColumn(Editor.TextArea);
+                } finally { hiddenCaretGuarded=false; }
+                return;
+            }
             if (info.FenceLine && !Raw(line)) {
                 int target=FenceCaretTarget(line,lastActiveLine<=line.LineNumber);
                 if (target==caret.Offset) return;
@@ -4583,6 +5301,9 @@ internal static partial class MarkdownLivePreview {
                 } finally { hiddenCaretGuarded=false; }
                 return;
             }
+            // A revealed block tag line draws its source (Raw), so its characters are real text:
+            // the hidden-run stops below must not pull the caret out of the tag being edited.
+            if (Raw(line)) return;
             int relative=caret.Offset-line.Offset;
             int snap=HiddenSnap(info,relative);
             if (snap<0) return;
@@ -4594,19 +5315,79 @@ internal static partial class MarkdownLivePreview {
                 RevalidateCaretColumn(Editor.TextArea);
             } finally { hiddenCaretGuarded=false; }
         }
+        // 11-09 user: a press in the empty area under a display formula that closes the document
+        // landed on the formula's folded row (the stock handler keeps the press's X on the last
+        // row, and the left half of the formula is its start), so the caret went to the opener and
+        // the whole block opened as source. That press means the document's end, the stop that
+        // keeps the formula (MathEndCaretOutside). O(1 line): only the last line is read.
+        void MathEndMouseDown(object sender, MouseButtonEventArgs e) {
+            if (disposed || e.Handled || Options.Busy || e.ChangedButton != MouseButton.Left || e.ClickCount != 1) return;
+            if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) return;
+            if (Document == null || Document.LineCount < 1) return;
+            double height = View.DocumentHeight;
+            if (height <= 0) return;
+            DocumentLine last = Document.GetLineByNumber(Document.LineCount);
+            LineInfo info = Info(last);
+            if (info.MathOne || (info.MathCount <= 0 && info.MathRemaining <= 0) || MathBroken(info)) return;
+            int first, end;
+            MathRange(info, last, out first, out end);
+            if (end != last.LineNumber) return;
+            Point point = e.GetPosition(View);
+            point = new Point(point.X + View.HorizontalOffset, point.Y + View.VerticalOffset);
+            int target = Document.TextLength;
+            if (point.Y < height) {
+                // 11-09 user (basic mode): a press on the formula's own row went to the block start on
+                // the picture's left half and to the document end (formula kept) on its right half, so
+                // the same click opened the source about half the time. On the drawn picture the press
+                // always opens the block (its first line); beside or under the picture it is the
+                // document end like the empty area below the text.
+                VisualLine row = View.GetVisualLineFromVisualTop(point.Y);
+                if (row == null || row.LastDocumentLine.LineNumber != last.LineNumber || row.FirstDocumentLine.LineNumber > first) return;
+                MathElement picture = null;
+                foreach (VisualLineElement element in row.Elements) {
+                    MathElement math = element as MathElement;
+                    if (math != null && math.Display) { picture = math; break; }
+                }
+                if (picture == null) return;
+                MathVisual drawn = picture.Picture();
+                if (drawn == null) return;
+                TextLine text = row.GetTextLine(picture.VisualColumn);
+                double slotLeft = row.GetTextLineVisualXPosition(text, picture.VisualColumn);
+                double slotRight = row.GetTextLineVisualXPosition(text, picture.VisualColumn + picture.VisualLength);
+                double left = slotLeft + Math.Max(0, (slotRight - slotLeft - drawn.Width) / 2);
+                double top = row.GetTextLineVisualYPosition(text, VisualYPosition.LineTop) + text.Baseline - drawn.Ascent;
+                bool onPicture = point.X >= left - 2 && point.X <= left + drawn.Width + 2 && point.Y >= top - 2 && point.Y <= top + drawn.Height + 2;
+                if (onPicture) target = Document.GetLineByNumber(first).Offset;
+            }
+            e.Handled = true;
+            Editor.Focus();
+            Editor.TextArea.ClearSelection();
+            Editor.TextArea.Caret.Offset = target;
+            Editor.TextArea.Caret.BringCaretToView();
+        }
         // 11-01 user: a click on a hidden fence row started a mouse selection at the fence and the
         // caret was then moved off it (SnapHiddenCaret), so the whole fence row came out selected,
         // as if dragged. The press is taken here: the caret goes straight to the block's first
         // line (opening fence) or last line (closing fence) and no selection starts.
         void FenceRowMouseDown(object sender, MouseButtonEventArgs e) {
-            if (disposed || !Options.HideMarkers || Options.Busy || e.ChangedButton != MouseButton.Left) return;
+            if (disposed || e.Handled || !Options.HideMarkers || Options.Busy || e.ChangedButton != MouseButton.Left) return;
             if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) return;
             ICSharpCode.AvalonEdit.TextViewPosition? position = Editor.GetPositionFromPoint(e.GetPosition(Editor));
             if (position == null) return;
             int number = position.Value.Line;
             if (number < 1 || number > Document.LineCount) return;
             DocumentLine line = Document.GetLineByNumber(number);
-            if (Raw(line) || !Info(line).FenceLine || EditableFence(line)) return;
+            if (Raw(line) || EditableFence(line)) return;
+            LineInfo rowInfo = Info(line);
+            if (rowInfo.FrontMatterFence) {
+                e.Handled = true;
+                Editor.Focus();
+                Editor.TextArea.ClearSelection();
+                Editor.TextArea.Caret.Offset = FrontMatterCaretTarget(line,true);
+                Editor.TextArea.Caret.BringCaretToView();
+                return;
+            }
+            if (!rowInfo.FenceLine) return;
             DocumentLine next = line.NextLine;
             bool opener = next != null && Info(next).Code && !Info(next).FenceLine;
             int target = FenceCaretTarget(line, opener);
@@ -4615,6 +5396,17 @@ internal static partial class MarkdownLivePreview {
             Editor.TextArea.ClearSelection();
             Editor.TextArea.Caret.Offset = target;
             Editor.TextArea.Caret.BringCaretToView();
+        }
+        // Where a caret on a hidden front matter delimiter line moves: an opener goes to its first
+        // content line, a closer to the side the caret came from (its last content line moving up,
+        // the line after the block moving down). A block with no content line goes past the block.
+        int FrontMatterCaretTarget(DocumentLine line,bool forward) {
+            int end = blocks.FrontMatter.EndLine;
+            if (end <= 0) return Document.TextLength;
+            if (end > 2 && line.LineNumber <= 1) return Document.GetLineByNumber(2).Offset;
+            if (end > 2 && !forward) return Document.GetLineByNumber(end - 1).EndOffset;
+            if (end < Document.LineCount) return Document.GetLineByNumber(end + 1).Offset;
+            return Document.TextLength;
         }
         // Offset a caret on a hidden fence line moves to: the nearest line outside every fence
         // on the preferred side (forward when the caret came from above or stood still, backward
@@ -5497,6 +6289,9 @@ internal static partial class MarkdownLivePreview {
             // A selection that starts or ends on the delimiter row is structure too: a cut would
             // take the row's text with it and leave the header without its delimiter.
             if (!Editor.TextArea.Selection.IsEmpty && SelectionTouchesDelimiter()) { e.Handled = true; return; }
+            // The basic view draws a front matter delimiter as nothing; a key that joins it with a
+            // neighbour line would dissolve the box silently, so that line break is structure too.
+            if (Options.HideMarkers && Editor.TextArea.Selection.IsEmpty && !cut && (backKey || forwardKey) && FrontMatterJoinDelete(backKey)) { e.Handled = true; return; }
             // A fence line is structure like the delimiter row (task F2): a delete that joins a
             // hidden fence line with a neighbour or shortens its marker run changes the range the
             // block covers. 11-06 user: the pair is one unit, so the key takes both fence lines and
@@ -5528,6 +6323,22 @@ internal static partial class MarkdownLivePreview {
             if (cut) return;
             if (wordBack || wordForward) { if (WordMarkerDelete(wordBack)) e.Handled = true; return; }
             if (HiddenTextDelete(back) || HiddenUnitDelete(back)) e.Handled = true;
+        }
+        // True when this empty Backspace/Delete would join a front matter delimiter line with its
+        // neighbour (the delimiter would stop closing the box).
+        bool FrontMatterJoinDelete(bool back) {
+            int offset=Math.Max(0,Math.Min(Editor.CaretOffset,Document.TextLength));
+            DocumentLine line=Document.GetLineByOffset(offset);
+            if (back) {
+                if (offset!=line.Offset) return false;
+                DocumentLine previous=line.PreviousLine;
+                if (previous==null) return false;
+                return Info(previous).FrontMatterFence||Info(line).FrontMatterFence;
+            }
+            if (offset!=line.EndOffset) return false;
+            DocumentLine next=line.NextLine;
+            if (next==null) return false;
+            return Info(next).FrontMatterFence||Info(line).FrontMatterFence;
         }
         // True when this delete would rewrite a hidden fence line: joining it with a neighbour or
         // removing one of its marker characters. A fence line is structure like a delimiter row,
@@ -6120,7 +6931,9 @@ internal static partial class MarkdownLivePreview {
             if (offset<0||offset>Document.TextLength) return false;
             DocumentLine line=Document.GetLineByOffset(offset);
             LineInfo info=Info(line);
-            if (info.Code || info.Delimiter || info.SetextUnderline>0) return false;
+            // A block tag line draws its source on the caret line (Raw): a word delete takes the
+            // word the reader sees, not the whole-line hidden run the parse keeps for the blank row.
+            if (info.Code || info.Delimiter || info.SetextUnderline>0 || info.HtmlTagLine) return false;
             int step;
             try { step=WordStepOffset(back,line); }
             catch (Exception) { return false; }
@@ -6360,6 +7173,9 @@ internal static partial class MarkdownLivePreview {
         bool OnlyVisibleTextRange(LineInfo info, DocumentLine line, int start, int end, out int from, out int to) {
             from = start; to = end;
             if (end > line.EndOffset) return false;
+            // A Basic-view block tag line on the caret line draws its own source (Raw): the
+            // selection is the characters the reader sees, not the line's whole hidden run.
+            if (Options.HideMarkers && info.HtmlTagLine && Raw(line)) return false;
             int innerStart = start - line.Offset, innerEnd = end - line.Offset;
             if (innerEnd <= innerStart) return false;
             for (int p = 0; p < info.Text.Length; p++) {
@@ -7014,8 +7830,9 @@ internal static partial class MarkdownLivePreview {
             int offset=Math.Max(0,Math.Min(Editor.CaretOffset,Document.TextLength));
             DocumentLine line=Document.GetLineByOffset(offset);
             LineInfo info=Info(line);
-            if (!info.FenceLine || Raw(line) || EditableFence(line)) return;
-            int target=FenceCaretTarget(line,lastActiveLine<=line.LineNumber);
+            if (!info.FenceLine && !info.FrontMatterFence) return;
+            if (Raw(line) || EditableFence(line)) return;
+            int target=info.FrontMatterFence?FrontMatterCaretTarget(line,lastActiveLine<=line.LineNumber):FenceCaretTarget(line,lastActiveLine<=line.LineNumber);
             if (target==Editor.CaretOffset) { e.Handled=true; return; }
             Editor.TextArea.Caret.Offset=target;
             RevalidateCaretColumn(Editor.TextArea);
@@ -7091,6 +7908,9 @@ internal static partial class MarkdownLivePreview {
             // the fence line, so it goes to the neighbouring line instead (task F2).
             if (info.FenceLine && EditableFence(line)) return offset;
             if (info.FenceLine && !Raw(line)) return FenceCaretTarget(line, lastActiveLine <= line.LineNumber);
+            // A block tag line's caret line draws its source too (Raw): a paste lands at the caret
+            // the reader sees, not at the edge of the line's hidden run.
+            if (info.HtmlTagLine && Raw(line)) return offset;
             // A paste on the outer edge of a closing run lands inside the pair, so the pasted
             // run keeps the bold or the span size. Typed text is different on a bold pair's own
             // outer edge since 11-01 (HiddenCloseTypingEntering leaves it outside); the paste
@@ -7376,6 +8196,10 @@ internal static partial class MarkdownLivePreview {
             DocumentLine line = Document.GetLineByOffset(offset);
             LineInfo info = Info(line);
             int relative = offset - line.Offset;
+            // The revealed block tag line is source text on screen: its endpoints are the user's
+            // own characters, not a hidden marker run's edge (Basic only; Live never reaches here
+            // with markers hidden).
+            if (Options.HideMarkers && info.HtmlTagLine && Raw(line)) return offset;
             // Table rows: the row projection owns pipes and padding, so the table paste rules decide.
             if (info.Table || info.Delimiter) return offset;
             // The start endpoint widens to the outer edge only. An endpoint inside the invisible
@@ -7389,6 +8213,7 @@ internal static partial class MarkdownLivePreview {
             DocumentLine line = Document.GetLineByOffset(offset);
             LineInfo info = Info(line);
             int relative = offset - line.Offset;
+            if (Options.HideMarkers && info.HtmlTagLine && Raw(line)) return offset;
             // Table rows: the row projection owns pipes and padding, so the table paste rules decide.
             if (info.Table || info.Delimiter) return offset;
             // A multi-line selection can end inside the last line's hidden prefix (an endpoint
@@ -7491,7 +8316,10 @@ internal static partial class MarkdownLivePreview {
             if (offset < 0 || offset > Document.TextLength) return false;
             DocumentLine line = Document.GetLineByOffset(offset);
             LineInfo info = Info(line);
-            if (info.Code || info.Delimiter || info.SetextUnderline > 0) return false;
+            // A [TOC] line keeps ordinary text editing on its revealed source: the whole-line box
+            // run is not a markup unit to delete. A block tag line is the same: its whole-line
+            // hidden run is structure, and the key edits the source the caret line reveals.
+            if (info.Code || info.Delimiter || info.SetextUnderline > 0 || info.Toc || info.HtmlTagLine) return false;
             // A table row: only an inline pair inside a cell takes part (checked below once the
             // marker is known); the row's own runs (column, padding, <br>, pipes) stay excluded.
             if (info.Table && (info.Cells == null || info.Cells.Count == 0)) return false;
@@ -7574,7 +8402,7 @@ internal static partial class MarkdownLivePreview {
             int end = marker.Start + marker.Length;
             for (int i = 0; i < info.Styles.Count; i++) {
                 StyledPart part = info.Styles[i];
-                bool styled = (part.Style & (Style.Bold | Style.Italic | Style.Strike | Style.Code)) != 0 ||
+                bool styled = (part.Style & (Style.Bold | Style.Italic | Style.Strike | Style.Code | Style.Highlight)) != 0 ||
                     part.Color != null || part.Size > 0 || part.SizeEm > 0;
                 if (!styled) continue;
                 if (back) {
@@ -7742,7 +8570,7 @@ internal static partial class MarkdownLivePreview {
             return true;
         }
         // The offset just past the last style closer of the caret's closing run: the emphasis
-        // closers ("*", "**", "***", "_", "__", "~~") when the run holds any, else the end of its
+        // closers ("*", "**", "***", "_", "__", "~~", "==") when the run holds any, else the end of its
         // tag closers (size span, colour font), or -1 when it holds neither (inline code alone
         // keeps its older answer). A caret at or past that offset has left the styled run: a
         // SPACE typed there is plain (11-01 bold, 11-05 every inline style, plainAfterClosed in
@@ -7789,11 +8617,11 @@ internal static partial class MarkdownLivePreview {
         // not strictly inside a marker run, the run holds no hidden closer ahead of the caret, or the
         // typed character is itself that marker (editing the run). O(markers + run).
         static int LiteralRunCloserSpot(LineInfo info, int relative, string typed) {
-            if (info == null || info.Code || info.Rule || info.Delimiter || info.FenceLine) return -1;
+            if (info == null || info.Code || info.Rule || info.Delimiter || info.FenceLine || info.SetextUnderline > 0) return -1;
             string text = info.Text;
             if (text == null || relative <= 0 || relative >= text.Length) return -1;
             char c = text[relative];
-            if ((c != '*' && c != '_' && c != '~') || text[relative - 1] != c) return -1;
+            if ((c != '*' && c != '_' && c != '~' && c != '=') || text[relative - 1] != c) return -1;
             if (typed != null && typed.IndexOf(c) >= 0) return -1;
             int runStart = relative - 1;
             while (runStart > 0 && text[runStart - 1] == c) runStart--;
@@ -7857,15 +8685,15 @@ internal static partial class MarkdownLivePreview {
             }
             return true;
         }
-        // Start of the run of one emphasis character ("*", "_" or "~", two or more of them) that the caret sits strictly
+        // Start of the run of one emphasis character ("*", "_", "~" or "=", two or more of them) that the caret sits strictly
         // inside, for a run no pair owns; -1 anywhere else. Code, a rule or a table delimiter keep their characters as
         // typed, and so does an escaped run.
         static int LiteralMarkerRunStart(LineInfo info, int relative) {
-            if (info == null || info.Code || info.Rule || info.Delimiter || info.FenceLine) return -1;
+            if (info == null || info.Code || info.Rule || info.Delimiter || info.FenceLine || info.SetextUnderline > 0) return -1;
             string text = info.Text;
             if (relative <= 0 || relative >= text.Length) return -1;
             char c = text[relative];
-            if ((c != '*' && c != '_' && c != '~') || text[relative - 1] != c) return -1;
+            if ((c != '*' && c != '_' && c != '~' && c != '=') || text[relative - 1] != c) return -1;
             int start = relative - 1;
             while (start > 0 && text[start - 1] == c) start--;
             if (start > 0 && text[start - 1] == '\\') return -1;
@@ -8047,8 +8875,40 @@ internal static partial class MarkdownLivePreview {
         internal bool PressClaimed(MouseButtonEventArgs e) {
             if (disposed || e.Handled) return false;
             if (CheckboxAt(e) != null) return true;
+            int entry;
+            if (TocEntryAt(e.GetPosition(View), out entry)) return true;
             int offset;
             return LinkPressAt(e, out offset);
+        }
+        // A [TOC] row under the pointer: the visual line holds one TocElement and the row is
+        // decided by its drawn box. No side effects, so the editor's own press handler can ask
+        // before it places the caret (PressClaimed), and the press consumes the jump once.
+        internal bool TocEntryAt(Point point, out int entry) {
+            entry = -1;
+            if (disposed || Options.Busy || !View.VisualLinesValid) return false;
+            TocData data = Toc;
+            if (data == null || data.Entries == null || !Object.ReferenceEquals(data.Document, Document)) return false;
+            Point documentPoint = point + View.ScrollOffset;
+            VisualLine line = View.GetVisualLineFromVisualTop(documentPoint.Y);
+            if (line == null || line.IsDisposed) return false;
+            foreach (VisualLineElement element in line.Elements) {
+                TocElement toc = element as TocElement;
+                if (toc == null) continue;
+                entry = toc.RowAt(line, documentPoint);
+                return entry >= 0 && entry < data.Entries.Length;
+            }
+            return false;
+        }
+        // A press on a [TOC] row jumps to that heading like an outline click (plain click in
+        // reading mode and in edit mode alike; the box is not editable text).
+        internal bool TryTocPress(MouseButtonEventArgs e) {
+            int entry;
+            if (!TocEntryAt(e.GetPosition(View), out entry)) return false;
+            TocData data = Toc; Action<int> handler = TocJump;
+            if (data == null || handler == null) return false;
+            int offset = data.Version.MoveOffsetTo(Document.Version, data.Entries[entry].Offset);
+            handler(Math.Max(0, Math.Min(offset, Document.TextLength)));
+            return true;
         }
         // Shared by the mouse hit test and --link-probe so both follow the same policy.
         internal bool ActivateLinkAt(int offset, bool ctrl) {
@@ -8059,7 +8919,8 @@ internal static partial class MarkdownLivePreview {
             if (handler == null) return false;
             string url = LinkAt(offset);
             if (url == null) return false;
-            // A definition marker jumps back to the first reference (click-time scan only).
+            // A definition marker or its back arrow jumps to the first reference of that
+            // footnote; the cached scan (Footnotes) answers without a click-time document walk.
             if (url.StartsWith("#ref:", StringComparison.Ordinal)) {
                 SelectFootnoteReference(url.Substring(5));
                 return true;
@@ -8069,18 +8930,12 @@ internal static partial class MarkdownLivePreview {
         }
         void SelectFootnoteReference(string id) {
             if (String.IsNullOrEmpty(id)) return;
-            string needle = "[^" + id + "]";
-            for (int number = 1; number <= Document.LineCount; number++) {
-                DocumentLine line = Document.GetLineByNumber(number);
-                if (Info(line).Code) continue;
-                string text = Document.GetText(line);
-                int at = text.IndexOf(needle, StringComparison.Ordinal);
-                if (at < 0) continue;
-                if (at + needle.Length < text.Length && text[at + needle.Length] == ':') continue;
-                Editor.Select(line.Offset + at, needle.Length);
-                SafeBringCaretToView(Editor.TextArea);
-                return;
-            }
+            FootnoteEntry entry;
+            if (!Footnotes().TryGetValue(id, out entry) || entry.FirstReference < 0) return;
+            int offset = Math.Max(0, Math.Min(entry.FirstReference, Document.TextLength));
+            int length = Math.Min(Document.TextLength - offset, id.Length + 3);
+            Editor.Select(offset, length);
+            SafeBringCaretToView(Editor.TextArea);
         }
         void ViewSizeChanged(object sender, SizeChangedEventArgs e) {
             if (disposed || !e.WidthChanged) return;
@@ -8155,6 +9010,10 @@ internal static partial class MarkdownLivePreview {
         void DocumentRebuilt() {
             ClearDelimiterSections();
             ClearReferenceSections();
+            footnotes=null;footnotesVersion=null;
+            // A whole-document replace re-decides whether the new text uses a [TOC] (the lines
+            // are cleared just below, so a surviving marker asks for the list again).
+            TocSeen=false;
             if (tableWork != null) { tableWork.Abort(); tableWork = null; }
             // A whole-text replace may move the caret without a line-number change event.
             if (!frozen) ReadActive(out caretLine, out selectionStart, out selectionEnd);
@@ -8169,6 +9028,9 @@ internal static partial class MarkdownLivePreview {
             // Any edit (typing, undo, paste) moves the text under the pointer; a link tooltip
             // must not keep describing the old offset.
             hoverOffset=-1;HideLinkTip();SetLinkCursor(false);
+            // Footnote line numbers are gone after any edit; the next hover rebuilds the map in
+            // one scan (never in a keystroke).
+            footnotes=null;footnotesVersion=null;
             // The closing-edge space's state: only a plain whitespace insertion at its exact end
             // extends it (the second space of a gap, typed there); every other edit ends it.
             if (closeSpacePending) {
@@ -8211,6 +9073,28 @@ internal static partial class MarkdownLivePreview {
             }
             blocks.Invalidate(number - 1);
             blocks.Invalidate(number);
+            // A front matter edit is cached until the change reaches the watched range. When the
+            // detected range actually moves (an opener or closer typed/removed), every cached parse
+            // is stale: the box and the block states below it change even on lines the edit did not
+            // touch, so drop them and redraw the viewport once.
+            int frontBefore = blocks.FrontMatter.Invalidate(e);
+            if (frontBefore >= 0) {
+                int frontAfter = blocks.FrontMatter.EndLine;
+                if (frontAfter != frontBefore) {
+                    // Every line of the old and new range must be rescanned (the suppressed state
+                    // of a former front matter line is empty, so the convergence check alone cannot
+                    // tell that its real state changed); propagation from there stops by itself.
+                    int frontRange = Math.Min(Math.Max(frontBefore, frontAfter), Document.LineCount);
+                    for (int n = 1; n <= frontRange; n++) blocks.Invalidate(n);
+                    lines.Clear();previousRowLine=null;previousRow=null;
+                    // Folds built from the old reading (a table delimiter, a setext underline, a
+                    // formula, a reference run) may cover lines that just became front matter.
+                    ClearDelimiterSections();
+                    ClearReferenceSections();
+                    View.Redraw();
+                }
+            }
+            ClearCodeCopyHover();
             DocumentLine edited=Document.GetLineByNumber(number),previous=edited.PreviousLine;LineInfo preceding;
             HashSet<DocumentLine> mathDirty=MathInvalidate(edited);
             // Only the two next-line lookaheads (a table header's delimiter row and a setext
@@ -8317,6 +9201,10 @@ internal static partial class MarkdownLivePreview {
                 caret.Position=new ICSharpCode.AvalonEdit.TextViewPosition(caret.Location,-1);
             }
             if (!frozen && !Options.Busy) QueueCaretGuard();
+            // The host keeps the [TOC] heading list in step with the document; it decides with
+            // its own cheap outline rule, so a document without one pays one delegate call.
+            Action<DocumentChangeEventArgs> editedHandler=Edited;
+            if (editedHandler!=null) editedHandler(e);
         }
         void EditorDocumentChanged(object sender, EventArgs e) { Dispose(); }
         void VisualLinesChanged(object sender, EventArgs e) {
@@ -8332,6 +9220,7 @@ internal static partial class MarkdownLivePreview {
             foreach (DocumentLine line in remove) lines.Remove(line);
             images.RefreshVisible();
             if (SyncVisibleReferences()) View.Redraw();
+            RepairFrontMatter();
             // A layout only moves a native composition point while the IME owns one. Queuing it
             // outside a composition ran one DataBind pass plus a Rendering subscription for every
             // line that was re-laid out, which is once per typed character.
@@ -8340,9 +9229,38 @@ internal static partial class MarkdownLivePreview {
             QueueCaretGuard();
         }
 
+        // The view can build lines while a whole-document replace is still in flight, and those
+        // parses answer for the text they saw (a front matter block that was not there yet, or one
+        // whose closing line was elsewhere). The answer carries a generation (FrontMatterCache),
+        // and every line parsed against an older one is dropped and rebuilt here, not only line 1:
+        // the range decides the box AND which delimiter rows are hidden, so a stale line 2 or 3
+        // would keep a hidden row with no character rect (the gutter skipped its number and the
+        // block read as missing). Only visible lines are dropped; each parse is O(its line).
+        void RepairFrontMatter() {
+            if (disposed || visible.Length == 0) return;
+            int generation = FrontGeneration;
+            bool redraw = false;
+            foreach (VisualLine line in visible) {
+                if (line.IsDisposed || line.FirstDocumentLine.IsDeleted) continue;
+                DocumentLine first = line.FirstDocumentLine;
+                LineInfo info;
+                if (!lines.TryGetValue(first, out info) || info.FrontGen == generation) continue;
+                lines.Remove(first);
+                redraw = true;
+            }
+            if (redraw) View.Redraw();
+        }
+
         internal LineInfo Info(DocumentLine line) {
             LineInfo info;
-            if (lines.TryGetValue(line, out info)) return info;
+            if (lines.TryGetValue(line, out info)) {
+                // A line parsed against an older front-matter answer (the view can build lines
+                // while a whole-document replace is still in flight) is dropped here too, so a
+                // rebuild between the change and RepairFrontMatter's redraw cannot keep it. One
+                // integer compare per line after the range is known.
+                if (info.FrontGen != FrontGeneration) lines.Remove(line);
+                else return info;
+            }
             // Every parse reads line.Offset/line.Length straight out of the line object, and
             // ParseLine/ShortText do not clamp that range: a line that is no longer the
             // document's line at its own number would read past the text (monkey seed 1 step
@@ -8354,13 +9272,77 @@ internal static partial class MarkdownLivePreview {
             // is the line the view draws, and its offsets are the ones ShortText must read.
             line = CurrentDocumentLine(line);
             if (line == null) return new LineInfo { Text = string.Empty };
-            if (lines.TryGetValue(line, out info)) return info;
+            if (lines.TryGetValue(line, out info)) {
+                if (info.FrontGen == FrontGeneration) return info;
+                lines.Remove(line);
+            }
             long parseStart = System.Diagnostics.Stopwatch.GetTimestamp();
             info = ParseLine(Document, line, blocks.Before(line.LineNumber), NumberWidth, this);
+            // Stamp the answer the parse really used: IsFrontMatter may have run the first scan
+            // (and bumped the generation) inside ParseLine, so the value after it is the one that
+            // describes this line's front matter fields.
+            info.FrontGen = FrontGeneration;
             if (line==previousRowLine) info.Row=previousRow;
             DiagParses++; DiagParseTicks += System.Diagnostics.Stopwatch.GetTimestamp() - parseStart;
             lines.Add(line, info);
             return info;
+        }
+
+        // The offset whose run style and span box the composition copies. The closing-edge space rule (HiddenCloseTypingEntering) keeps the typed
+        // space outside the emphasis/code closers and writes the next character back inside them on commit, so a syllable composed right after
+        // that space sits at a source offset the parse draws as plain although it will land inside the pair (11-09 user). Map it to the pair's
+        // inside edge while the pending space is intact, the same spot FormatAt reads for the toolbar, so the drawn syllable matches its commit.
+        // O(line markers), asked only while a composition string is built on the caret's line.
+        internal int ImeStyleOffsetAt(int offset) {
+            if (disposed || Document == null) return offset;
+            if (!closeSpacePending || offset != closeSpaceCaret) return offset;
+            if (closeSpaceStart < 0 || closeSpaceStart > Document.TextLength) return offset;
+            return PendingCloseSpaceIntact() ? closeSpaceStart : offset;
+        }
+        // The background of the inline span the composition starts in (highlight, inline code), or null. The span's box is drawn from the
+        // line element's BackgroundBrush (MarkdownTransformer), which the run properties the composition copies do not carry, so a later
+        // composing syllable was drawn on a hole in the span (11-09 user: ==테스트입|== and `코드|`). The caret line's own parse says which
+        // styled part covers the offset; both content edges count as inside, so a caret right before the closing marker keeps the box and
+        // one past the closer does not. O(styles of the caret line), asked only while a composition string is built for that line.
+        internal Brush ImeSpanBackgroundAt(int offset) {
+            if (disposed || Document == null) return null;
+            if (offset < 0 || offset > Document.TextLength) return null;
+            DocumentLine line = Document.GetLineByOffset(offset);
+            LineInfo info = Info(line);
+            if (info == null || info.Text == null || info.Table) return null;
+            int relative = offset - line.Offset;
+            Brush found = null; int foundStart = -1;
+            foreach (StyledPart part in info.Styles) {
+                if ((part.Style & (Style.Highlight | Style.Code)) == 0) continue;
+                if (relative < part.Start || relative > part.Start + part.Length) continue;
+                if (part.Start < foundStart) continue;   // a later part is the inner span: its box is on top
+                foundStart = part.Start;
+                found = (part.Style & Style.Code) != 0 ? Colors.InlineCode : Colors.Highlight;
+            }
+            return found;
+        }
+        // The closing-edge space keeps the typed whitespace outside the pair while a composition
+        // string is drawn right after it; neither the hidden closers nor the space carry the span's
+        // box, so TextView ended the box before them and the composing syllable drew a second box
+        // ([box 테스트] [plain space] [box 테], 11-09 user VM photo). This answers the range on the
+        // caret's line that takes the pair's brush: start = the closing run (a revealed raw line
+        // keeps its marker glyphs plain, so there only the space does), spaceStart = the moved
+        // whitespace, end = the caret where the string is drawn, brush = the span's own frozen
+        // brush. O(styles of the caret line), and only while a composition is really drawn there.
+        internal bool CloseSpaceBoxRange(DocumentLine line, out int start, out int spaceStart, out int end, out Brush brush) {
+            start = spaceStart = end = 0; brush = null;
+            if (disposed || !closeSpacePending || line == null || Document == null) return false;
+            // The offsets below name the caret's line; caretLine can lag a whole-document replace by one caret pass.
+            if (closeSpaceStart < line.Offset || closeSpaceCaret > line.EndOffset || closeSpaceCaret <= closeSpaceStart) return false;
+            if (!Editor.ImeDrawnAt(closeSpaceCaret)) return false;
+            if (ImeStyleOffsetAt(closeSpaceCaret) != closeSpaceStart) return false;
+            Brush found = ImeSpanBackgroundAt(closeSpaceStart);
+            if (found == null) return false;
+            start = closeSpaceStart - line.Offset;
+            spaceStart = closeSpaceEnd - line.Offset;
+            end = closeSpaceCaret - line.Offset;
+            brush = found;
+            return true;
         }
         // The line as the document has it now, named by its line number. A DocumentLine that is
         // not in the current line tree (detached by a whole-document replace) keeps its old
@@ -8993,7 +9975,17 @@ internal static partial class MarkdownLivePreview {
             return changed;
         }
         internal UIElement ImageObject(Replacement replacement) {
-            return images.Object(replacement.Source, replacement.Label);
+            UIElement element = images.Object(replacement.Source, replacement.Label);
+            Image image = element as Image;
+            BitmapSource bitmap = image == null ? null : image.Source as BitmapSource;
+            if (bitmap != null && (replacement.ImageWidth > 0 || replacement.ImageHeight > 0)) {
+                double width, height;
+                InlineHtml.ImageSize(bitmap.Width, bitmap.Height, replacement.ImageWidth, replacement.ImageHeight,
+                    Math.Max(1, View.ActualWidth - 24), out width, out height);
+                image.Width = width; image.Height = height;
+                image.Stretch = Stretch.Fill; image.StretchDirection = StretchDirection.Both;
+            }
+            return element;
         }
         // A table cell draws its image itself, so it asks for the pixels and the capped size
         // instead of a UIElement; the same cache, loader and path resolution do the work.
@@ -9061,7 +10053,9 @@ internal static partial class MarkdownLivePreview {
             if (info.Links == null) return null;
             foreach (LinkPart link in info.Links) {
                 int start = line.Offset + link.Start;
-                if (offset >= start && offset < start + link.Length) return link.Url;
+                // A zero-length part is the footnote definition's drawn back arrow at the line
+                // end: the element maps the pointer to exactly that offset.
+                if (link.Length == 0 ? offset == start : offset >= start && offset < start + link.Length) return link.Url;
             }
             return null;
         }
@@ -9075,7 +10069,12 @@ internal static partial class MarkdownLivePreview {
             // A revealed caret/selection line draws Markdown source, not a rendered link.
             if (Raw(line)) return null;
             string url = LinkAt(offset);
-            if (url == null) return null;
+            if (url == null) {
+                LineInfo info = Info(line);
+                if (info.Hints != null) foreach (HintPart hint in info.Hints)
+                    if (offset - line.Offset >= hint.Start && offset - line.Offset < hint.Start + hint.Length) return hint.Text;
+                return null;
+            }
             bool readOnly = Options.ReadOnly || Editor.IsReadOnly;
             string text = (readOnly ? "클릭하여 열기" : "Ctrl+클릭하여 열기") + " · " + LinkTipTarget(url);
             Func<string,string> translate = Options.Translate;
@@ -9094,35 +10093,78 @@ internal static partial class MarkdownLivePreview {
             }
             return url;
         }
-        // The host resolves these on click with the same first-definition scan. A definition is
-        // looked up once per pointer entry into a footnote/reference link, never per move and
-        // never for an ordinary inline link.
+        // The footnote/reference definitions and the first reference of each footnote, from one
+        // lazily built scan. A hover or the definition's back arrow uses the map; the app drops
+        // it on every document change (DocumentChanged), so one change costs at most one scan
+        // and typing never walks the document. Lines inside a fence are code, not definitions.
+        Dictionary<string,FootnoteEntry> Footnotes() {
+            if (footnotes != null && Object.ReferenceEquals(footnotesVersion, Document.Version)) return footnotes;
+            var map = new Dictionary<string,FootnoteEntry>(StringComparer.OrdinalIgnoreCase);
+            char fence = '\0'; int fenceLength = 0;
+            for (int number = 1; number <= Document.LineCount; number++) {
+                DocumentLine line = Document.GetLineByNumber(number);
+                char marker; int length; bool tailBlank;
+                ReadFence(Document, line, out marker, out length, out tailBlank);
+                if (fence != '\0') {
+                    if (marker == fence && length >= fenceLength && tailBlank) fence = '\0';
+                    continue;
+                }
+                if (length >= 3) { fence = marker; fenceLength = length; continue; }
+                if (line.Length < 4 || line.Length > ParseLimit) continue;
+                string text = Document.GetText(line);
+                int p = 0, columns = 0;
+                while (p < text.Length && (text[p] == ' ' || text[p] == '\t')) { columns += text[p] == '\t' ? 4 : 1; p++; }
+                if (columns <= 3 && p < text.Length && text[p] == '[') {
+                    bool note; int idStart, idEnd, colon, bodyStart;
+                    if (DefinitionLine(text, p, out note, out idStart, out idEnd, out colon, out bodyStart)) {
+                        string id = text.Substring(idStart, idEnd - idStart);
+                        FootnoteEntry entry = FootnotesEntry(map, id);
+                        if (entry.LineNumber == 0) { entry.LineNumber = number; entry.BodyStart = bodyStart; }
+                    }
+                }
+                // The first "[^id]" in the document is the definition's back target. A
+                // definition-looking "[^id]:" is skipped, the same rule the old click scan read.
+                for (int at = text.IndexOf("[^", StringComparison.Ordinal); at >= 0; at = text.IndexOf("[^", at + 2, StringComparison.Ordinal)) {
+                    int close = text.IndexOf(']', at + 2);
+                    if (close < 0) break;
+                    if (close + 1 < text.Length && text[close + 1] == ':') continue;
+                    int idLength = close - at - 2;
+                    if (idLength <= 0 || idLength > 128) continue;
+                    string id = text.Substring(at + 2, idLength);
+                    if (id.IndexOf('[') >= 0) continue;
+                    FootnoteEntry entry = FootnotesEntry(map, id);
+                    if (entry.FirstReference < 0) entry.FirstReference = line.Offset + at;
+                }
+            }
+            footnotes = map; footnotesVersion = Document.Version;
+            return map;
+        }
+        static FootnoteEntry FootnotesEntry(Dictionary<string,FootnoteEntry> map,string id) {
+            FootnoteEntry entry;
+            if (!map.TryGetValue(id, out entry)) { entry = new FootnoteEntry(); map.Add(id, entry); }
+            return entry;
+        }
+        // The tooltip's definition text: plain (inline markers removed by the TXT converter's own
+        // rule), the body's first line, at most 300 characters. A reference definition answers
+        // its destination the way the old scan read it ("[id]: url", angle brackets stripped).
         string LinkTipDefinition(string id,bool note) {
             if (String.IsNullOrEmpty(id)) return null;
-            string marker = note ? "[^"+id+"]:" : "["+id+"]:";
-            TextDocument document = Document;
-            for (int number=1;number<=document.LineCount;number++) {
-                DocumentLine line = document.GetLineByNumber(number);
-                if (line.Length<marker.Length) continue;
-                // A definition line starts (after up to three spaces) with '['. The cheap check
-                // keeps a big document's walk to one char per line; the string is only built
-                // for lines that can be the definition.
-                int at = line.Offset, limit = Math.Min(3,line.Length);
-                for (int skip=0;skip<limit;skip++) { char c = document.GetCharAt(at); if (c!=' '&&c!='\t') break; at++; }
-                if (at-line.Offset>=line.Length || document.GetCharAt(at)!='[') continue;
-                string text = document.GetText(line).TrimStart();
-                if (!text.StartsWith(marker,StringComparison.OrdinalIgnoreCase)) continue;
-                // A definition-looking line inside a fenced block is code, not a definition.
-                if (Info(line).Code) continue;
-                string rest = text.Substring(marker.Length).Trim();
-                if (!note) {
-                    int space = rest.IndexOfAny(new char[] {' ','\t'});
-                    if (space>=0) rest = rest.Substring(0,space);
-                    if (rest.Length>1 && rest[0]=='<' && rest[rest.Length-1]=='>') rest = rest.Substring(1,rest.Length-2);
-                } else if (rest.Length>240) rest = rest.Substring(0,240)+"…";
+            FootnoteEntry entry;
+            if (!Footnotes().TryGetValue(id, out entry) || entry.LineNumber <= 0 || entry.LineNumber > Document.LineCount) return null;
+            DocumentLine line = Document.GetLineByNumber(entry.LineNumber);
+            string text = Document.GetText(line);
+            if (entry.BodyStart >= text.Length) return null;
+            string rest = text.Substring(entry.BodyStart).Trim();
+            if (!note) {
+                int space = rest.IndexOfAny(new char[] {' ','\t'});
+                if (space >= 0) rest = rest.Substring(0,space);
+                if (rest.Length>1 && rest[0]=='<' && rest[rest.Length-1]=='>') rest = rest.Substring(1,rest.Length-2);
                 return rest.Length==0 ? null : rest;
             }
-            return null;
+            string plain = MarkdownPlainText.Convert(rest).Trim();
+            if (plain.Length == 0) return null;
+            if (plain.Length > 300) plain = plain.Substring(0,300)+"…";
+            return plain;
         }
         // A shortcut reference link "[label]" is a link only when the document defines that label.
         // The parse stays O(line): the id set is cached by document version, a small document's
@@ -9227,7 +10269,7 @@ internal static partial class MarkdownLivePreview {
             string text = offset<0 ? null : LinkTipAt(offset);
             if (text==null) { HideLinkTip(); SetLinkCursor(false); return false; }
             ShowLinkTip(text);
-            SetLinkCursor(readOnly || ctrl);
+            SetLinkCursor((readOnly || ctrl) && offset >= 0 && LinkAt(offset) != null);
             return true;
         }
         void ShowLinkTip(string text) {
@@ -9263,14 +10305,143 @@ internal static partial class MarkdownLivePreview {
         void LinkMouseMove(object sender,MouseEventArgs e) {
             if (disposed || Editor.Document!=Document) return;
             if (e.LeftButton!=MouseButtonState.Released || e.RightButton!=MouseButtonState.Released) {
-                hoverOffset=-1; HideLinkTip(); SetLinkCursor(false); return;
+                hoverOffset=-1; HideLinkTip(); SetLinkCursor(false); ClearCodeCopyHover(); return;
             }
             ICSharpCode.AvalonEdit.TextViewPosition? hit = View.GetPositionFloor(e.GetPosition(View)+View.ScrollOffset);
             int offset = hit.HasValue ? Document.GetOffset(hit.Value.Location) : -1;
             UpdateLinkHover(offset,(Keyboard.Modifiers&ModifierKeys.Control)!=0,Options.ReadOnly||Editor.IsReadOnly);
+            UpdateCodeCopyHover(e.GetPosition(View),offset);
         }
         void LinkMouseLeave(object sender,MouseEventArgs e) {
-            hoverOffset=-1; HideLinkTip(); SetLinkCursor(false);
+            hoverOffset=-1; HideLinkTip(); SetLinkCursor(false); ClearCodeCopyHover();
+        }
+        // The fenced block under the pointer from the block cache: the topmost code line of the run
+        // is the opening fence, and the first fence line below it closes the block (none = the block
+        // runs to the document's end). At most O(block) lines, and only when the pointer enters a new block.
+        bool CodeBlockAt(DocumentLine line,out int first,out int last) {
+            first=last=0;
+            LineInfo info=Info(line);
+            if (!info.Code) return false;
+            // An opening fence is the block's own first line. Any other code line (body or
+            // closing fence) walks up to the first fence line above it - never past the closing
+            // fence of the block before, which is why a hovered opener does not start the walk.
+            DocumentLine top=line;
+            if (!(info.FenceLine&&info.Before.Fence=='\0')) {
+                while (top.PreviousLine!=null) {
+                    LineInfo prev=Info(top.PreviousLine);
+                    if (!prev.Code) break;
+                    top=top.PreviousLine;
+                    if (prev.FenceLine) break;
+                }
+            }
+            LineInfo topInfo=Info(top);
+            if (!topInfo.FenceLine||topInfo.Before.Fence!='\0') return false;
+            int close=0;
+            for (DocumentLine at=top.NextLine;at!=null;at=at.NextLine) {
+                LineInfo atInfo=Info(at);
+                if (!atInfo.Code) break;
+                if (atInfo.FenceLine) { close=at.LineNumber;break; }
+            }
+            first=top.LineNumber;
+            last=close>0?close:Document.LineCount;
+            return true;
+        }
+        // The copy icon of the block whose first content row is this line, in TextView-local pixels:
+        // a 16 px glyph inset 6 px from the row's top-right, with its 22 x 22 hover square centred
+        // on it (the square is the click target, so a 1 px miss still copies).
+        bool CodeCopyIconRect(int firstContentLine,out Rect rect) {
+            rect=Rect.Empty;
+            if (!View.VisualLinesValid) return false;
+            double width=View.ActualWidth;
+            if (width<=0) return false;
+            foreach (VisualLine visual in View.VisualLines) {
+                if (visual.IsDisposed||visual.FirstDocumentLine.LineNumber!=firstContentLine) continue;
+                double top=visual.VisualTop-View.VerticalOffset;
+                rect=new Rect(width-6-16-3,top+6-3,22,22);
+                return true;
+            }
+            return false;
+        }
+        void SetCodeCopyHover(int opener,bool onIcon) {
+            if (codeCopyOpener==opener&&codeCopyOnIcon==onIcon) return;
+            if (opener<0) { codeCopyFirst=codeCopyLast=-1;codeCopyFlash=-1; }
+            else if (opener!=codeCopyOpener) codeCopyFlash=-1;
+            codeCopyOpener=opener;codeCopyOnIcon=onIcon;
+            if (!disposed) View.InvalidateVisual();
+        }
+        void ClearCodeCopyHover() {
+            if (codeCopyOpener<0&&!codeCopyOnIcon) return;
+            codeCopyFirst=codeCopyLast=codeCopyOpener=-1;
+            codeCopyOnIcon=false;codeCopyFlash=-1;
+            if (!disposed) View.InvalidateVisual();
+        }
+        void UpdateCodeCopyHover(Point point,int offset) {
+            if (disposed) return;
+            if (offset<0) { SetCodeCopyHover(-1,false);return; }
+            DocumentLine line=Document.GetLineByOffset(offset);
+            int number=line.LineNumber;
+            int opener=codeCopyOpener;
+            if (opener<0||number<codeCopyFirst||number>codeCopyLast) {
+                int first,last;
+                if (!CodeBlockAt(line,out first,out last)) { SetCodeCopyHover(-1,false);return; }
+                codeCopyFirst=first;codeCopyLast=last;opener=first;
+            }
+            Rect rect;
+            bool onIcon=CodeCopyIconRect(opener+1,out rect)&&rect.Contains(point);
+            SetCodeCopyHover(opener,onIcon);
+        }
+        // A press on the icon copies the block's content lines and nothing else: the editor's own
+        // press handling never runs, so the caret and the selection stay where they were.
+        void CodeCopyMouseDown(object sender,MouseButtonEventArgs e) {
+            if (disposed||Options.Busy||e.ChangedButton!=MouseButton.Left) return;
+            // The pointer can land on the icon without a move event of its own (a scroll or a
+            // window activation under a still mouse), so the hit is read again from this press.
+            ICSharpCode.AvalonEdit.TextViewPosition? position=Editor.GetPositionFromPoint(e.GetPosition(Editor));
+            if (position==null) { ClearCodeCopyHover();return; }
+            UpdateCodeCopyHover(e.GetPosition(View),Document.GetOffset(position.Value.Location));
+            if (!codeCopyOnIcon||codeCopyOpener<0) return;
+            if ((Keyboard.Modifiers&ModifierKeys.Shift)!=0) return;
+            e.Handled=true;
+            Editor.Focus();
+            CopyCodeBlock(codeCopyOpener);
+        }
+        void CopyCodeBlock(int openerNumber) {
+            if (openerNumber<1||openerNumber>Document.LineCount) return;
+            DocumentLine opener=Document.GetLineByNumber(openerNumber);
+            int start=-1,end=-1;
+            for (DocumentLine line=opener.NextLine;line!=null;line=line.NextLine) {
+                LineInfo info=Info(line);
+                if (!info.Code||info.FenceLine) break;
+                if (start<0) start=line.Offset;
+                end=line.EndOffset;
+            }
+            string content=start<0?String.Empty:Document.GetText(start,end-start);
+            bool copied;
+            if (content.Length==0) copied=ClipboardRetry.Try(delegate{System.Windows.Clipboard.SetDataObject(String.Empty,true);});
+            else copied=ClipboardRetry.TrySetText(content);
+            Func<string,string> translate=Options.Translate;
+            Action<string> notice=Options.Notice;
+            if (!copied) {
+                // The same answer the other clipboard actions give when the lock outlasts the retries.
+                if (notice!=null) notice(translate==null?"클립보드를 열 수 없습니다. 잠시 후 다시 복사하세요.":translate("클립보드를 열 수 없습니다. 잠시 후 다시 복사하세요."));
+                return;
+            }
+            string message=translate==null?"코드를 복사했습니다":translate("코드를 복사했습니다");
+            if (notice!=null) notice(message);
+            codeCopyFlash=openerNumber;
+            if (codeCopyTimer==null) {
+                codeCopyTimer=new DispatcherTimer(DispatcherPriority.Background,View.Dispatcher);
+                codeCopyTimer.Interval=TimeSpan.FromSeconds(1.2);
+                codeCopyTimer.Tick+=CodeCopyTick;
+            }
+            codeCopyTimer.Stop();codeCopyTimer.Start();
+            if (!disposed) View.InvalidateVisual();
+        }
+        void CodeCopyTick(object sender,EventArgs e) {
+            codeCopyTimer.Stop();
+            if (codeCopyFlash<0) return;
+            codeCopyFlash=-1;
+            if (!disposed) View.InvalidateVisual();
         }
         // Ctrl pressed or released without moving: the hand cursor follows the modifier even
         // when the pointer stays on the same offset (the deferred call reads the settled state).
@@ -9282,7 +10453,7 @@ internal static partial class MarkdownLivePreview {
                 bool ctrl = (Keyboard.Modifiers&ModifierKeys.Control)!=0;
                 if (ctrl==hoverCtrl) return;
                 hoverCtrl = ctrl;
-                SetLinkCursor(hoverReadOnly || ctrl);
+                SetLinkCursor((hoverReadOnly || ctrl) && LinkAt(hoverOffset) != null);
             }));
         }
         // Fenced code (including the fence lines) at an offset, from the block cache.
@@ -9292,7 +10463,12 @@ internal static partial class MarkdownLivePreview {
         }
         // Toolbar state at the caret from the cached line parse (no extra scan).
         internal void FormatAt(int offset, out bool bold, out bool italic, out bool strike, out bool code, out int heading) {
-            bold = italic = strike = code = false;
+            bool highlight;
+            FormatAt(offset, out bold, out italic, out strike, out code, out highlight, out heading);
+        }
+        // The same answer with the highlight pair, which the format ribbon lights on its own button.
+        internal void FormatAt(int offset, out bool bold, out bool italic, out bool strike, out bool code, out bool highlight, out int heading) {
+            bold = italic = strike = code = highlight = false;
             heading = 0;
             if (disposed || offset < 0 || offset > Document.TextLength) return;
             DocumentLine line = Document.GetLineByOffset(offset);
@@ -9313,6 +10489,7 @@ internal static partial class MarkdownLivePreview {
                 italic |= (part.Style & Style.Italic) != 0;
                 strike |= (part.Style & Style.Strike) != 0;
                 code |= (part.Style & Style.Code) != 0;
+                highlight |= (part.Style & Style.Highlight) != 0;
             }
         }
 
@@ -9340,10 +10517,13 @@ internal static partial class MarkdownLivePreview {
             View.PreviewMouseMove -= LinkMouseMove;
             View.MouseLeave -= LinkMouseLeave;
             Editor.PreviewKeyUp -= LinkModifierChanged;
+            if (codeCopyTimer != null) { codeCopyTimer.Stop(); codeCopyTimer.Tick -= CodeCopyTick; codeCopyTimer = null; }
+            codeCopyFirst=codeCopyLast=codeCopyOpener=-1;codeCopyOnIcon=false;codeCopyFlash=-1;
             HideLinkTip();
             linkTip=null;
             SetLinkCursor(false);
             Editor.TextArea.PreviewMouseLeftButtonDown -= TextAreaPreviewMouseDown;
+            Editor.TextArea.PreviewMouseLeftButtonDown -= CodeCopyMouseDown;
             Editor.TextArea.PreviewMouseLeftButtonUp -= TextAreaPreviewMouseUp;
             Editor.TextArea.PreviewMouseMove -= TableCaretDrag;
             Editor.TextArea.PreviewMouseMove -= WordCaretDrag;
@@ -9370,6 +10550,7 @@ internal static partial class MarkdownLivePreview {
             Editor.TextArea.TextEntering -= TableGapEntering;
             Editor.TextArea.TextEntering -= HiddenFenceEntering;
             Editor.TextArea.PreviewMouseLeftButtonDown -= FenceRowMouseDown;
+            Editor.TextArea.PreviewMouseLeftButtonDown -= MathEndMouseDown;
             Editor.TextArea.TextEntering -= SetextRuleEntering;
             Editor.TextArea.TextEntering -= FenceEnterEntering;
             Editor.PreviewKeyDown -= FenceEnterKeyDown;
@@ -9388,6 +10569,8 @@ internal static partial class MarkdownLivePreview {
             Editor.TableOffsetAt = null;
             Editor.ImeStringChanged = null;
             Editor.ImeCellSpan = null;
+            Editor.ImeSpanBackground = null;
+            Editor.ImeStyleOffset = null;
             DetachTableCaret();
             if (releaseTimer != null) releaseTimer.Stop();
             if (referenceSync != null) { referenceSync.Abort(); referenceSync = null; }
@@ -9429,6 +10612,25 @@ internal static partial class MarkdownLivePreview {
 
     static LineInfo ParseLine(TextDocument document, DocumentLine line, BlockState before, double numberWidth, Session session) {
         var info = new LineInfo { Text=ShortText(document, line), Before=before };
+        // YAML front matter draws as a compact muted box: "key:" semi-bold muted, the value muted
+        // normal, both at 0.9 em. The two delimiter lines are structure (hidden off the caret like
+        // fences). The block cache already keeps their state from leaking into the body.
+        if (session.IsFrontMatter(line.LineNumber)) {
+            info.FrontMatter = true;
+            if (line.LineNumber == 1 || line.LineNumber == session.FrontMatterEnd) {
+                info.FrontMatterFence = true;
+                info.Hide(0, line.Length);
+                return info;
+            }
+            string front = info.Text;
+            int colon = front.IndexOf(':');
+            if (colon < 0) info.AddStyle(0, front.Length, Style.Muted | Style.Small, null);
+            else {
+                info.AddStyle(0, colon + 1, Style.SemiBold | Style.Muted | Style.Small, null);
+                if (colon + 1 < front.Length) info.AddStyle(colon + 1, front.Length - colon - 1, Style.Muted | Style.Small, null);
+            }
+            return info;
+        }
         // Display math. A line inside a block is formula source: folded to nothing while the
         // block is rendered, plain source text while the caret or a selection is in it.
         if (before.Math > 0) {
@@ -9466,6 +10668,39 @@ internal static partial class MarkdownLivePreview {
         // Oversized lines remain editable native text; block state still propagates.
         if (line.Length > ParseLimit) return info;
         string text = info.Text;
+        // GitHub-allowed block HTML (the block cache made the same call): the line's alignment,
+        // its quote/details indent and its list context come from the stack of open containers.
+        int listNumber;
+        info.HtmlAlign = HtmlAlignOf(before);
+        info.HtmlQuote = HtmlCountOf(before, HtmlQuoteTag);
+        info.HtmlDetailDepth = HtmlCountOf(before, HtmlDetails);
+        info.HtmlInPre = HtmlHas(before, HtmlPre);
+        info.HtmlListKind = HtmlListOf(before, out listNumber);
+        info.HtmlListNumber = listNumber;
+        info.HtmlIndentEm = 0.9 * (info.HtmlQuote + info.HtmlDetailDepth);
+        int blockTagStart;
+        InlineHtml.Tag blockTag = InlineHtml.BlockTagLine(text, out blockTagStart);
+        // Inside <pre> every line is literal code except the closer, which is structure.
+        bool htmlPreClose = blockTag != null && blockTag.Name == "pre" && blockTag.Closing;
+        if (info.HtmlInPre && !htmlPreClose) { info.Code = true; return info; }
+        if (blockTag != null) {
+            if (blockTag.Name == "hr") {
+                info.Rule = true;
+                info.Hide(0, text.Length);
+                return info;
+            }
+            info.HtmlTagLine = true;
+            // The tag is structure in both views: a blank row of text height while the caret is
+            // elsewhere, its own source on the caret line (Session.Raw). Basic keeps today's muted
+            // small look for that revealed source, so a tag reads the same when it is being edited.
+            info.Hide(0, text.Length);
+            if (session.Options.HideMarkers) info.AddStyle(0, text.Length, Style.Muted | Style.Small, null);
+            return info;
+        }
+        if (ParseHtmlSingleLine(info, text, session)) {
+            SortReplacements(info);
+            return info;
+        }
         int p = 0, columns = 0;
         while (p < text.Length && (text[p] == ' ' || text[p] == '\t')) { columns += text[p] == '\t' ? 4 : 1; p++; }
         int content = p, outerLevel = Math.Min(8, columns / 2);
@@ -9593,6 +10828,24 @@ internal static partial class MarkdownLivePreview {
             info.Hide(0, text.Length);
             return info;
         }
+        // A lone "[TOC]" line: the in-place table of contents. Live hides the marker and its box
+        // takes the line while the caret is elsewhere (a revealed caret line shows the source);
+        // Basic keeps the marker as a muted small row (the parse never reveals there) and puts
+        // the box under it. The heading list is the outline panel's (SourceOutline), never a
+        // second document scan from here. Tested before the setext promotion so a "===" typed
+        // under it cannot turn the marker into a heading.
+        if (columns <= 3 && info.QuoteLevels == 0 && MarkdownPlainText.TocLine(text)) {
+            info.Toc = true;
+            if (session.Options.HideMarkers) {
+                info.AddStyle(0, text.Length, Style.Muted | Style.Small, null);
+                info.Replacements.Add(new Replacement { Start=text.Length, Length=0, Kind=ReplacementKind.Toc });
+            } else {
+                info.Replacements.Add(new Replacement { Start=0, Length=text.Length, Kind=ReplacementKind.Toc });
+            }
+            session.NoteTocLine();
+            SortReplacements(info);
+            return info;
+        }
         // The paragraph line above an underline takes the heading scale; the underline's
         // own line carries no text style. The basic view uses the same 2x / 1.6x sizes.
         if (info.Heading == 0 && info.QuoteLevels == 0 && SetextText(text, before.Setext)) {
@@ -9627,7 +10880,12 @@ internal static partial class MarkdownLivePreview {
                 info.AddStyle(definitionNoteStart, definitionNoteEnd - definitionNoteStart, Style.Link | Style.Superscript, null);
                 info.AddStyle(definitionBody, text.Length - definitionBody, Style.Muted | Style.Small, null);
                 if (info.Links == null) info.Links = new List<LinkPart>();
-                info.Links.Add(new LinkPart { Start=content, Length=definitionBody - content, Url="#ref:" + text.Substring(definitionNoteStart, definitionNoteEnd - definitionNoteStart) });
+                string noteId = text.Substring(definitionNoteStart, definitionNoteEnd - definitionNoteStart);
+                info.Links.Add(new LinkPart { Start=content, Length=definitionBody - content, Url="#ref:" + noteId });
+                // The drawn back arrow at the line's end: a zero-length link part (LinkAt matches
+                // its exact offset) and the element that draws it. Not inserted into the text.
+                info.Links.Add(new LinkPart { Start=text.Length, Length=0, Url="#ref:" + noteId });
+                info.Replacements.Add(new Replacement { Start=text.Length, Length=0, Kind=ReplacementKind.Backref });
                 ParseInline(info, definitionBody, session);
             } else {
                 info.RefDefinition = true;
@@ -9707,6 +10965,92 @@ internal static partial class MarkdownLivePreview {
         ParseInline(info, content, session);
         SortReplacements(info);
         return info;
+    }
+
+    // One line that is a complete block element: "<h2>제목</h2>", "<li>항목</li>", "<dt>용어</dt>",
+    // "<dd>설명</dd>", "<summary>제목</summary>", "<figcaption>설명</figcaption>", "<pre>코드</pre>"
+    // or an aligned "<p align=\"center\">글</p>" / "<div align=\"center\"><img ...></div>" /
+    // "<center>글</center>". The tags themselves are structure and hide; the content keeps its
+    // inline markup. False leaves the line to the ordinary parser (the block pair then still
+    // hides through InlineHtml.Parse and reads as plain text).
+    static bool ParseHtmlSingleLine(LineInfo info, string text, Session session) {
+        InlineHtml.Tag open;
+        if (!InlineHtml.SingleLineBlock(text, out open)) return false;
+        int contentStart = open.End, contentLength = open.CloseStart - open.End;
+        string name = open.Name;
+        if (name.Length == 2 && name[0] == 'h' && name[1] >= '1' && name[1] <= '6') {
+            info.Heading = name[1] - '0';
+            info.HideHeadingPrefix(open.Start, open.End - open.Start);
+            info.Hide(open.CloseStart, open.CloseEnd - open.CloseStart);
+            ParseInline(info, contentStart, session);
+            return true;
+        }
+        if (name == "pre") {
+            info.Code = true;
+            info.HidePrefix(open.Start, open.End - open.Start);
+            info.Hide(open.CloseStart, open.CloseEnd - open.CloseStart);
+            return true;
+        }
+        if (name == "li") {
+            if (info.HtmlListKind == 0) return false;
+            string label = info.HtmlListKind == 2 ? info.HtmlListNumber.ToString(CultureInfo.InvariantCulture) + "." : "•";
+            info.Replacements.Add(new Replacement { Start=open.Start, Length=open.End - open.Start,
+                Kind=info.HtmlListKind == 2 ? ReplacementKind.Number : ReplacementKind.Bullet, Label=label, Prefix=true });
+            info.Hide(open.CloseStart, open.CloseEnd - open.CloseStart);
+            ParseInline(info, contentStart, session);
+            return true;
+        }
+        if (name == "dt") {
+            info.AddStyle(contentStart, contentLength, Style.Bold, null);
+            info.HidePrefix(open.Start, open.End - open.Start);
+            info.Hide(open.CloseStart, open.CloseEnd - open.CloseStart);
+            ParseInline(info, contentStart, session);
+            return true;
+        }
+        if (name == "dd") {
+            info.Replacements.Add(new Replacement { Start=open.Start, Length=open.End - open.Start,
+                Kind=ReplacementKind.Spacer, Width=1.5, Scaled=true, Prefix=true });
+            info.Hide(open.CloseStart, open.CloseEnd - open.CloseStart);
+            ParseInline(info, contentStart, session);
+            return true;
+        }
+        if (name == "summary") {
+            // The fold sign stands for the hidden "<summary>" run; muted and small like the
+            // source markers around it, the title itself is bold (a heading-like row).
+            info.Replacements.Add(new Replacement { Start=open.Start, Length=open.End - open.Start,
+                Kind=ReplacementKind.Glyph, Label="▸ ", Prefix=true });
+            info.AddStyle(open.Start, open.End - open.Start, Style.Muted | Style.Small, null);
+            info.AddStyle(contentStart, contentLength, Style.Bold, null);
+            info.Hide(open.CloseStart, open.CloseEnd - open.CloseStart);
+            ParseInline(info, contentStart, session);
+            return true;
+        }
+        if (name == "figcaption") {
+            info.HtmlAlign = 1;
+            info.AddStyle(contentStart, contentLength, Style.Muted | Style.Small, null);
+            info.HidePrefix(open.Start, open.End - open.Start);
+            info.Hide(open.CloseStart, open.CloseEnd - open.CloseStart);
+            ParseInline(info, contentStart, session);
+            return true;
+        }
+        if (name == "blockquote") {
+            info.HtmlQuote++;
+            info.HtmlIndentEm = 0.9 * (info.HtmlQuote + info.HtmlDetailDepth);
+            info.HidePrefix(open.Start, open.End - open.Start);
+            info.Hide(open.CloseStart, open.CloseEnd - open.CloseStart);
+            ParseInline(info, contentStart, session);
+            return true;
+        }
+        if (name == "p" || name == "div" || name == "center") {
+            int align = HtmlAlignTag(open, text);
+            if (align == 0) return false;
+            info.HtmlAlign = align;
+            info.HidePrefix(open.Start, open.End - open.Start);
+            info.Hide(open.CloseStart, open.CloseEnd - open.CloseStart);
+            ParseInline(info, contentStart, session);
+            return true;
+        }
+        return false;
     }
 
     static void SortReplacements(LineInfo info) {
@@ -9962,9 +11306,10 @@ internal static partial class MarkdownLivePreview {
     static void ParseInline(LineInfo info, int start, Session session) {
         string text = info.Text;
         int budget = text.Length * 4;
-        int[] opens = { -1, -1, -1, -1, -1 };
-        string[] tokens = { "**", "__", "*", "_", "~~" };
-        Style[] styles = { Style.Bold, Style.Bold, Style.Italic, Style.Italic, Style.Strike };
+        Dictionary<int, InlineHtml.Tag> html = InlineHtml.Parse(text);
+        int[] opens = { -1, -1, -1, -1, -1, -1 };
+        string[] tokens = { "**", "__", "*", "_", "~~", "==" };
+        Style[] styles = { Style.Bold, Style.Bold, Style.Italic, Style.Italic, Style.Strike, Style.Highlight };
         // A link label owns its own inline markup (GFM parses emphasis, code and tags inside
         // "[...]"), so the scan walks the label's text and then skips the hidden "](url)" tail
         // whole: a marker inside the URL must never pair with the line. The opening state is
@@ -10144,6 +11489,65 @@ internal static partial class MarkdownLivePreview {
                 }
             }
             if (c == '<') {
+                InlineHtml.Tag tag;
+                if (html.TryGetValue(i, out tag) && (linkResume < 0 || tag.CloseEnd <= linkResume)) {
+                    if (tag.Name == "span" || tag.Name == "font") {
+                        string rawTag = text.Substring(i, tag.End - i);
+                        Brush color = SpanColor(rawTag); double em;
+                        double size = SpanSize(rawTag, out em);
+                        if (tag.Name == "font" || color != null || size > 0 || em > 0) {
+                            info.Hide(i, tag.End - i); info.Hide(tag.CloseStart, tag.CloseEnd - tag.CloseStart);
+                            info.AddStyle(tag.End, tag.CloseStart - tag.End, Style.None, color, size, em);
+                            i = tag.End; continue;
+                        }
+                    } else if (tag.Name == "img" || tag.Name == "picture") {
+                        InlineHtml.Tag image = tag.Name == "img" ? tag : InlineHtml.PictureImage(html, tag);
+                        if (image != null) {
+                            info.Replacements.Add(new Replacement { Start=i, Length=tag.CloseEnd - i, Kind=ReplacementKind.Image,
+                                Source=InlineHtml.Attribute(text, image, "src"), Label=InlineHtml.Attribute(text, image, "alt"),
+                                ImageWidth=InlineHtml.Dimension(text, image, "width"), ImageHeight=InlineHtml.Dimension(text, image, "height") });
+                            i = tag.CloseEnd; continue;
+                        }
+                    } else if (tag.Name == "br" || tag.Name == "wbr") {
+                        info.Replacements.Add(new Replacement { Start=i, Length=tag.End - i,
+                            Kind=tag.Name == "br" ? ReplacementKind.LineBreak : ReplacementKind.Glyph, Label="​" });
+                        i = tag.End; continue;
+                    } else {
+                        if (tag.Name == "q") {
+                            info.Replacements.Add(new Replacement { Start=i, Length=tag.End - i, Kind=ReplacementKind.Glyph, Label="“" });
+                            info.Replacements.Add(new Replacement { Start=tag.CloseStart, Length=tag.CloseEnd - tag.CloseStart, Kind=ReplacementKind.Glyph, Label="”" });
+                        } else if (tag.Name == "kbd") {
+                            // The key box's padding is real layout space, one side on each tag, so
+                            // TextTop..TextBottom box grows outside the glyphs (DrawKeyboardRange)
+                            // and the following text starts past it instead of under the box.
+                            info.HidePad(i, tag.End - i, KeyboardPadEm);
+                            info.HidePad(tag.CloseStart, tag.CloseEnd - tag.CloseStart, KeyboardPadEm);
+                        } else {
+                            info.Hide(i, tag.End - i); info.Hide(tag.CloseStart, tag.CloseEnd - tag.CloseStart);
+                        }
+                        Style style = HtmlStyle(tag.Name);
+                        info.AddStyle(tag.End, tag.CloseStart - tag.End, style, null);
+                        if (tag.Name == "a") {
+                            string href = InlineHtml.Attribute(text, tag, "href");
+                            if (!string.IsNullOrEmpty(href)) {
+                                if (info.Links == null) info.Links = new List<LinkPart>();
+                                info.Links.Add(new LinkPart { Start=i, Length=tag.CloseEnd - i, Url=href });
+                            }
+                        }
+                        if (tag.Name == "abbr" || tag.Name == "dfn" || tag.Name == "time") {
+                            string hint = InlineHtml.Attribute(text, tag, tag.Name == "time" ? "datetime" : "title");
+                            if (!string.IsNullOrEmpty(hint)) {
+                                if (info.Hints == null) info.Hints = new List<HintPart>();
+                                info.Hints.Add(new HintPart { Start=tag.End, Length=tag.CloseStart - tag.End, Text=hint });
+                            }
+                        }
+                        // HTML code has the same literal content rule as a Markdown code span.
+                        i = InlineHtml.Code(tag.Name) ? tag.CloseEnd : tag.End;
+                        continue;
+                    }
+                }
+                InlineHtml.Tag literal = InlineHtml.Read(text, i);
+                if (literal != null) { i = literal.End; continue; }
                 int lineBreak = LineBreakEnd(text, i);
                 if (lineBreak > i) {
                     // The caret line keeps the raw tag; every other line breaks, like the
@@ -10175,30 +11579,17 @@ internal static partial class MarkdownLivePreview {
                     continue;
                 }
             }
-            if (c == '<' && (MatchesTag(text, i, "span") || MatchesTag(text, i, "font"))) {
-                // <span style="color:..."> and <font color="..."> share one path: the basic
-                // view reads colour and font-size from both (MDNote.cs:83,89-95) and hides
-                // the tags. A <font> with nothing readable still hides, like the basic Span.
-                bool font = char.ToLowerInvariant(text[i + 1]) == 'f';
-                string name = font ? "font" : "span";
-                int tagEnd = Find(text, ">", i + 5, ref budget);
-                int close = tagEnd < 0 ? -1 : FindTagClose(text, tagEnd + 1, name, ref budget);
-                if (close >= 0 && tagEnd - i <= 512) {
-                    string tag = text.Substring(i, tagEnd + 1 - i);
-                    Brush color = SpanColor(tag);
-                    double em;
-                    double size = SpanSize(tag, out em);
-                    if (font || color != null || size > 0 || em > 0) {
-                        info.Hide(i, tagEnd + 1 - i);
-                        info.Hide(close, name.Length + 3);
-                        info.AddStyle(tagEnd + 1, close - tagEnd - 1, Style.None, color, size, em);
-                        // The content keeps its own inline markup: "**", "*", "~~", backticks and
-                        // links inside the tag parse here, and their styles combine with the
-                        // tag's (Bold+Size, Code+Size, Color+Bold). The closing tag is already
-                        // hidden, so the scan simply walks over it and finds nothing to pair.
-                        i = tagEnd + 1;
-                        continue;
-                    }
+            // An emoji shortcode ":name:" draws its character (Basic and Live off the caret line;
+            // a revealed caret line keeps the source like every other marker). Inline code,
+            // fenced code, front matter, link destinations and HTML tag attributes are skipped
+            // above, and the flank rule in MarkdownPlainText.EmojiAt keeps a word or URL literal.
+            if (c == ':') {
+                int emojiEnd;
+                if (MarkdownPlainText.EmojiAt(text, i, out emojiEnd)) {
+                    info.Replacements.Add(new Replacement { Start=i, Length=emojiEnd - i, Kind=ReplacementKind.Glyph,
+                        Label=EmojiShortcodes.Lookup(text.Substring(i + 1, emojiEnd - i - 2)), Emoji=true });
+                    i = emojiEnd;
+                    continue;
                 }
             }
             int kind = -1;
@@ -10217,6 +11608,73 @@ internal static partial class MarkdownLivePreview {
             }
             i += length;
         }
+    }
+
+    internal static Style HtmlStyle(string name) {
+        switch (name) {
+            case "b": case "strong": return Style.Bold;
+            case "i": case "em": case "cite": return Style.Italic;
+            case "s": case "del": case "strike": return Style.Strike;
+            case "code": case "tt": case "samp": return Style.Code;
+            case "var": return Style.Code | Style.Italic;
+            case "mark": return Style.Highlight;
+            case "a": return Style.Link;
+            case "sup": return Style.Superscript | Style.HtmlSup;
+            case "sub": return Style.Subscript | Style.HtmlSub;
+            case "u": case "ins": return Style.Underline;
+            case "small": return Style.HtmlSmall;
+            case "summary": case "dt": return Style.Bold;
+            case "figcaption": return Style.Muted | Style.Small;
+            case "kbd": return Style.Code | Style.Keyboard;
+            case "abbr": case "dfn": return Style.Dotted;
+            default: return Style.None;
+        }
+    }
+    // Merge decorations instead of losing the outer strike when an inner underline is applied.
+    internal static void HtmlProperties(VisualLineElementTextRunProperties p, Style style, Brush muted) {
+        HtmlProperties(p, style, muted, false);
+    }
+    // inlineScript: the run belongs to a live visual line, where BlockRenderer draws the HTML
+    // sup/sub glyphs itself (see below). A table cell's own text runs cannot be drawn there, so
+    // they keep WPF's baseline alignment.
+    internal static void HtmlProperties(VisualLineElementTextRunProperties p, Style style, Brush muted, bool inlineScript) {
+        if ((style & (Style.Strike | Style.Underline | Style.Dotted)) != 0) {
+            var decorations = new TextDecorationCollection();
+            if (p.TextDecorations != null) foreach (TextDecoration item in p.TextDecorations) decorations.Add(item);
+            if ((style & Style.Strike) != 0) foreach (TextDecoration item in TextDecorations.Strikethrough) decorations.Add(item);
+            if ((style & Style.Underline) != 0) foreach (TextDecoration item in TextDecorations.Underline) decorations.Add(item);
+            if ((style & Style.Dotted) != 0) {
+                var pen = new Pen(muted, 1) { DashStyle=DashStyles.Dot }; pen.Freeze();
+                decorations.Add(new TextDecoration(TextDecorationLocation.Underline, pen, 0,
+                    TextDecorationUnit.FontRecommended, TextDecorationUnit.Pixel));
+            }
+            decorations.Freeze(); p.SetTextDecorations(decorations);
+        }
+        double size = p.FontRenderingEmSize;
+        if ((style & Style.HtmlSmall) != 0) { SetLiveEmSize(p, size * .85); size = p.FontRenderingEmSize; }
+        if ((style & (Style.Superscript | Style.Subscript)) != 0) {
+            // 0.75 em, the browser's smaller script size, for the advance of the run. Both sizes
+            // move together: a run drawn at 0.75 em but still hinted at the body size advanced
+            // as wide as the full-size glyph and left a visible gap after x<sup>2</sup>.
+            SetLiveEmSize(p, size * .75);
+            // WPF's own BaselineAlignment lifts a script run by 2/3 of the LINE's ascent
+            // (TextStore.AdjustRunsVerticalOffset: super = top*2/3), far above a browser's
+            // superscript. HTML <sup>/<sub> therefore keep the baseline here and BlockRenderer
+            // draws their glyphs at the wanted offset; a footnote marker (a plain
+            // Superscript/Subscript part) and a table cell keep the alignment.
+            bool htmlScript = (style & (Style.HtmlSup | Style.HtmlSub)) != 0;
+            if (!htmlScript || !inlineScript)
+                p.SetBaselineAlignment((style & Style.Subscript) != 0 ? BaselineAlignment.Subscript : BaselineAlignment.Superscript);
+        }
+    }
+    // The live view changes a run's size in many places; the rendering size draws the glyphs and
+    // the hinting size is what a grid-fitted line measures their advance with, so they always
+    // move together (a size left behind measures one run at another run's em).
+    static void SetLiveEmSize(VisualLineElementTextRunProperties p, double size) {
+        if (size < .1) size = .1;
+        if (size > 200) size = 200;
+        p.SetFontRenderingEmSize(size);
+        p.SetFontHintingEmSize(size);
     }
 
     // A reference label as the print and TXT renderers match it: the raw text between the
@@ -10461,7 +11919,11 @@ internal static partial class MarkdownLivePreview {
             // A list row keeps its fixed 4 px: scaling it with the font let small fonts at tight
             // line spacing pack rows below the gutter label height (settings probe, 8 px / 50%).
             else if (info.List!=null || info.ItemList!=null) height+=4;
-            return new StrutElement(height, info.Row, line.Length == 0, session, LazyQuoteGenerator.Applies(session, line, info));
+            // A front matter box is ordinary text rows. No other rule may collapse them: a zero
+            // row has no character rect, so the gutter skipped its number and the whole block
+            // read as missing (only line 4 onward were on screen).
+            if (info.FrontMatter && height < session.Options.FontSize) height = Math.Max(session.Options.FontSize, session.Options.FontSize * session.Options.LinePercent / 100);
+            return new StrutElement(height, info.Row, line.Length == 0, session, LazyQuoteGenerator.Lead(session, line, info));
         }
     }
 
@@ -10487,15 +11949,37 @@ internal static partial class MarkdownLivePreview {
                 !info.Table && !info.Delimiter && info.SetextUnderline == 0 && !info.RefDefinition && info.MathCount == 0 &&
                 info.MathRemaining == 0 && line.Length > 0 && !session.Raw(line);
         }
+        // A block-HTML content line is indented by its open details/blockquote containers and,
+        // while it is centered or right aligned, gets the leading pad that centers it. Both are
+        // one zero-text element in the strut's slot; the strut names the column after it as the
+        // line's start stop, so caret and hit-testing stay on the visible text.
+        internal static bool AlignOrIndent(Session session, DocumentLine line, LineInfo info) {
+            return (info.HtmlAlign > 0 || info.HtmlIndentEm > 0) && !info.HtmlTagLine && !info.Code && !info.Table && !info.Delimiter &&
+                info.SetextUnderline == 0 && !info.RefDefinition && info.MathCount == 0 && info.MathRemaining == 0 &&
+                line.Length > 0 && !session.Raw(line);
+        }
+        internal static bool Lead(Session session, DocumentLine line, LineInfo info) {
+            return Applies(session, line, info) || AlignOrIndent(session, line, info);
+        }
         public override int GetFirstInterestedOffset(int startOffset) {
             DocumentLine line = CurrentContext.VisualLine.FirstDocumentLine;
             if (startOffset > line.Offset) return -1;
-            return Applies(session, line, session.Info(line)) ? line.Offset : -1;
+            return Lead(session, line, session.Info(line)) ? line.Offset : -1;
         }
         public override VisualLineElement ConstructElement(int offset) {
             LineInfo info = session.Info(CurrentContext.VisualLine.FirstDocumentLine);
-            if (!info.LazyQuote) return new MarkerElement(0, session.HeadingShift(info.Heading), null, false, false, true, true);
-            return new MarkerElement(0, session.Options.FontSize * 0.9 * info.LazyLevels, null, false, false, true);
+            double width = 0;
+            bool mark = false;
+            if (info.LazyQuote) width += session.Options.FontSize * 0.9 * info.LazyLevels;
+            else if (SetextMark(session, CurrentContext.VisualLine.FirstDocumentLine, info)) {
+                width += session.HeadingShift(info.Heading);
+                mark = true;
+            }
+            if (AlignOrIndent(session, CurrentContext.VisualLine.FirstDocumentLine, info)) {
+                width += session.Options.FontSize * info.HtmlIndentEm;
+                width += session.HtmlAlignPad(info);
+            }
+            return new MarkerElement(0, width, null, false, false, true, mark);
         }
     }
 
@@ -10593,6 +12077,17 @@ internal static partial class MarkdownLivePreview {
         }
         bool FoldedSetext() { return info.Setext && session.HideDelimiter(line); }
         public override VisualLineElement ConstructElement(int offset) {
+            // The [TOC] box and the footnote definition's back arrow share the line-end offset
+            // with the fold elements below a header or a reference run. They are taken first so
+            // a fold branch cannot answer for them (which would leave the replacement unconsumed
+            // and ask for the same offset forever).
+            if (!raw && index < info.Replacements.Count) {
+                Replacement special = info.Replacements[index];
+                if (special.Kind == ReplacementKind.Toc || special.Kind == ReplacementKind.Backref) {
+                    index++;
+                    return special.Kind == ReplacementKind.Toc ? (VisualLineElement)new TocElement(special.Length, session, line) : new BackrefElement(special.Length, session);
+                }
+            }
             // The delimiter's source stays intact. Its height-tree row is collapsed and its
             // characters join the header visual line, so no default-font-sized empty band remains.
             if(offset==line.EndOffset&&info.Header&&session.HideDelimiter(line))return new InvisibleElement(line.DelimiterLength+line.NextLine.Length,0);
@@ -10633,7 +12128,7 @@ internal static partial class MarkdownLivePreview {
             // stop of its own. Only the no-reveal mode takes part; the raw reveal keeps every
             // marker stop it has today.
             bool lead = session.Options.HideMarkers && replacement.Start < info.LeadEnd;
-            if (replacement.Kind == ReplacementKind.Hidden) return new InvisibleElement(replacement.Length, 0, lead, visualLine, replacement.Mark && session.Options.HeadingMarks ? session.HeadingShift(info.Heading) : 0);
+            if (replacement.Kind == ReplacementKind.Hidden) return new InvisibleElement(replacement.Length, 0, lead, visualLine, replacement.Mark && session.Options.HeadingMarks ? session.HeadingShift(info.Heading) : 0, replacement.PadEm);
             if (replacement.Kind == ReplacementKind.LineBreak) return new BreakElement(replacement.Length);
             if (replacement.Kind == ReplacementKind.Spacer) return new MarkerElement(replacement.Length, replacement.Scaled ? replacement.Width * session.Options.FontSize : replacement.Width, null, false, false, lead);
             if (replacement.Kind == ReplacementKind.Bullet) return new MarkerElement(replacement.Length, ListMarkerSlot * session.Options.FontScale, "•", false, false, lead);
@@ -10653,7 +12148,10 @@ internal static partial class MarkdownLivePreview {
                 if (session.MathTouched(line, replacement) || !MathRender.Check(replacement.Source)) return null;
                 return new MathElement(replacement.Length, replacement.Source, replacement.Level == 1, session.Options.Family, session.MathAvailable);
             }
-            if (replacement.Kind == ReplacementKind.Glyph) return new FormattedTextElement(replacement.Label, replacement.Length);
+            if (replacement.Kind == ReplacementKind.Glyph) {
+                if (replacement.Emoji) return new EmojiElement(replacement.Length, replacement.Label);
+                return new FormattedTextElement(replacement.Label, replacement.Length);
+            }
             if (replacement.Kind == ReplacementKind.Alert) return new AlertElement(replacement.Length, (AlertKind)replacement.Level, replacement.Label, session.Colors.Alert[replacement.Level], lead);
             DocumentLine taskLine = line;
             int column = replacement.Start;
@@ -10685,13 +12183,20 @@ internal static partial class MarkdownLivePreview {
         readonly VisualLine line;
         // Width of the run: 0 for hidden markup; an ATX heading's prefix takes the level mark's room.
         readonly double gap;
+        // A <kbd> tag's box padding, in ems of the run's own (final) font size, so a key inside a
+        // heading gets the same proportion. Kept as a factor because the size is not known here:
+        // MarkdownTransformer sizes the element after this one is constructed.
+        readonly double gapEm;
         internal InvisibleElement(int documentLength, double height) : this(documentLength, height, false, null) { }
         internal InvisibleElement(int documentLength, double height, bool prefix) : this(documentLength, height, prefix, null) { }
         internal InvisibleElement(int documentLength, double height, bool prefix, VisualLine line) : this(documentLength, height, prefix, line, 0) { }
-        internal InvisibleElement(int documentLength, double height, bool prefix, VisualLine line, double gap) : base(1, documentLength) { this.height = height; this.prefix = prefix; this.line = line; this.gap = gap; }
+        internal InvisibleElement(int documentLength, double height, bool prefix, VisualLine line, double gap) : this(documentLength, height, prefix, line, gap, 0) { }
+        internal InvisibleElement(int documentLength, double height, bool prefix, VisualLine line, double gap, double gapEm) : base(1, documentLength) { this.height = height; this.prefix = prefix; this.line = line; this.gap = gap; this.gapEm = gapEm; }
         internal double Gap { get { return gap; } }
+        internal double PadEm { get { return gapEm; } }
         public override TextRun CreateTextRun(int startVisualColumn, ITextRunConstructionContext context) {
-            return new InvisibleRun(TextRunProperties, height, gap);
+            double width = gapEm > 0 ? gapEm * TextRunProperties.FontRenderingEmSize : gap;
+            return new InvisibleRun(TextRunProperties, height, width);
         }
         public override bool IsWhitespace(int visualColumn) { return true; }
         public override int GetNextCaretPosition(int visualColumn, LogicalDirection direction, CaretPositioningMode mode) {
@@ -11182,6 +12687,209 @@ internal static partial class MarkdownLivePreview {
         }
     }
 
+    /* The in-document table of contents. One element stands for the whole "[TOC]" line off the
+       caret (Live) or follows its muted marker row (Basic); the document text stays the source
+       and the box is drawn only. Rows come from the outline panel's published heading list
+       (TocData, capped by the publisher); a click jumps like an outline row. The run reports the
+       box top as its baseline, so the box hangs below the line instead of raising it. */
+    internal sealed class TocElement : VisualLineElement {
+        readonly Session session;
+        internal readonly DocumentLine Line;
+        internal TocLayout Layout;
+        internal TocElement(int documentLength, Session session, DocumentLine line) : base(1, documentLength) { this.session = session; Line = line; }
+        public override bool IsWhitespace(int visualColumn) { return true; }
+        public override int GetNextCaretPosition(int visualColumn, LogicalDirection direction, CaretPositioningMode mode) { return -1; }
+        public override TextRun CreateTextRun(int column, ITextRunConstructionContext context) { return new TocRun(TextRunProperties, session, this); }
+        // The entry row under a document-coordinate point, or -1 when the point is outside the
+        // drawn rows (the box padding, the marker row above it, or a collapsed empty box).
+        internal int RowAt(VisualLine line, Point documentPoint) {
+            if (Layout == null || Layout.Count == 0 || line == null || VisualColumn < 0) return -1;
+            double baseline = line.GetVisualPosition(VisualColumn, VisualYPosition.Baseline).Y;
+            double top = (Layout.WholeLine ? baseline - Layout.BoxHeight : baseline + Layout.TopGap) + Layout.PadY;
+            double local = documentPoint.Y - top;
+            if (local < 0) return -1;
+            int row = (int)(local / Layout.RowHeight);
+            return row < Layout.Count ? row : -1;
+        }
+    }
+    internal sealed class TocRun : InvisibleRun {
+        readonly TocElement element;
+        internal TocRun(TextRunProperties properties, Session session, TocElement element) : base(properties, 0) {
+            this.element = element;
+            element.Layout = TocLayout.Build(properties, session, element.DocumentLength > 0, element.Line);
+        }
+        // Basic's box follows the marker text on its own row when it does not fit beside it
+        // (the usual case: the box spans the text column).
+        public override LineBreakCondition BreakBefore { get { return LineBreakCondition.BreakPossible; } }
+        public override TextEmbeddedObjectMetrics Format(double remainingParagraphWidth) {
+            TocLayout layout = element.Layout;
+            if (layout == null || layout.Count == 0) return new TextEmbeddedObjectMetrics(0, 0, 0);
+            // A whole-line box reports the box height as its baseline: the line's baseline then
+            // sits at the box's bottom edge, so Draw can put the box top at the line top. The
+            // appended (Basic) box keeps baseline 0 and hangs below the marker row instead.
+            return new TextEmbeddedObjectMetrics(layout.BoxWidth, layout.Height, layout.WholeLine ? layout.BoxHeight : 0);
+        }
+        public override Rect ComputeBoundingBox(bool rightToLeft, bool sideways) {
+            TocLayout layout = element.Layout;
+            if (layout == null || layout.Count == 0) return Rect.Empty;
+            return layout.WholeLine ? new Rect(0, -layout.BoxHeight, layout.BoxWidth, layout.Height)
+                : new Rect(-layout.LeftShift, 0, layout.BoxWidth, layout.Height);
+        }
+        public override void Draw(DrawingContext context, Point origin, bool rightToLeft, bool sideways) {
+            TocLayout layout = element.Layout;
+            if (layout == null || layout.Count == 0) return;
+            layout.BuildDrawing();
+            if (layout.Drawing == null) return;
+            double top = layout.WholeLine ? origin.Y - layout.BoxHeight : origin.Y + layout.TopGap;
+            // Basic's element sits after the marker text; the box starts at the line's left edge.
+            double left = Math.Max(0, origin.X - layout.LeftShift);
+            context.PushTransform(new TranslateTransform(left, top));
+            context.DrawDrawing(layout.Drawing);
+            context.Pop();
+        }
+    }
+    // The measured box: rows, indents and the padding around them. Built once per element
+    // (a visual-line build), never per frame; the theme, width or TocData change redraws lines.
+    internal sealed class TocLayout {
+        internal FormattedText[] Rows;
+        internal double[] Indents;
+        internal int Count;
+        internal double RowHeight, PadX, PadY, TopGap, BoxWidth, BoxHeight, Height;
+        // The box covers the line (Live, off the caret) rather than following its marker row
+        // (Basic): the run's baseline and the drawn top differ between the two.
+        internal bool WholeLine;
+        // Basic only: the width of the marker row drawn before this element, so the box can
+        // start at the line's left edge instead of after "[TOC]".
+        internal double LeftShift;
+        internal Brush Background;
+        internal Pen Border;
+        // The whole box is one cached drawing (built once per element over its rows), so a frame
+        // that repaints the box pays one DrawDrawing call, not one per heading.
+        internal DrawingGroup Drawing;
+        internal void BuildDrawing() {
+            if (Drawing != null || Count == 0) return;
+            var group = new DrawingGroup();
+            using (DrawingContext dc = group.Open()) {
+                Rect box = new Rect(0, 0, BoxWidth, BoxHeight);
+                dc.PushOpacity(0.5);
+                dc.DrawRoundedRectangle(Background, null, box, 4, 4);
+                dc.Pop();
+                dc.DrawRoundedRectangle(null, Border, box, 4, 4);
+                for (int i = 0; i < Count; i++) {
+                    FormattedText text = Rows[i];
+                    if (text == null) continue;
+                    double y = PadY + i * RowHeight + (RowHeight - text.Height) / 2;
+                    dc.DrawText(text, new Point(PadX + Indents[i], y));
+                }
+            }
+            group.Freeze();
+            Drawing = group;
+        }
+        internal static TocLayout Build(TextRunProperties properties, Session session, bool wholeLine, DocumentLine line) {
+            var layout = new TocLayout();
+            layout.WholeLine = wholeLine;
+            TocData data = session.Toc;
+            TocEntry[] entries = data != null && data.Entries != null && Object.ReferenceEquals(data.Document, session.Document) ? data.Entries : null;
+            layout.Count = entries == null ? 0 : entries.Length;
+            layout.TopGap = wholeLine ? 0 : Math.Round(properties.FontRenderingEmSize * 0.4);
+            layout.Background = session.Colors.Code;
+            layout.Border = new Pen(session.Colors.Rule, 1);
+            layout.Border.Freeze();
+            if (layout.Count == 0) return layout;
+            double em = Math.Max(6, properties.FontRenderingEmSize);
+            layout.RowHeight = Math.Ceiling(em * 1.45);
+            layout.PadX = Math.Round(em * 0.8);
+            layout.PadY = Math.Round(em * 0.5);
+            double view = session.View.ActualWidth;
+            // The box follows the visible text column: a narrow window keeps its margin, and a
+            // view that has not been measured yet (width 0) gets a readable default.
+            double width = view > 80 ? Math.Min(view - 24, 600) : view > 0 ? Math.Max(40, view - 8) : 320;
+            layout.BoxWidth = Math.Round(width);
+            layout.BoxHeight = Math.Ceiling(layout.PadY * 2 + layout.Count * layout.RowHeight);
+            layout.Height = layout.BoxHeight + layout.TopGap;
+            if (!wholeLine && line != null && !line.IsDeleted && session.Document != null) {
+                string source = session.Document.GetText(line);
+                var measure = new FormattedText(source, properties.CultureInfo, FlowDirection.LeftToRight,
+                    properties.Typeface, properties.FontRenderingEmSize, properties.ForegroundBrush);
+                layout.LeftShift = measure.WidthIncludingTrailingWhitespace;
+            }
+            layout.Rows = new FormattedText[layout.Count];
+            layout.Indents = new double[layout.Count];
+            double dip = session.PixelsPerDip();
+            Typeface face = properties.Typeface;
+            Brush ink = session.Colors.Muted;
+            for (int i = 0; i < layout.Count; i++) {
+                TocEntry entry = entries[i];
+                int level = Math.Max(1, Math.Min(6, entry.Level));
+                double indent = (level - 1) * em * 0.9;
+                layout.Indents[i] = indent;
+                var text = new FormattedText(entry.Title == null ? "" : entry.Title, properties.CultureInfo, FlowDirection.LeftToRight,
+                    face, em * 0.92, ink, dip);
+                text.MaxTextWidth = Math.Max(20, layout.BoxWidth - layout.PadX * 2 - indent);
+                text.MaxLineCount = 1;
+                text.Trimming = TextTrimming.CharacterEllipsis;
+                layout.Rows[i] = text;
+            }
+            return layout;
+        }
+    }
+    // The footnote definition's drawn back arrow (U+21A9) at the line's end: a small muted
+    // glyph, not document text. The element maps to the line-end offset, where the parse's
+    // zero-length link part answers a click or hover. The glyph is built from its code point
+    // (0x21A9) so the BOM-less source never carries a character the system code page lacks.
+    internal sealed class BackrefElement : VisualLineElement {
+        readonly Session session;
+        internal BackrefElement(int documentLength, Session session) : base(1, documentLength) { this.session = session; }
+        public override bool IsWhitespace(int visualColumn) { return true; }
+        public override int GetNextCaretPosition(int visualColumn, LogicalDirection direction, CaretPositioningMode mode) { return -1; }
+        public override TextRun CreateTextRun(int column, ITextRunConstructionContext context) { return new BackrefRun(TextRunProperties, session); }
+    }
+    internal sealed class BackrefRun : InvisibleRun {
+        readonly FormattedText text;
+        readonly double gap;
+        internal BackrefRun(TextRunProperties properties, Session session) : base(properties, 0) {
+            gap = Math.Round(properties.FontRenderingEmSize * 0.5);
+            text = new FormattedText(((char)0x21A9).ToString(), properties.CultureInfo, FlowDirection.LeftToRight,
+                properties.Typeface, properties.FontRenderingEmSize * 0.85, session.Colors.Muted, session.PixelsPerDip());
+        }
+        public override TextEmbeddedObjectMetrics Format(double remainingParagraphWidth) {
+            return new TextEmbeddedObjectMetrics(gap + text.WidthIncludingTrailingWhitespace, text.Height, text.Baseline);
+        }
+        public override Rect ComputeBoundingBox(bool rightToLeft, bool sideways) {
+            return new Rect(0, -text.Baseline, gap + text.WidthIncludingTrailingWhitespace, text.Height);
+        }
+        public override void Draw(DrawingContext context, Point origin, bool rightToLeft, bool sideways) {
+            context.DrawText(text, new Point(origin.X + gap, origin.Y - text.Baseline));
+        }
+    }
+    // A ":name:" shortcode's emoji glyph. The emoji face comes first so a document font without
+    // the character (Malgun Gothic) never draws a missing-glyph box; WPF's own fallback covers
+    // a system without Segoe UI Emoji.
+    internal sealed class EmojiElement : VisualLineElement {
+        readonly string glyph;
+        internal EmojiElement(int documentLength, string glyph) : base(1, documentLength) { this.glyph = glyph; }
+        public override TextRun CreateTextRun(int column, ITextRunConstructionContext context) { return new EmojiRun(TextRunProperties, glyph); }
+    }
+    internal sealed class EmojiRun : InvisibleRun {
+        readonly FormattedText text;
+        internal EmojiRun(TextRunProperties properties, string glyph) : base(properties, 0) {
+            Typeface face = properties.Typeface;
+            string baseName = face.FontFamily.Source;
+            var family = new FontFamily(String.IsNullOrEmpty(baseName) ? "Segoe UI Emoji" : "Segoe UI Emoji, " + baseName);
+            text = new FormattedText(glyph, properties.CultureInfo, FlowDirection.LeftToRight,
+                new Typeface(family, face.Style, face.Weight, face.Stretch), properties.FontRenderingEmSize, properties.ForegroundBrush);
+        }
+        public override TextEmbeddedObjectMetrics Format(double remainingParagraphWidth) {
+            return new TextEmbeddedObjectMetrics(text.WidthIncludingTrailingWhitespace, text.Height, text.Baseline);
+        }
+        public override Rect ComputeBoundingBox(bool rightToLeft, bool sideways) {
+            return new Rect(0, -text.Baseline, text.WidthIncludingTrailingWhitespace, text.Height);
+        }
+        public override void Draw(DrawingContext context, Point origin, bool rightToLeft, bool sideways) {
+            context.DrawText(text, new Point(origin.X, origin.Y - text.Baseline));
+        }
+    }
+
     internal sealed class MarkdownTransformer : DocumentColorizingTransformer {
         readonly Session session;
         internal MarkdownTransformer(Session session) { this.session = session; }
@@ -11194,10 +12902,10 @@ internal static partial class MarkdownLivePreview {
             LineInfo info = session.Info(line);
             if (line.Length == 0 || info.Row!=null) return;
             if ((info.Delimiter || info.SetextUnderline > 0) && !session.Raw(line)) {
-                ChangeLinePart(line.Offset,line.EndOffset,delegate(VisualLineElement element) { element.TextRunProperties.SetFontRenderingEmSize(.1); });
+                ChangeLinePart(line.Offset,line.EndOffset,delegate(VisualLineElement element) { SetLiveEmSize(element.TextRunProperties, .1); });
                 return;
             }
-            if (info.Heading > 0 || info.Quote || info.Code || info.Header) {
+            if (info.Heading > 0 || info.Quote || info.HtmlQuote > 0 || info.Code || info.Header) {
                 // A heading inside a list keeps its bullet at body size; only the text after the
                 // list prefix gets the heading typeface and size. A quote inside a list likewise
                 // mutes only the item text, never the bullet or the number.
@@ -11207,11 +12915,15 @@ internal static partial class MarkdownLivePreview {
                     Typeface old = p.Typeface;
                     p.SetTypeface(new Typeface(info.Code ? CodeFamily : old.FontFamily, old.Style,
                         info.Heading > 0 || info.Header ? FontWeights.Bold : old.Weight, old.Stretch));
-                    if (info.Heading > 0) p.SetFontRenderingEmSize(session.Options.FontSize * HeadingScale[info.Heading]);
-                    if (info.Quote) p.SetForegroundBrush(session.Colors.QuoteText);
+                    if (info.Heading > 0) SetLiveEmSize(p, session.Options.FontSize * HeadingScale[info.Heading]);
+                    if (info.Quote || info.HtmlQuote > 0) p.SetForegroundBrush(session.Colors.QuoteText);
                 });
             }
+            bool rawLine = session.Raw(line);
             foreach (StyledPart part in info.Styles) {
+                // The revealed caret line is source text: its <sup>/<sub> content keeps the
+                // document's own ink instead of the script's small, shifted one.
+                if (rawLine && (part.Style & (Style.HtmlSup | Style.HtmlSub)) != 0) continue;
                 StyledPart captured = part;
                 ChangeLinePart(line.Offset + part.Start, line.Offset + part.Start + part.Length, delegate(VisualLineElement element) {
                     VisualLineElementTextRunProperties p = element.TextRunProperties;
@@ -11220,24 +12932,68 @@ internal static partial class MarkdownLivePreview {
                     p.SetTypeface(new Typeface((style & Style.Code) != 0 ? CodeFamily : old.FontFamily,
                         (style & Style.Italic) != 0 ? FontStyles.Italic : old.Style,
                         (style & Style.Bold) != 0 ? FontWeights.Bold : (style & Style.SemiBold) != 0 ? FontWeights.SemiBold : old.Weight, old.Stretch));
-                    if ((style & Style.Strike) != 0) p.SetTextDecorations(TextDecorations.Strikethrough);
+                    // Decorations and relative sizes are applied below, after absolute span sizes.
                     if ((style & Style.Link) != 0) p.SetForegroundBrush(session.Colors.Link);
                     if ((style & Style.Muted) != 0) p.SetForegroundBrush(session.Colors.Muted);
                     if ((style & Style.Code) != 0) element.BackgroundBrush = session.Colors.InlineCode;
+                    if ((style & Style.Highlight) != 0) element.BackgroundBrush = session.Colors.Highlight;
                     if (captured.Color != null) p.SetForegroundBrush(captured.Color);
-                    if (captured.Size > 0) p.SetFontRenderingEmSize(captured.Size);
+                    if (captured.Size > 0) SetLiveEmSize(p, captured.Size);
                     else if (captured.SizeEm > 0) {
                         double em = session.Options.FontSize * captured.SizeEm;
                         if (em < 6) em = 6;
                         if (em > 120) em = 120;
-                        p.SetFontRenderingEmSize(em);
+                        SetLiveEmSize(p, em);
                     }
-                    if ((style & Style.Small) != 0) p.SetFontRenderingEmSize(session.Options.FontSize * 0.9);
-                    if ((style & Style.Superscript) != 0) {
-                        p.SetFontRenderingEmSize(session.Options.FontSize * 0.75);
-                        p.SetBaselineAlignment(BaselineAlignment.Superscript);
-                    }
+                    if ((style & Style.Small) != 0) SetLiveEmSize(p, session.Options.FontSize * 0.9);
+                    HtmlProperties(p, style, session.Colors.Muted, true);
                 });
+            }
+            // <sup>/<sub> keeps the 0.75 em run (its advance is the small text's own width) but
+            // shows no ink off the caret line: BlockRenderer draws those glyphs at the browser's
+            // offset there. The revealed (raw) caret line is source text and keeps its own ink.
+            // The element's own background (inline code, highlight) is handed over too: the text
+            // layer paints it above a background renderer, so the renderer fills the same span
+            // before it draws the glyphs (ScriptBackground).
+            if (!rawLine) {
+                foreach (StyledPart part in info.Styles) {
+                    if ((part.Style & (Style.HtmlSup | Style.HtmlSub)) == 0) continue;
+                    ChangeLinePart(line.Offset + part.Start, line.Offset + part.Start + part.Length, delegate(VisualLineElement element) {
+                        // Only a character-for-character run is redrawn by DrawScriptText. An
+                        // element that draws its own glyph (an HTML entity, an emoji, a formula)
+                        // has no text run to repaint there, so it keeps its ink and stays visible
+                        // at the baseline (unraised) instead of turning transparent.
+                        if (element.DocumentLength <= 0 || element.DocumentLength != element.VisualLength) return;
+                        element.TextRunProperties.SetForegroundBrush(Brushes.Transparent);
+                        if (element.BackgroundBrush != null) element.BackgroundBrush = null;
+                    });
+                }
+            }
+            // <kbd> draws its own rounded key box in BlockRenderer (DrawKeyboardRange), over the
+            // width the hidden tag runs reserve. The inline code shade the run would paint covers
+            // the glyph band only, and the text layer paints it AFTER the background renderer, so
+            // it hid the box's top and bottom border. Drop that shade and let the renderer fill
+            // the whole padded box. Only the code brush goes: a nested <mark> keeps its highlight
+            // (the box fill shows around it). The raw caret line keeps the source look.
+            if (!rawLine) {
+                foreach (StyledPart part in info.Styles) {
+                    if ((part.Style & Style.Keyboard) == 0) continue;
+                    ChangeLinePart(line.Offset + part.Start, line.Offset + part.Start + part.Length, delegate(VisualLineElement element) {
+                        if (Object.ReferenceEquals(element.BackgroundBrush, session.Colors.InlineCode)) element.BackgroundBrush = null;
+                    });
+                }
+            }
+            // 11-09: while a composition string is drawn right after the pending closing-edge
+            // space, the space and the hidden closers before it take the pair's span box, so
+            // TextView paints one box over the span text, the space and the composing syllable
+            // instead of ending it before them. A revealed (raw) caret line keeps its marker
+            // glyphs plain; only its space joins the span there.
+            int boxStart, boxSpaceStart, boxEnd;
+            Brush boxBrush;
+            if (session.CloseSpaceBoxRange(line, out boxStart, out boxSpaceStart, out boxEnd, out boxBrush)) {
+                Brush paint = boxBrush;
+                ChangeLinePart(line.Offset + (rawLine ? boxSpaceStart : boxStart), line.Offset + boxEnd,
+                    delegate(VisualLineElement element) { element.BackgroundBrush = paint; });
             }
         }
     }
@@ -11245,7 +13001,12 @@ internal static partial class MarkdownLivePreview {
     internal sealed class BlockRenderer : IBackgroundRenderer {
         readonly Session session;
         Palette colors;
-        Pen rule, quote, tableRule;
+        Pen rule, quote, detailsBar, tableRule;
+        // The code block copy button's glyph pen (muted ink, 1.5 on the 24 unit grid = 1 px at 16 px).
+        Pen copyPen;
+        // The Hover resource behind the icon; looked up again when the palette (theme) changes.
+        Brush hoverBrush;
+        bool hoverLoaded;
         // The 4 px bar of an alert's level, one pen per AlertKind (index 0 unused).
         readonly Pen[] alertBars = new Pen[6];
         internal BlockRenderer(Session session) {
@@ -11259,12 +13020,49 @@ internal static partial class MarkdownLivePreview {
         void EnsurePens() {
             if (ReferenceEquals(colors, session.Colors)) return;
             colors = session.Colors;
+            hoverLoaded = false;
             rule = new Pen(colors.Rule, 1);
             rule.Freeze();
             quote = new Pen(colors.QuoteBar, 3);
             quote.Freeze();
+            // <details> groups read like a quote level, with a thinner bar (2 px).
+            detailsBar = new Pen(colors.QuoteBar, 2);
+            detailsBar.Freeze();
+            copyPen = new Pen(colors.Muted, 1.5) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round, LineJoin = PenLineJoin.Round };
+            copyPen.Freeze();
             for (int kind = 1; kind <= 5; kind++) { alertBars[kind] = new Pen(colors.Alert[kind], 4); alertBars[kind].Freeze(); }
             tableRule=new Pen(BrushOf(session.Options.Dark ? "#707C8E" : "#ADB8C6"),.5); tableRule.Freeze();
+        }
+        Brush HoverBrush() {
+            if (!hoverLoaded) { hoverBrush = session.Editor.TryFindResource("Hover") as Brush; hoverLoaded = true; }
+            return hoverBrush;
+        }
+        // The copy button of the fenced block the pointer is over: a 16 px icon at the top-right of
+        // the block's first content row (inset 6 px), the Hover square (22 x 22) under the pointer,
+        // and the check mark the icon holds for 1.2 s after a copy. Background layer only, so the
+        // button is never part of printing, HTML export or TXT conversion.
+        void DrawCodeCopy(TextView textView, DrawingContext drawingContext, double width) {
+            int opener = session.CodeCopyOpener;
+            if (opener <= 0) return;
+            int firstContent = opener + 1;
+            VisualLine row = null;
+            foreach (VisualLine line in textView.VisualLines) {
+                if (!line.IsDisposed && line.FirstDocumentLine.LineNumber == firstContent) { row = line; break; }
+            }
+            if (row == null) return;
+            double top = row.VisualTop - textView.VerticalOffset;
+            Rect iconBox = new Rect(width - 6 - 16, top + 6, 16, 16);
+            Rect square = new Rect(iconBox.X - 3, iconBox.Y - 3, 22, 22);
+            if (session.CodeCopyOnIcon) {
+                Brush hover = HoverBrush();
+                if (hover != null) drawingContext.DrawRoundedRectangle(hover, null, square, 4, 4);
+            }
+            Geometry glyph = session.CodeCopyCheck ? CopyCheckGeometry : CopyIconGeometry;
+            drawingContext.PushTransform(new TranslateTransform(iconBox.X, iconBox.Y));
+            drawingContext.PushTransform(new ScaleTransform(16 / 24.0, 16 / 24.0));
+            drawingContext.DrawGeometry(null, copyPen, glyph);
+            drawingContext.Pop();
+            drawingContext.Pop();
         }
         // The heading level mark (HeadingMark): n equal bars (wider mark for higher levels) on the
         // heading's first visual line, in the room its prefix element (or a setext line's own element)
@@ -11374,7 +13172,16 @@ internal static partial class MarkdownLivePreview {
                 LineInfo info = session.Info(line.FirstDocumentLine);
                 double y = line.VisualTop - textView.VerticalOffset;
                 if (info.Code) drawingContext.DrawRectangle(session.Colors.Code, null, new Rect(0, y, width, line.Height));
+                // Front matter shares the code block's shade, lighter (60% of the same brush).
+                else if (info.FrontMatter) {
+                    drawingContext.PushOpacity(0.6);
+                    drawingContext.DrawRectangle(session.Colors.Code, null, new Rect(0, y, width, line.Height));
+                    drawingContext.Pop();
+                }
                 bool raw = session.Raw(line.FirstDocumentLine);
+                // A table row's cell shade is painted below, so its key boxes are drawn after it.
+                if (!raw && info.Row == null) DrawKeyboardBoxes(drawingContext, textView, line, info);
+                if (!raw && info.Row == null) DrawScriptText(drawingContext, textView, line, info);
                 if (info.Quote && !raw) {
                     int levels = 0;
                     foreach (VisualLineElement element in line.Elements) {
@@ -11396,6 +13203,20 @@ internal static partial class MarkdownLivePreview {
                         }
                     }
                 }
+                // Block HTML containers: <blockquote> content keeps the quote's bar and its
+                // 0.9 em indent; <details> content gets the thinner muted group bar.
+                if (info.HtmlQuote > 0 && !raw) {
+                    for (int bar = 0; bar < info.HtmlQuote; bar++) {
+                        double x = session.Options.FontSize * (0.9 * bar + 0.23) - textView.HorizontalOffset;
+                        drawingContext.DrawLine(quote, new Point(x, y), new Point(x, y + line.Height));
+                    }
+                }
+                if (info.HtmlDetailDepth > 0 && !raw) {
+                    for (int bar = 0; bar < info.HtmlDetailDepth; bar++) {
+                        double x = session.Options.FontSize * (0.9 * (info.HtmlQuote + bar) + 0.23) - textView.HorizontalOffset;
+                        drawingContext.DrawLine(detailsBar, new Point(x, y), new Point(x, y + line.Height));
+                    }
+                }
                 if (info.Heading > 0 && !raw && !info.Table && session.Options.HeadingMarks) DrawHeadingMark(textView, drawingContext, line, info);
                 StrutElement strut = line.Elements.Count == 0 ? null : line.Elements[0] as StrutElement;
                 RowLayout row = strut == null ? null : strut.Layout;
@@ -11413,6 +13234,10 @@ internal static partial class MarkdownLivePreview {
                     drawingContext.DrawLine(tableRule,new Point(left,y+line.Height),new Point(left+end-row.Indent,y+line.Height));
                     if (info.Header) { headerLeft = left; headerEnd = left + end - row.Indent; }
                 }
+                // A table row's key boxes go above its cell shade and rules, which this layer just
+                // painted; the text layer's run backgrounds no longer cover them (CellText drops
+                // the inline code shade on a key in a non-raw cell).
+                if (!raw && info.Row != null) DrawKeyboardBoxes(drawingContext, textView, line, info);
                 // #17: the header rule is drawn once, through the delimiter row and only as wide
                 // as the table (it used to be a short header underline plus a full-width rule).
                 if (info.Delimiter && !raw) {
@@ -11426,6 +13251,207 @@ internal static partial class MarkdownLivePreview {
                     drawingContext.DrawLine(rule, new Point(8, middle), new Point(Math.Max(8, width - 8), middle));
                 }
             }
+            DrawCodeCopy(textView, drawingContext, width);
+        }
+        // The rounded key box of every <kbd> run on this visual line. A document-offset segment
+        // (BackgroundGeometryBuilder) mapped its end through the hidden "</kbd>" run, so a key
+        // after the first on the line drew its box on that empty run's column (the letter beside
+        // an empty box) and a one-character key was measured at the wrong spot. The columns below
+        // are the visual line's own, the same ones its elements and the caret draw at; a table
+        // row's projection (TableRowElement) maps them through its cells too.
+        void DrawKeyboardBoxes(DrawingContext drawingContext, TextView textView, VisualLine line, LineInfo info) {
+            foreach (StyledPart part in info.Styles) {
+                if ((part.Style & Style.Keyboard) == 0 || part.Length <= 0) continue;
+                int from = part.Start, to = part.Start + part.Length;
+                int runStart = -1, runEnd = -1;
+                // A table row's cell text carries the tag padding as its own layout positions
+                // (CellText pad runs), so the box has the same reserved width there; an ordinary
+                // line carries it in the hidden tag elements instead. Without either the box
+                // would cover the neighbouring text, so it stays the tight one.
+                bool cell = info.Row != null;
+                bool padded = false;
+                if (!cell) {
+                    foreach (VisualLineElement candidate in line.Elements) {
+                        InvisibleElement hidden = candidate as InvisibleElement;
+                        if (hidden == null || hidden.PadEm <= 0) continue;
+                        if (hidden.RelativeTextOffset + hidden.DocumentLength == from || hidden.RelativeTextOffset == to) { padded = true; break; }
+                    }
+                }
+                // The run's own size turns the .35 em into pixels (a heading keeps its scale); a
+                // cell names the exact width its text reserved, and its closing tag's pad names
+                // the column the run ends at, so both sides take the same width. The body size
+                // stands in when the part begins with an embedded object the walk below skips
+                // (an entity, a formula), as it did before the cell path existed.
+                double leadPad = 0, trailPad = 0;
+                if (padded) leadPad = trailPad = session.Options.FontSize * KeyboardPadEm;
+                foreach (VisualLineElement element in line.Elements) {
+                    if (element.DocumentLength <= 0 || element.VisualLength <= 0) continue;
+                    // A hidden marker run draws one column for many source characters (an embedded
+                    // object the same way); only a run that draws its characters one for one has
+                    // character boxes. A table row is the one projected element whose columns the
+                    // projection's own reverse map names exactly.
+                    if (element.DocumentLength != element.VisualLength && !(element is TableRowElement)) continue;
+                    int relative = element.RelativeTextOffset;
+                    int end = relative + element.DocumentLength;
+                    if (end <= from) continue;
+                    if (relative >= to) break;
+                    int a = Math.Max(from, relative), b = Math.Min(to, end);
+                    if (b <= a) continue;
+                    // GetVisualColumn reads an offset relative to the visual line's first
+                    // document line, not one relative to the element (VisualLineText adds
+                    // relativeTextOffset - RelativeTextOffset itself). Element-relative values
+                    // put every later run's columns at the line start.
+                    int startColumn = element.GetVisualColumn(a);
+                    int endColumn = element.GetVisualColumn(b);
+                    if (endColumn <= startColumn) continue;
+                    // The box's pad comes from the run's own size, so a key inside a heading keeps
+                    // the same .35 em proportion as a body key; a cell names the width its text
+                    // actually reserved, so the box edge sits on the measured padding.
+                    if (a == from) {
+                        double em = element.TextRunProperties.FontRenderingEmSize;
+                        TableRowElement rowElement = element as TableRowElement;
+                        if (cell) {
+                            leadPad = rowElement == null ? 0 : rowElement.KeyboardPad(from);
+                            trailPad = leadPad;
+                        } else if (padded) {
+                            leadPad = trailPad = em * KeyboardPadEm;
+                        }
+                    }
+                    if (runStart >= 0 && startColumn == runEnd) { runEnd = endColumn; continue; }
+                    if (runStart >= 0) DrawKeyboardRange(drawingContext, textView, line, runStart, runEnd, leadPad, trailPad);
+                    runStart = startColumn; runEnd = endColumn;
+                }
+                if (runStart >= 0) DrawKeyboardRange(drawingContext, textView, line, runStart, runEnd, leadPad, trailPad);
+            }
+        }
+        // One contiguous stream of key characters, split over the text lines it wraps across. The
+        // box hugs the glyph band (TextTop..TextBottom) of the inline code shade it sits on, plus
+        // the padding the run reserves - the hidden <kbd> tag gap on an ordinary line, the cell
+        // text's own pad positions in a table cell - so the text beside it starts outside the box.
+        void DrawKeyboardRange(DrawingContext drawingContext, TextView textView, VisualLine line, int startColumn, int endColumn, double leadPad, double trailPad) {
+            if (line.TextLines == null || line.TextLines.Count == 0) return;
+            int first = 0;
+            foreach (TextLine textLine in line.TextLines) {
+                int lineStart = first, lineEnd = first + textLine.Length;
+                first = lineEnd;
+                int a = Math.Max(startColumn, lineStart), b = Math.Min(endColumn, lineEnd);
+                if (b <= a) continue;
+                double x1 = line.GetTextLineVisualXPosition(textLine, a) - textView.HorizontalOffset;
+                double x2 = line.GetTextLineVisualXPosition(textLine, b) - textView.HorizontalOffset;
+                if (x2 - x1 <= 0.01) continue;
+                double top = line.GetTextLineVisualYPosition(textLine, VisualYPosition.TextTop) - textView.VerticalOffset;
+                double bottom = line.GetTextLineVisualYPosition(textLine, VisualYPosition.TextBottom) - textView.VerticalOffset;
+                if (bottom <= top) continue;
+                double height = bottom - top;
+                double left = x1 - leadPad - .5, right = x2 + trailPad + .5;
+                // One letter reads square: the box is never narrower than the text band it sits on.
+                // The reserved pad pays for that (0.35 em a side against a code-face advance of
+                // about 0.55 em); a run without reserved padding keeps the tight box rather than
+                // covering a neighbour.
+                if (leadPad > 0 && right - left < height) { double extra = (height - (right - left)) / 2; left -= extra; right += extra; }
+                Rect box = new Rect(left, top, right - left, height);
+                drawingContext.DrawRoundedRectangle(session.Colors.InlineCode, rule, box, 3, 3);
+            }
+        }
+        // A <sup>/<sub> span's ink: the run keeps the 0.75 em advance and no ink of its own
+        // (MarkdownTransformer makes it transparent off the caret line), and the glyphs are drawn
+        // here at a browser's offset - 0.33 em above the baseline for a superscript, 0.2 em below
+        // for a subscript - on the line's own baseline. WPF's BaselineAlignment lifts a run by 2/3
+        // of the line ascent, which put the small digit far above the capitals; this keeps it at
+        // the capitals and inside the line's ascent/descent, and the line height never grows
+        // because the run itself stays on the baseline.
+        void DrawScriptText(DrawingContext drawingContext, TextView textView, VisualLine line, LineInfo info) {
+            bool any = false;
+            foreach (StyledPart candidate in info.Styles)
+                if ((candidate.Style & (Style.HtmlSup | Style.HtmlSub)) != 0) { any = true; break; }
+            if (!any) return;
+            foreach (StyledPart part in info.Styles) {
+                bool sup = (part.Style & Style.HtmlSup) != 0;
+                if (!sup && (part.Style & Style.HtmlSub) == 0) continue;
+                int from = part.Start, to = Math.Min(info.Text.Length, part.Start + part.Length);
+                if (to <= from) continue;
+                foreach (VisualLineElement element in line.Elements) {
+                    if (element.DocumentLength <= 0 || element.VisualLength <= 0) continue;
+                    if (element.DocumentLength != element.VisualLength) continue;
+                    int relative = element.RelativeTextOffset;
+                    if (relative >= to || relative + element.DocumentLength <= from) continue;
+                    int a = Math.Max(from, relative), b = Math.Min(to, relative + element.DocumentLength);
+                    if (b <= a) continue;
+                    // Same convention as DrawKeyboardBoxes: GetVisualColumn takes an offset
+                    // relative to the visual line start, so pass the line offset itself.
+                    int startColumn = element.GetVisualColumn(a);
+                    int endColumn = element.GetVisualColumn(b);
+                    if (endColumn <= startColumn) continue;
+                    DrawScriptRange(drawingContext, textView, line, info, element, startColumn, endColumn, sup);
+                }
+            }
+        }
+        void DrawScriptRange(DrawingContext drawingContext, TextView textView, VisualLine line, LineInfo info, VisualLineElement element, int startColumn, int endColumn, bool sup) {
+            if (line.TextLines == null || line.TextLines.Count == 0) return;
+            TextRunProperties properties = element.TextRunProperties;
+            Typeface face = properties.Typeface;
+            double size = properties.FontRenderingEmSize;
+            if (face == null || size <= 0) return;
+            Brush brush = ScriptBrush(info, element.RelativeTextOffset + (startColumn - element.VisualColumn));
+            if (brush == null) return;
+            // The body size at this run: the script is 0.75 of it, so a heading's own scale is
+            // kept (a 0.33 em lift of the LOCAL normal size, not of the document's 16 px).
+            double normal = size / .75;
+            double lift = sup ? normal * ScriptShiftEm : -normal * SubScriptShiftEm;
+            CultureInfo culture = properties.CultureInfo ?? CultureInfo.CurrentCulture;
+            double dip = session.PixelsPerDip();
+            int first = 0;
+            foreach (TextLine textLine in line.TextLines) {
+                int lineStart = first, lineEnd = first + textLine.Length;
+                first = lineEnd;
+                int a = Math.Max(startColumn, lineStart), b = Math.Min(endColumn, lineEnd);
+                if (b <= a) continue;
+                int offset = element.RelativeTextOffset + (a - element.VisualColumn);
+                int count = b - a;
+                if (offset < 0 || count <= 0 || offset + count > info.Text.Length) continue;
+                double x = line.GetTextLineVisualXPosition(textLine, a) - textView.HorizontalOffset;
+                double right = line.GetTextLineVisualXPosition(textLine, b) - textView.HorizontalOffset;
+                double baseline = line.GetTextLineVisualYPosition(textLine, VisualYPosition.Baseline) - textView.VerticalOffset;
+                // The span's own background (inline code, highlight) belongs under the glyphs;
+                // the text layer no longer paints it for this run (MarkdownTransformer cleared it).
+                Brush background = ScriptBackground(info, offset);
+                if (background != null && right > x) {
+                    double top = line.GetTextLineVisualYPosition(textLine, VisualYPosition.TextTop) - textView.VerticalOffset;
+                    double bottom = line.GetTextLineVisualYPosition(textLine, VisualYPosition.TextBottom) - textView.VerticalOffset;
+                    if (bottom > top) drawingContext.DrawRectangle(background, null, new Rect(x, top, right - x, bottom - top));
+                }
+                var text = new FormattedText(info.Text.Substring(offset, count), culture, FlowDirection.LeftToRight,
+                    face, size, brush, null, TextFormattingMode.Display, dip);
+                drawingContext.DrawText(text, new Point(x, baseline - lift - text.Baseline));
+            }
+        }
+        // The background a <sup>/<sub> run would have painted for itself: the inline code shade,
+        // then the highlight, in MarkdownTransformer's order.
+        Brush ScriptBackground(LineInfo info, int pos) {
+            Brush brush = null;
+            List<StyledPart> parts = info.Styles;
+            for (int i = 0; i < parts.Count; i++) {
+                StyledPart part = parts[i];
+                if (pos < part.Start || pos >= part.Start + part.Length) continue;
+                if ((part.Style & Style.Code) != 0) brush = session.Colors.InlineCode;
+                if ((part.Style & Style.Highlight) != 0) brush = session.Colors.Highlight;
+            }
+            return brush;
+        }
+        // The ink for a <sup>/<sub> span at a character: the line's own colour, then the styles
+        // covering it in the order MarkdownTransformer applies them (the rule MarkBrush uses for
+        // a heading's first character).
+        Brush ScriptBrush(LineInfo info, int pos) {
+            Brush brush = info.Quote || info.HtmlQuote > 0 ? session.Colors.QuoteText : session.Colors.Foreground;
+            List<StyledPart> parts = info.Styles;
+            for (int i = 0; i < parts.Count; i++) {
+                StyledPart part = parts[i];
+                if (pos < part.Start || pos >= part.Start + part.Length) continue;
+                if ((part.Style & Style.Link) != 0) brush = session.Colors.Link;
+                if ((part.Style & Style.Muted) != 0) brush = session.Colors.Muted;
+                if (part.Color != null) brush = part.Color;
+            }
+            return brush;
         }
     }
 }

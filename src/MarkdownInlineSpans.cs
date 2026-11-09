@@ -55,7 +55,7 @@ internal static class MarkdownInlineSpans {
         var openers = new Dictionary<string, Stack<int>>(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < info.Replacements.Count; i++) {
             Replacement run = info.Replacements[i];
-            if (run.Kind != ReplacementKind.Hidden || run.Prefix || run.Length <= 0) continue;
+            if ((run.Kind != ReplacementKind.Hidden && run.Kind != ReplacementKind.Glyph) || run.Prefix || run.Length <= 0) continue;
             if (used[i]) continue;
             string name;
             bool closing;
@@ -86,6 +86,8 @@ internal static class MarkdownInlineSpans {
                 if (link == null || link.Length <= 0) continue;
                 bool footnote = link.Url != null && link.Url.StartsWith("#^", StringComparison.Ordinal);
                 bool angle = link.Start >= 0 && link.Start < text.Length && text[link.Start] == '<';
+                int tagIndex;
+                if (angle && byStart.TryGetValue(link.Start, out tagIndex) && used[tagIndex]) continue;
                 if (footnote || angle) {
                     AddAtomic(spans, link.Start, link.Length, text);
                     continue;
@@ -122,7 +124,7 @@ internal static class MarkdownInlineSpans {
         for (int i = 0; i < info.Styles.Count; i++) {
             StyledPart part = info.Styles[i];
             bool styled = (part.Style & (MarkdownLivePreview.Style.Bold | MarkdownLivePreview.Style.Italic |
-                MarkdownLivePreview.Style.Strike | MarkdownLivePreview.Style.Code)) != 0
+                MarkdownLivePreview.Style.Strike | MarkdownLivePreview.Style.Code | MarkdownLivePreview.Style.Highlight)) != 0
                 || part.Color != null || part.Size > 0 || part.SizeEm > 0;
             if (!styled) continue;
             int openIndex, closeIndex;
@@ -293,7 +295,7 @@ internal static class MarkdownInlineSpans {
             return p + 1 - start == length;
         }
         if (p >= text.Length) return false;
-        if (text[p] != ' ' && text[p] != '\t') return false;
+        if (text[p] != ' ' && text[p] != '\t' && text[p] != '>') return false;
         return text[start + length - 1] == '>';
     }
 
@@ -830,7 +832,7 @@ internal static class MarkdownInlineSpans {
         // A sentinel is an underscore here, so two underscore pairs still never glue into "____".
         left = UnmarkUnderscores(left);
         right = UnmarkUnderscores(right);
-        string[] banned = { "****", "____", "~~~~", "``" };
+        string[] banned = { "****", "____", "~~~~", "====", "``" };
         for (int b = 0; b < banned.Length; b++) {
             string pattern = banned[b];
             for (int split = 1; split < pattern.Length; split++) {
@@ -875,6 +877,221 @@ internal static class MarkdownInlineSpans {
     struct Edit {
         internal int Start, Length, Kind, Seq;
         internal string Text;
+    }
+}
+
+// Same-line, allow-listed HTML shared by the editor, print, export and TXT paths. The map is
+// built once per touched line, not once per '<'; malformed nesting never hides an outer pair.
+internal static class InlineHtml {
+    internal sealed class Tag {
+        internal int Start, End, CloseStart, CloseEnd;
+        internal string Name;
+        internal bool Closing, Void, Invalid;
+    }
+    // GitHub-allowed block tags. The live view, print, HTML export and TXT conversion read this
+    // one set; a name outside it stays literal source everywhere.
+    internal static bool BlockName(string name) {
+        switch (name) {
+            case "div": case "p": case "details": case "summary": case "blockquote":
+            case "ul": case "ol": case "dl": case "figure": case "picture":
+            case "center": case "hr": case "li": case "dt": case "dd":
+            case "figcaption": case "pre":
+            case "h1": case "h2": case "h3": case "h4": case "h5": case "h6": return true;
+            default: return false;
+        }
+    }
+    internal static bool Allowed(string name) {
+        switch (name) {
+            case "b": case "strong": case "i": case "em": case "s": case "del": case "strike":
+            case "code": case "tt": case "samp": case "var": case "mark": case "a":
+            case "sup": case "sub": case "ins": case "u": case "small": case "kbd":
+            case "abbr": case "dfn": case "time": case "q": case "cite": case "wbr":
+            case "br": case "img": case "picture": case "span": case "font": return true;
+            default: return BlockName(name);
+        }
+    }
+    internal static bool Code(string name) { return name == "code" || name == "tt" || name == "samp" || name == "var"; }
+    internal static Tag Read(string text, int start) { return ReadCore(text, start, false); }
+    // A block tag read from a line: the same syntax, limited to BlockName. blocks also accepts
+    // "<hr/>", the one void block tag the view draws as a rule.
+    internal static Tag ReadBlock(string text, int start) { return ReadCore(text, start, true); }
+    static Tag ReadCore(string text, int start, bool blocks) {
+        if (start < 0 || start + 2 >= text.Length || text[start] != '<') return null;
+        int p = start + 1; bool closing = text[p] == '/';
+        if (closing) p++;
+        int first = p;
+        while (p < text.Length && (char.IsLetterOrDigit(text[p]) || text[p] == '-')) p++;
+        if (p == first || p >= text.Length) return null;
+        string name = text.Substring(first, p - first).ToLowerInvariant();
+        if (blocks ? !BlockName(name) : !Allowed(name)) return null;
+        if (text[p] != '>' && text[p] != '/' && text[p] != ' ' && text[p] != '\t') return null;
+        char quote = '\0'; int limit = Math.Min(text.Length, start + 4096);
+        for (; p < limit; p++) {
+            char c = text[p];
+            if (c == '\r' || c == '\n') return null;
+            if (quote != '\0') { if (c == quote) quote = '\0'; continue; }
+            if (c == '\'' || c == '"') { quote = c; continue; }
+            if (c == '<') return null;
+            if (c != '>') continue;
+            bool empty = name == "br" || name == "wbr" || name == "img" || name == "hr";
+            if (closing && text.Substring(first + name.Length, p - first - name.Length).Trim().Length != 0) return null;
+            if (!empty && p > start && text[p - 1] == '/') return null;
+            return new Tag { Start=start, End=p + 1, CloseStart=p + 1, CloseEnd=p + 1, Name=name, Closing=closing, Void=empty };
+        }
+        return null;
+    }
+    // The one block tag a line consists of ("<div align=\"center\">", "</details>", "<hr/>"), or
+    // null. At most three leading spaces/tabs, like every other block marker; anything but
+    // whitespace after the tag makes the line ordinary text.
+    internal static Tag BlockTagLine(string text, out int start) {
+        start = 0;
+        if (text == null) return null;
+        int p = 0;
+        while (p < text.Length && p < 4 && (text[p] == ' ' || text[p] == '\t')) p++;
+        if (p > 3 || p >= text.Length || text[p] != '<') return null;
+        Tag tag = ReadBlock(text, p);
+        if (tag == null) return null;
+        for (int i = tag.End; i < text.Length; i++) if (text[i] != ' ' && text[i] != '\t') return null;
+        start = p;
+        return tag;
+    }
+    // The block tag that opens a line (not necessarily tag-only), or null.
+    internal static Tag LeadingBlockTag(string text, out int start) {
+        start = 0;
+        if (text == null) return null;
+        int p = 0;
+        while (p < text.Length && p < 4 && (text[p] == ' ' || text[p] == '\t')) p++;
+        if (p > 3 || p >= text.Length || text[p] != '<') return null;
+        Tag tag = ReadBlock(text, p);
+        if (tag == null) return null;
+        start = p;
+        return tag;
+    }
+    // A whole line that is one block element with its content inside it ("<h2>제목</h2>",
+    // "<li>항목</li>", "<p align=\"center\">글</p>", "<div align=\"center\"><img ...></div>").
+    // open describes the opening tag and its paired closer; content is [open.End, open.CloseStart).
+    internal static bool SingleLineBlock(string text, out Tag open) {
+        open = null;
+        if (text == null) return false;
+        int start;
+        Tag first = LeadingBlockTag(text, out start);
+        if (first == null || first.Closing || first.Name == "hr") return false;
+        Dictionary<int, Tag> tags = Parse(text);
+        Tag pair;
+        if (!tags.TryGetValue(start, out pair)) return false;
+        if (pair.Closing || pair.Void) return false;
+        for (int i = pair.CloseEnd; i < text.Length; i++) if (text[i] != ' ' && text[i] != '\t') return false;
+        open = pair;
+        return true;
+    }
+    internal static Dictionary<int, Tag> Parse(string text) {
+        var result = new Dictionary<int, Tag>();
+        if (string.IsNullOrEmpty(text) || text.IndexOf('<') < 0) return result;
+        var stack = new List<Tag>(); int budget = text.Length * 4;
+        for (int p = 0; p < text.Length;) {
+            char c = text[p];
+            if (c == '\r' || c == '\n') { stack.Clear(); p++; continue; }
+            bool raw = stack.Count > 0 && Code(stack[stack.Count - 1].Name);
+            if (!raw && c == '\\') { p += Math.Min(2, text.Length - p); continue; }
+            if (!raw && c == '`') {
+                int run = 1; while (p + run < text.Length && text[p + run] == '`') run++;
+                int close = MarkdownPlainText.CodeClose(text, p + run, run, ref budget);
+                if (close >= 0) { p = close + run; continue; }
+                p += run; continue;
+            }
+            if (!raw && c == ']' && p + 1 < text.Length && text[p + 1] == '(') {
+                int end = MarkdownPlainText.TargetEnd(text, p + 2);
+                if (end >= 0) { p = end + 1; continue; }
+            }
+            if (c != '<') { p++; continue; }
+            if (!raw) {
+                int comment = MarkdownPlainText.CommentEnd(text, p);
+                if (comment > p) { p = comment; continue; }
+            }
+            Tag tag = Read(text, p);
+            if (tag == null) { p++; continue; }
+            if (raw && (!tag.Closing || tag.Name != stack[stack.Count - 1].Name)) { p++; continue; }
+            p = tag.End;
+            if (tag.Void) { if (!tag.Closing) result[tag.Start] = tag; continue; }
+            if (!tag.Closing) { stack.Add(tag); continue; }
+            if (stack.Count == 0) continue;
+            Tag open = stack[stack.Count - 1];
+            if (open.Name != tag.Name) {
+                foreach (Tag parent in stack) parent.Invalid = true;
+                continue;
+            }
+            stack.RemoveAt(stack.Count - 1);
+            if (open.Invalid) { foreach (Tag parent in stack) parent.Invalid = true; continue; }
+            open.CloseStart = tag.Start; open.CloseEnd = tag.End;
+            result[open.Start] = open;
+        }
+        return result;
+    }
+    internal static string Attribute(string text, Tag tag, string name) {
+        int p = tag.Start + 1 + tag.Name.Length;
+        while (p < tag.End - 1) {
+            while (p < tag.End - 1 && char.IsWhiteSpace(text[p])) p++;
+            int first = p;
+            while (p < tag.End - 1 && (char.IsLetterOrDigit(text[p]) || text[p] == '-' || text[p] == '_' || text[p] == ':')) p++;
+            if (p == first) { p++; continue; }
+            string key = text.Substring(first, p - first);
+            while (p < tag.End - 1 && char.IsWhiteSpace(text[p])) p++;
+            if (p >= tag.End - 1 || text[p] != '=') continue;
+            p++; while (p < tag.End - 1 && char.IsWhiteSpace(text[p])) p++;
+            if (p >= tag.End - 1) break;
+            char quote = text[p] == '\'' || text[p] == '"' ? text[p++] : '\0';
+            int start = p;
+            while (p < tag.End - 1 && (quote != '\0' ? text[p] != quote : !char.IsWhiteSpace(text[p]))) p++;
+            int end = p;
+            if (quote != '\0' && p < tag.End - 1) p++;
+            if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase))
+                return MarkdownPlainText.DecodeEntities(text.Substring(start, end - start));
+        }
+        return string.Empty;
+    }
+    // Every attribute of the tag in source order. A valueless attribute ("<details open>") has a
+    // null value; the HTML export writes those as a bare name and filters both by the allowed set.
+    internal static List<KeyValuePair<string,string>> Attributes(string text, Tag tag) {
+        var list = new List<KeyValuePair<string,string>>();
+        int p = tag.Start + 1 + (tag.Closing ? 1 : 0) + tag.Name.Length;
+        while (p < tag.End - 1) {
+            while (p < tag.End - 1 && char.IsWhiteSpace(text[p])) p++;
+            int first = p;
+            while (p < tag.End - 1 && (char.IsLetterOrDigit(text[p]) || text[p] == '-' || text[p] == '_' || text[p] == ':')) p++;
+            if (p == first) { p++; continue; }
+            string key = text.Substring(first, p - first);
+            while (p < tag.End - 1 && char.IsWhiteSpace(text[p])) p++;
+            string value = null;
+            if (p < tag.End - 1 && text[p] == '=') {
+                p++; while (p < tag.End - 1 && char.IsWhiteSpace(text[p])) p++;
+                if (p >= tag.End - 1) break;
+                char quote = text[p] == '\'' || text[p] == '"' ? text[p++] : '\0';
+                int start = p;
+                while (p < tag.End - 1 && (quote != '\0' ? text[p] != quote : !char.IsWhiteSpace(text[p]))) p++;
+                value = text.Substring(start, p - start);
+                if (quote != '\0' && p < tag.End - 1) p++;
+            }
+            list.Add(new KeyValuePair<string,string>(key, value));
+        }
+        return list;
+    }
+    internal static double Dimension(string text, Tag tag, string name) {
+        int value;
+        return int.TryParse(Attribute(text, tag, name), System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out value) && value > 0 ? value : 0;
+    }
+    internal static Tag PictureImage(Dictionary<int, Tag> tags, Tag picture) {
+        Tag first = null;
+        foreach (Tag tag in tags.Values)
+            if (tag.Name == "img" && tag.Start >= picture.End && tag.End <= picture.CloseStart && (first == null || tag.Start < first.Start)) first = tag;
+        return first;
+    }
+    internal static void ImageSize(double naturalWidth, double naturalHeight, double requestedWidth, double requestedHeight,
+        double maximum, out double width, out double height) {
+        width = requestedWidth > 0 ? requestedWidth : requestedHeight > 0 ? naturalWidth * requestedHeight / naturalHeight : naturalWidth;
+        height = requestedHeight > 0 ? requestedHeight : requestedWidth > 0 ? naturalHeight * requestedWidth / naturalWidth : naturalHeight;
+        double scale = Math.Min(1, Math.Min(Math.Min(700, maximum) / width, 700 / height));
+        width *= scale; height *= scale;
     }
 }
 }

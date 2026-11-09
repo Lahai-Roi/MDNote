@@ -55,6 +55,11 @@ public partial class MainWindow {
 
         {"TXT 모드",new[]{"TXT mode","TXTモード","TXT 模式","TXT 模式"}},
 
+        /* 2026-11-09: the status bar's TXT toggle. Its tooltip names the direction the press will
+           take (TXT on/off); the accessibility name stays the short "TXT 모드" above. */
+        {"TXT 모드 켜기: .txt 파일 형식으로 전환합니다.",new[]{"Turn on TXT mode: Switches to the .txt file format.","TXTモードをオン: .txt ファイル形式に切り替えます。","开启 TXT 模式：切换为 .txt 文件格式。","開啟 TXT 模式：切換為 .txt 檔案格式。"}},
+        {"TXT 모드 끄기: .md 파일 형식으로 전환합니다.",new[]{"Turn off TXT mode: Switches to the .md file format.","TXTモードをオフ: .md ファイル形式に切り替えます。","关闭 TXT 模式：切换为 .md 文件格式。","關閉 TXT 模式：切換為 .md 檔案格式。"}},
+
         {"항상 수정 기능 활성화",new[]{"Always open for editing","常に編集モードで開く","始终以编辑模式打开","一律以編輯模式開啟"}},
 
         {"단축키",new[]{"Shortcuts","ショートカット","快捷键","快速鍵"}},
@@ -100,6 +105,8 @@ public partial class MainWindow {
         {"본문",new[]{"Body","本文","正文","內文"}},
         {"원문",new[]{"Source","ソース","源码","原始碼"}},
         {"코드",new[]{"Code","コード","代码","程式碼"}},
+        /* Live code block copy button: the transient status line answer. */
+        {"코드를 복사했습니다",new[]{"Code copied","コードをコピーしました","已复制代码","已複製程式碼"}},
         {"구분",new[]{"Divider","水平線","分隔线","分隔線"}},
         {"체크리스트 삽입",new[]{"Insert task list","チェックリストを挿入","插入待办清单","插入待辦清單"}},
         {"코드 블록 삽입",new[]{"Insert code block","コードブロックを挿入","插入代码块","插入程式碼區塊"}},
@@ -174,7 +181,7 @@ public partial class MainWindow {
         {"이미지는 본문 수정 모드에서 삽입해 주세요.",new[]{"Insert images in formatted editing mode.","書式表示の編集モードで画像を挿入してください。","请在格式视图的编辑模式中插入图片。","請在格式檢視的編輯模式中插入圖片。"}},
         {"이미지를 열 수 없습니다.",new[]{"Cannot open the image.","画像を開けません。","无法打开图片。","無法開啟圖片。"}},
         {"이미지는 MD 문서에서만 넣을 수 있습니다.",new[]{"Images can only be inserted in Markdown documents.","画像は Markdown 文書にのみ挿入できます。","图片只能插入 Markdown 文档。","圖片只能插入 Markdown 文件。"}},
-        {"아웃라인 열기/닫기",new[]{"Open/close outline","アウトラインの開閉","打开/关闭大纲","開啟/關閉大綱"}},
+        {"아웃라인 열기/닫기",new[]{"Open/close outline","目次の開閉","打开/关闭大纲","開啟/關閉大綱"}},
         {"새 문서 만들기 (Ctrl+N)",new[]{"New document (Ctrl+N)","新規文書 (Ctrl+N)","新建文档 (Ctrl+N)","新增文件 (Ctrl+N)"}},
         {"파일 열기 (Ctrl+O)",new[]{"Open file (Ctrl+O)","ファイルを開く (Ctrl+O)","打开文件 (Ctrl+O)","開啟檔案 (Ctrl+O)"}},
         {"저장 (Ctrl+S)",new[]{"Save (Ctrl+S)","保存 (Ctrl+S)","保存 (Ctrl+S)","儲存 (Ctrl+S)"}},
@@ -193,8 +200,8 @@ public partial class MainWindow {
         {"인용문 켜기/끄기",new[]{"Toggle quote","引用の切り替え","切换引用","切換引用"}},
         {"선택한 글자 크기 설정",new[]{"Set selected text size","選択した文字のサイズを設定","设置所选文字大小","設定所選文字大小"}},
         {"다크 모드 켜기/끄기",new[]{"Toggle dark mode","ダークモードの切り替え","切换深色模式","切換深色模式"}},
-        {"수정 모드 켜기 (Ctrl+E)",new[]{"Start editing (Ctrl+E)","編集を開始 (Ctrl+E)","开始编辑 (Ctrl+E)","開始編輯 (Ctrl+E)"}},
-        {"수정 모드 끄기 (Ctrl+E)",new[]{"Finish editing (Ctrl+E)","編集を終了 (Ctrl+E)","结束编辑 (Ctrl+E)","結束編輯 (Ctrl+E)"}},
+        {"수정 모드 켜기: 본문을 편집할 수 있습니다. (Ctrl+E)",new[]{"Turn on editing mode: Lets you edit the text. (Ctrl+E)","編集モードをオン: 本文を編集できます。(Ctrl+E)","开启编辑模式：可以编辑正文。(Ctrl+E)","開啟編輯模式：可以編輯內文。(Ctrl+E)"}},
+        {"수정 모드 끄기: 읽기 모드로 전환합니다. (Ctrl+E)",new[]{"Turn off editing mode: Switches to read mode. (Ctrl+E)","編集モードをオフ: 閲覧モードに切り替えます。(Ctrl+E)","关闭编辑模式：切换到阅读模式。(Ctrl+E)","關閉編輯模式：切換到閱讀模式。(Ctrl+E)"}},
         /* b56: the narrow toolbar row's overflow button ("»") */
         {"도구 더 보기",new[]{"More tools","その他のツール","更多工具","更多工具"}},
         {"탭 닫기 (Ctrl+W)",new[]{"Close tab (Ctrl+W)","タブを閉じる (Ctrl+W)","关闭标签页 (Ctrl+W)","關閉分頁 (Ctrl+W)"}},
@@ -257,6 +264,9 @@ public partial class MainWindow {
         {"기본 글자색…",new[]{"Default text color…","既定の文字色…","默认文字颜色…","預設文字色彩…"}},
         {"기본 글자색 초기화",new[]{"Reset default text color","既定の文字色をリセット","重置默认文字颜色","重設預設文字色彩"}},
         {"다크 모드",new[]{"Dark mode","ダークモード","深色模式","深色模式"}},
+        /* 2.4.0 memory study (user 2026-11-09): the View-menu switch back to hardware drawing, off by default. */
+        {"GPU 가속 사용",new[]{"Use GPU acceleration","GPU アクセラレーションを使う","使用 GPU 加速","使用 GPU 加速"}},
+        {"끄면 메모리를 덜 씁니다. 화면이 끊기면 켜세요.",new[]{"Off uses less memory. Turn on if scrolling stutters.","オフにするとメモリ使用量が減ります。表示がカクつく場合はオンにしてください。","关闭可减少内存占用。若滚动卡顿请开启。","關閉可減少記憶體使用量。若捲動卡頓請開啟。"}},
         {"MDNote 정보",new[]{"About MDNote","MDNoteについて","关于 MDNote","關於 MDNote"}},
         /* The help menu's manual update check (UpdateCheck.cs): its menu item, title, three outcomes and the one new button. */
         {"업데이트 확인",new[]{"Check for updates","更新の確認","检查更新","檢查更新"}},
@@ -276,6 +286,8 @@ public partial class MainWindow {
         {"링크",new[]{"Link","リンク","链接","連結"}},
         {"원문 편집",new[]{"Source editing","ソース編集","源码编辑","原始碼編輯"}},
         {"원문 편집 켜기/끄기",new[]{"Toggle source editing","ソース編集の切り替え","切换源码编辑","切換原始碼編輯"}},
+        {"원문 보기 켜기: 서식 기호(#, ** 등)를 표시합니다.",new[]{"Show source: Shows formatting marks (#, **, etc.).","ソース表示をオン: 書式記号（#、** など）を表示します。","显示源码：显示格式符号（#、** 等）。","顯示原始碼：顯示格式符號（#、** 等）。"}},
+        {"원문 보기 끄기: 서식 기호를 숨깁니다.",new[]{"Hide source: Hides formatting marks.","ソース表示をオフ: 書式記号を非表示にします。","隐藏源码：隐藏格式符号。","隱藏原始碼：隱藏格式符號。"}},
         {"서식 보기",new[]{"Formatted view","書式表示","格式视图","格式檢視"}},
         {"서식 보기 / 원문 편집 전환",new[]{"Switch formatted view / source editing","書式表示とソース編集の切り替え","切换格式视图与源码编辑","切換格式檢視與原始碼編輯"}},
         {"미리보기",new[]{"Preview","プレビュー","预览","預覽"}},
@@ -290,7 +302,10 @@ public partial class MainWindow {
         {"모두 바꾸기",new[]{"Replace all","すべて置換","全部替换","全部取代"}},
         {"닫기",new[]{"Close","閉じる","关闭","關閉"}},
         {"대소문자 구분",new[]{"Match case","大文字と小文字を区別","区分大小写","區分大小寫"}},
-        {"아웃라인",new[]{"Outline","アウトライン","大纲","大綱"}},
+        {"아웃라인",new[]{"Outline","目次","大纲","大綱"}},
+        {"목차",new[]{"Outline","目次","大纲","大綱"}},
+        {"목차 열기: 제목 목록을 표시합니다.",new[]{"Open outline: Shows the list of headings.","目次を開く: 見出しの一覧を表示します。","打开大纲：显示标题列表。","開啟大綱：顯示標題清單。"}},
+        {"목차 닫기: 제목 목록을 숨깁니다.",new[]{"Close outline: Hides the list of headings.","目次を閉じる: 見出しの一覧を非表示にします。","关闭大纲：隐藏标题列表。","關閉大綱：隱藏標題清單。"}},
         {"확인",new[]{"OK","OK","确定","確定"}},
         {"취소",new[]{"Cancel","キャンセル","取消","取消"}},
 {"HTML로 내보내기…",new[]{"Export as HTML…","HTMLとしてエクスポート…","导出为 HTML…","匯出為 HTML…"}},
@@ -352,6 +367,9 @@ public partial class MainWindow {
         {"표 내어쓰기",new[]{"Outdent table","表のインデント解除","减少表格缩进","減少表格縮排"}},
         {"표 들여쓰기",new[]{"Indent table","表のインデント","增加表格缩进","增加表格縮排"}},
         {"취소선",new[]{"Strikethrough","取り消し線","删除线","刪除線"}},
+        {"형광펜",new[]{"Highlight","ハイライト","高亮","醒目提示"}},
+        {"위 첨자",new[]{"Superscript","上付き","上标","上標"}},
+        {"아래 첨자",new[]{"Subscript","下付き","下标","下標"}},
         {"이미지",new[]{"Image","画像","图片","圖片"}},
         {"바로 위에 목록 항목이 없어 표를 들여쓸 수 없습니다.",new[]{"Cannot indent table because there is no list item directly above it","直前にリスト項目がないため、表をインデントできません","正上方没有列表项，无法增加表格缩进","正上方沒有清單項目，無法增加表格縮排"}},
         {"표가 이미 목록 항목 안에 있어 더 들여쓸 수 없습니다.",new[]{"Cannot indent further because the table is already inside a list item","表はすでにリスト項目内にあるため、これ以上インデントできません","表格已在列表项内，无法继续增加缩进","表格已在清單項目內，無法再增加縮排"}},
@@ -386,7 +404,16 @@ public partial class MainWindow {
            status line says so instead of a paste or copy that silently did nothing. */
         {"인쇄 미리 보기",new[]{"Print Preview","印刷プレビュー","打印预览","預覽列印"}},
         {"클립보드를 열 수 없습니다. 잠시 후 다시 붙여넣으세요.",new[]{"The clipboard cannot be opened. Please try pasting again in a moment.","クリップボードを開けません。しばらくしてからもう一度貼り付けてください。","无法打开剪贴板。请稍后再次粘贴。","無法開啟剪貼簿。請稍後再次貼上。"}},
-        {"클립보드를 열 수 없습니다. 잠시 후 다시 복사하세요.",new[]{"The clipboard cannot be opened. Please try copying again in a moment.","クリップボードを開けません。しばらくしてからもう一度コピーしてください。","无法打开剪贴板。请稍后再次复制。","無法開啟剪貼簿。請稍後再次複製。"}}
+        {"클립보드를 열 수 없습니다. 잠시 후 다시 복사하세요.",new[]{"The clipboard cannot be opened. Please try copying again in a moment.","クリップボードを開けません。しばらくしてからもう一度コピーしてください。","无法打开剪贴板。请稍后再次复制。","無法開啟剪貼簿。請稍後再次複製。"}},
+        /* 2026-11-09: the 파일 tab's own captions, moved here from the file-tab table in FolderTree.cs
+           so the panel reads them through T() like every other caption ("목차" is already above). */
+        {"파일",new[]{"Files","ファイル","文件","檔案"}},
+        {"다른 폴더 열기",new[]{"Open another folder","別のフォルダーを開く","打开其他文件夹","開啟其他資料夾"}},
+        {"새로 고침",new[]{"Refresh","更新","刷新","重新整理"}},
+        {"탐색기에서 보기",new[]{"Show in Explorer","エクスプローラーで表示","在资源管理器中显示","在檔案總管中顯示"}},
+        {"경로 복사",new[]{"Copy path","パスをコピー","复制路径","複製路徑"}},
+        {"더 있음",new[]{"More","さらにあります","更多","還有更多"}},
+        {"폴더 열기",new[]{"Open folder","フォルダーを開く","打开文件夹","開啟資料夾"}}
     };
     internal string TranslateLabel(string value){return T(value);}
     string OriginalKey(string value){if(translations.ContainsKey(value))return value;foreach(var pair in translations)foreach(string translated in pair.Value)if(translated==value)return pair.Key;return value;}
@@ -401,7 +428,7 @@ public partial class MainWindow {
         ApplyLanguage();
     }
     void ApplyLanguage(){
-        if(Array.IndexOf(languageCodes,language)<0)language="ko";FontFamily=Ui.ChromeFamily(language);Resources["ChromeFont"]=FontFamily;foreach(var chrome in new DependencyObject[]{root.Children[0],documentTabs,ribbonHost,tableToolsHost,searchHost,statusBar,saveMenu,headingMenu,colorPopup.Child})if(chrome!=null)Ui.ToolbarText(chrome,FontFamily);TranslateTree(root);if(colorPopup.Child!=null)TranslateTree(colorPopup.Child);TranslateTree(saveMenu);/* b58: the » lists are built once per width change; their items keep the old language until they are rebuilt, so translate them now (names and tooltips). */if(ribbonOverflowMenu!=null)TranslateTree(ribbonOverflowMenu);if(topOverflowMenu!=null)TranslateTree(topOverflowMenu);foreach(var document in documents){var header=document.Item.Header as StackPanel;if(header!=null&&header.Children.Count>1)((Button)header.Children[1]).ToolTip=T("탭 닫기 (Ctrl+W)");}UpdateEditCaption();editButton.ToolTip=T(editing?"수정 모드 끄기 (Ctrl+E)":"수정 모드 켜기 (Ctrl+E)");/* b58: this one name follows the mode, not only the language (UpdateTools rewrites it on a mode change); re-apply it after the tree pass so a switch in either direction is right. */System.Windows.Automation.AutomationProperties.SetName(editButton,editing?T("수정 종료"):T("수정 시작"));if(sizes.Items.Count>0)sizes.Items[0]=T("크기");UpdateHeadingCaption();UpdateListCaption();UpdateTitle();UpdateLineMenu();foreach(var item in languageItems)item.IsChecked=Object.Equals(item.Tag,language);
+        if(Array.IndexOf(languageCodes,language)<0)language="ko";FontFamily=Ui.ChromeFamily(language);Resources["ChromeFont"]=FontFamily;foreach(var chrome in new DependencyObject[]{root.Children[0],documentTabs,ribbonHost,tableToolsHost,searchHost,statusBar,saveMenu,headingMenu,colorPopup.Child})if(chrome!=null)Ui.ToolbarText(chrome,FontFamily);TranslateTree(root);if(colorPopup.Child!=null)TranslateTree(colorPopup.Child);TranslateTree(saveMenu);/* b58: the » lists are built once per width change; their items keep the old language until they are rebuilt, so translate them now (names and tooltips). */if(ribbonOverflowMenu!=null)TranslateTree(ribbonOverflowMenu);if(topOverflowMenu!=null)TranslateTree(topOverflowMenu);foreach(var document in documents){var header=document.Item.Header as StackPanel;if(header!=null&&header.Children.Count>1)((Button)header.Children[1]).ToolTip=T("탭 닫기 (Ctrl+W)");}UpdateEditCaption();editButton.ToolTip=EditToggleTip();preview.ToolTip=SourceToggleTip();if(outlineButton!=null)outlineButton.ToolTip=OutlineToggleTip();if(quickText!=null)quickText.ToolTip=TextToggleTip();SyncViewButtonWidths();/* b58: this one name follows the mode, not only the language (UpdateTools rewrites it on a mode change); re-apply it after the tree pass so a switch in either direction is right. */System.Windows.Automation.AutomationProperties.SetName(editButton,editing?T("수정 종료"):T("수정 시작"));if(sizes.Items.Count>0)sizes.Items[0]=T("크기");UpdateHeadingCaption();UpdateListCaption();UpdateTitle();UpdateLineMenu();foreach(var item in languageItems)item.IsChecked=Object.Equals(item.Tag,language);
     }
     void TranslateTree(DependencyObject element){
         /* The list dropdown headers are composed in UpdateListCaption ("· " / "1. " plus the

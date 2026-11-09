@@ -7,6 +7,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Threading;
+using ICSharpCode.AvalonEdit.Rendering;
 
 namespace MDNote {
 // --ime-probe <outDir>: generated-text check of the IME composition font. AvalonEdit re-adds its
@@ -173,6 +174,7 @@ internal static class ImeProbeRunner {
         VerifyResultOnlyMessage(window,editor,check,message,hwnd);
         VerifyUnknownResultSafety(window,editor,check,message,composition,hwnd);
         VerifyPendingStyleCommitUndo(window,editor,check,message,composition,hwnd);
+        VerifySpanCompositionBackground(window,editor,check);
         VerifyResultTerminatorUndo(window,editor,check,message,composition,hwnd);
         VerifyResultWithoutEndUndo(window,editor,check,message,composition,hwnd);
         VerifyClickCommitCaret(window,editor,check,message,composition,hwnd);
@@ -205,6 +207,157 @@ internal static class ImeProbeRunner {
         check("undo works right after a Japanese commit under a pending style",idle&&editor.Document.Text!=before?1:-1,
             "before=["+before+"], after=["+editor.Document.Text+"], "+editor.CompositionState());
     }
+    // 11-09 user: the first syllable typed after the highlight / inline-code button kept the span's box while composing (the armed style),
+    // every later composing syllable was drawn without it. The box lives on the line element (MarkdownTransformer's BackgroundBrush) and the
+    // run properties the composition copies carry only typeface and colour, so the composition element itself must be formatted with the box
+    // (and the inline-code face) of the span it starts in. SetImeInline draws the string without a real IME context - the same seam a
+    // composition uses - and the drawn element answers the background and face it was formatted with.
+    static void VerifySpanCompositionBackground(MainWindow window,SourceEditor editor,Action<string,int,string> check){
+        MethodInfo set=null;
+        foreach(MethodInfo candidate in typeof(SourceEditor).GetMethods(Members))
+            if(candidate.Name=="SetImeInline"&&candidate.GetParameters().Length==1&&candidate.GetParameters()[0].ParameterType==typeof(string)){set=candidate;break;}
+        if(set==null){check("span composition background seam",-1,"SetImeInline(string) not found");return;}
+        window.SetText("문단 ==가== 끝\n\n문단 `가` 끝\n");window.SetMode(true);
+        if(!PumpBounded(2000)){check("span composition background setup",-1,"dispatcher did not become idle within 2 s");return;}
+        /* The palette of the attached session: the session is created by the mode switch above, so it is read after it. */
+        FieldInfo previewField=typeof(MainWindow).GetField("livePreview",Members);
+        var live=previewField==null?null:previewField.GetValue(window) as MarkdownLivePreview.Session;
+        if(live==null){check("span composition background seam",-1,"livePreview not found");return;}
+        try{
+            var document=editor.Document;
+            var highlightLine=document.GetLineByNumber(1);
+            string highlightText=document.GetText(highlightLine.Offset,highlightLine.Length);
+            int highlightAt=highlightLine.Offset+highlightText.IndexOf("==")+3;
+            editor.Select(highlightAt,0);editor.TextArea.Caret.BringCaretToView();PumpBounded(2000);
+            set.Invoke(editor,new object[]{"나"});
+            PumpBounded(2000);
+            ImeInlineElement drawn=FindImeElement(editor);
+            check("a later composing syllable inside ==x== keeps the highlight box",
+                drawn!=null&&Object.ReferenceEquals(drawn.DrawnBackground,live.Colors.Highlight)?1:-1,
+                "drawn="+DescribeBrush(drawn==null?null:drawn.DrawnBackground)+", expected="+DescribeBrush(live.Colors.Highlight)+", caret="+highlightAt);
+            set.Invoke(editor,new object[]{null});
+            var codeLine=document.GetLineByNumber(3);
+            string codeText=document.GetText(codeLine.Offset,codeLine.Length);
+            int codeAt=codeLine.Offset+codeText.IndexOf('`')+2;
+            editor.Select(codeAt,0);editor.TextArea.Caret.BringCaretToView();PumpBounded(2000);
+            set.Invoke(editor,new object[]{"나"});
+            PumpBounded(2000);
+            drawn=FindImeElement(editor);
+            bool box=drawn!=null&&Object.ReferenceEquals(drawn.DrawnBackground,live.Colors.InlineCode);
+            bool face=drawn!=null&&drawn.DrawnFace!=null&&drawn.DrawnFace.FontFamily.Source==MarkdownLivePreview.InlineCodeFamily.Source;
+            check("a later composing syllable inside `x` keeps the code box and face",box&&face?1:-1,
+                "drawn="+DescribeBrush(drawn==null?null:drawn.DrawnBackground)+", expected="+DescribeBrush(live.Colors.InlineCode)+
+                ", face="+(drawn==null||drawn.DrawnFace==null?"none":drawn.DrawnFace.FontFamily.Source));
+            // 11-09 user (screen recording): with a style active, Korean "테스트", a SPACE and then the first syllable after it: that syllable
+            // composed plain (no box, no italic/code face) although its commit lands inside the pair. The closing-edge space rule keeps the typed
+            // space outside the emphasis/code closers and pulls the next character back inside on commit, so the composition must read the pair's
+            // style at the space's inside edge, the spot the toolbar and the commit use, not the plain space it is drawn after.
+            set.Invoke(editor,new object[]{null});
+            string spaceText;
+            ImeInlineElement composed=ComposeAfterCloseSpace(window,editor,set,"문단 ==가==","==",out spaceText);
+            bool spaceBox=composed!=null&&Object.ReferenceEquals(composed.DrawnBackground,live.Colors.Highlight);
+            check("a composing syllable after the == pair's space keeps the highlight box",
+                spaceBox&&spaceText.Replace("\r\n","\n")=="문단 ==가==  끝\n"?1:-1,
+                "text=["+spaceText.Replace('\r',' ').Replace('\n','|')+"], drawn="+DescribeBrush(composed==null?null:composed.DrawnBackground)+
+                ", expected="+DescribeBrush(live.Colors.Highlight));
+            // The box must be one piece: the moved space before the composing string carries the same span brush, so
+            // TextView.OnRender merges it with the span and the string (otherwise [box 가] [plain space] [box 나]).
+            VisualLineElement spaceElement=FindVisualElementAt(editor,editor.CaretOffset-1);
+            bool spaceElementBoxed=spaceElement!=null&&Object.ReferenceEquals(spaceElement.BackgroundBrush,live.Colors.Highlight);
+            check("the pending space after the == pair takes the highlight box while composing",
+                spaceElementBoxed?1:-1,
+                "space="+DescribeBrush(spaceElement==null?null:spaceElement.BackgroundBrush)+", expected="+DescribeBrush(live.Colors.Highlight)+
+                ", element="+(spaceElement==null?"none":spaceElement.GetType().Name)+", caret="+editor.CaretOffset+CloseSpaceWhy(live,editor));
+            set.Invoke(editor,new object[]{null});
+            composed=ComposeAfterCloseSpace(window,editor,set,"문단 *가*","*",out spaceText);
+            bool spaceItalic=composed!=null&&composed.DrawnFace!=null&&composed.DrawnFace.Style==FontStyles.Italic;
+            check("a composing syllable after the * pair's space keeps the italic run",
+                spaceItalic&&spaceText.Replace("\r\n","\n")=="문단 *가*  끝\n"?1:-1,
+                "text=["+spaceText.Replace('\r',' ').Replace('\n','|')+"], face="+(composed==null||composed.DrawnFace==null?"none":composed.DrawnFace.Style.ToString()));
+            set.Invoke(editor,new object[]{null});
+            composed=ComposeAfterCloseSpace(window,editor,set,"문단 `가`","`",out spaceText);
+            bool spaceCodeBox=composed!=null&&Object.ReferenceEquals(composed.DrawnBackground,live.Colors.InlineCode);
+            bool spaceCodeFace=composed!=null&&composed.DrawnFace!=null&&composed.DrawnFace.FontFamily.Source==MarkdownLivePreview.InlineCodeFamily.Source;
+            check("a composing syllable after the ` pair's space keeps the code box and face",
+                spaceCodeBox&&spaceCodeFace&&spaceText.Replace("\r\n","\n")=="문단 `가`  끝\n"?1:-1,
+                "text=["+spaceText.Replace('\r',' ').Replace('\n','|')+"], drawn="+DescribeBrush(composed==null?null:composed.DrawnBackground)+
+                ", face="+(composed==null||composed.DrawnFace==null?"none":composed.DrawnFace.FontFamily.Source));
+            spaceElement=FindVisualElementAt(editor,editor.CaretOffset-1);
+            bool spaceCodeElementBoxed=spaceElement!=null&&Object.ReferenceEquals(spaceElement.BackgroundBrush,live.Colors.InlineCode);
+            check("the pending space after the ` pair takes the code box while composing",
+                spaceCodeElementBoxed?1:-1,
+                "space="+DescribeBrush(spaceElement==null?null:spaceElement.BackgroundBrush)+", expected="+DescribeBrush(live.Colors.InlineCode)+
+                ", element="+(spaceElement==null?"none":spaceElement.GetType().Name)+", caret="+editor.CaretOffset+CloseSpaceWhy(live,editor));
+        }catch(Exception ex){check("span composition background",-1,ex.GetType().Name+": "+ex.Message);}
+        finally{
+            try{set.Invoke(editor,new object[]{null});}catch(Exception){}
+            editor.ResetCompositionSimulation();
+            PumpBounded(2000);
+        }
+    }
+    // Builds the closing-edge space state the user recorded: one formatted character in a pair, the caret on its inside edge, a typed SPACE
+    // (the rule keeps it outside the pair and arms the pull-back), then a composition string started after that space. `text` is the document
+    // text after the space, so the caller can prove the space really moved outside. Returns the drawn composition element, null when none.
+    static ImeInlineElement ComposeAfterCloseSpace(MainWindow window,SourceEditor editor,MethodInfo set,string fixture,string marker,out string text){
+        text="";
+        window.SetText(fixture+" 끝\n");window.SetMode(true);
+        if(!PumpBounded(2000))return null;
+        var document=editor.Document;var line=document.GetLineByNumber(1);
+        string lineText=document.GetText(line.Offset,line.Length);
+        int open=lineText.IndexOf(marker);
+        if(open<0)return null;
+        // Inside edge of the closing marker: the opener, the one content character, then the closer.
+        int caret=line.Offset+open+marker.Length+1;
+        editor.Select(caret,0);editor.TextArea.Caret.BringCaretToView();PumpBounded(2000);
+        editor.TextArea.PerformTextInput(" ");
+        PumpBounded(2000);
+        text=document.Text;
+        set.Invoke(editor,new object[]{"나"});
+        PumpBounded(2000);
+        return FindImeElement(editor);
+    }
+    // The composition element drawn at the caret (ImeInlineGenerator built it for that offset), null when none is drawn yet.
+    static ImeInlineElement FindImeElement(SourceEditor editor){
+        var view=editor.TextArea.TextView;
+        view.EnsureVisualLines();
+        if(!view.VisualLinesValid)return null;
+        int offset=editor.CaretOffset;
+        foreach(var visual in view.VisualLines){
+            if(visual==null||visual.IsDisposed||visual.Elements==null)continue;
+            foreach(var element in visual.Elements){var ime=element as ImeInlineElement;if(ime!=null&&ime.BuiltOffset==offset)return ime;}
+        }
+        return null;
+    }
+    // The visual element that covers a document offset (the pending closing-edge space), null when no built line owns it.
+    // Why CloseSpaceBoxRange answered no: the pending-space fields and each condition it reads (diagnostic text for a FAIL line).
+    static string CloseSpaceWhy(MarkdownLivePreview.Session live,SourceEditor editor){
+        try{
+            var t=typeof(MarkdownLivePreview.Session);var f=BindingFlags.Instance|BindingFlags.NonPublic;
+            Func<string,object> get=delegate(string name){var fi=t.GetField(name,f);return fi==null?(object)"?":fi.GetValue(live);};
+            int caret=editor.CaretOffset;int start=(int)get("closeSpaceStart");int spaceCaret=(int)get("closeSpaceCaret");
+            var line=editor.Document.GetLineByOffset(caret);int s0,s1,s2;System.Windows.Media.Brush b;
+            return " why[pending="+get("closeSpacePending")+" caretLine="+get("caretLine")+"/"+line.LineNumber+" start="+start+" end="+get("closeSpaceEnd")+
+                " spaceCaret="+spaceCaret+" caret="+caret+" drawn="+editor.ImeDrawnAt(spaceCaret)+
+                " styleAt="+live.ImeStyleOffsetAt(spaceCaret)+" bg="+DescribeBrush(live.ImeSpanBackgroundAt(start))+
+                " range="+live.CloseSpaceBoxRange(line,out s0,out s1,out s2,out b)+"]";
+        }catch(Exception ex){return " why["+ex.GetType().Name+": "+ex.Message+"]";}
+    }
+    static VisualLineElement FindVisualElementAt(SourceEditor editor,int offset){
+        var view=editor.TextArea.TextView;
+        view.EnsureVisualLines();
+        if(!view.VisualLinesValid)return null;
+        foreach(var visual in view.VisualLines){
+            if(visual==null||visual.IsDisposed||visual.Elements==null)continue;
+            int first=visual.FirstDocumentLine.Offset;
+            foreach(var element in visual.Elements){
+                if(element.DocumentLength<=0)continue;
+                int start=first+element.RelativeTextOffset;
+                if(offset>=start&&offset<start+element.DocumentLength)return element;
+            }
+        }
+        return null;
+    }
+    static string DescribeBrush(System.Windows.Media.Brush brush){return brush==null?"null":brush.ToString();}
     // An IME may report GCS_RESULTSTR with the terminating NUL counted in its byte length. The
     // counted result must be the characters, not the reported bytes: one extra unit left ImeBusy
     // true and parked undo after an ordinary commit. The probe passes the raw string with the NUL.

@@ -149,6 +149,7 @@ static class MathProbe {
             SyntaxCases();
             RenderCases();
             CaretCases();
+            CloserAtEndCases();
             EditCases();
             NavigationCases();
             ScrollCases();
@@ -353,6 +354,68 @@ static class MathProbe {
             Check("4 basic: caret inside a block -> block source", blockRaw, "h6=" + N(LineHeight(env, 6)));
             Caret(env, 9, 2);
             Check("4 basic: caret in a one-line display -> source", MathElements(env, 9) == 0, "one-line=" + MathElements(env, 9));
+        }
+    }
+    // A display block whose closing line is the document's last line with no line break after it.
+    // The document-end stop (a click below the last text row, Ctrl+End) is at the end of the closer's
+    // line only because that line has no delimiter; the block must stay a formula there, exactly like
+    // the same file with one trailing line break (where the stop is the empty line after the block).
+    // A caret on any line of the block still shows its source.
+    const string EndBlock = "intro\n\n$$\nx^2\n$$";
+    const string EndFence = "intro\n\n```math\n\\frac{a}{b}\n```";
+    static void CloserAtEndCases() {
+        foreach (bool hide in new[] { false, true }) {
+            string mode = hide ? "basic" : "live";
+            using (MathEnv env = Open(EndBlock, hide, false)) {
+                Caret(env, 1, 1);
+                Check("12 " + mode + ": $$ block closed on the last line renders", MathElements(env, 3) == 1 && Folded(env, 3, 5),
+                    "elements=" + MathElements(env, 3) + " lines=" + env.Editor.Document.LineCount);
+                Caret(env, 5, 3);
+                bool raw = env.Session.Raw(env.Editor.Document.GetLineByNumber(3));
+                Check("12 " + mode + ": the document-end stop after the closing $$ keeps the formula",
+                    !raw && MathElements(env, 3) == 1 && Folded(env, 3, 5),
+                    "raw=" + raw + " elements=" + MathElements(env, 3) + " caret=" + env.Editor.TextArea.Caret.Offset + "/" + env.Editor.Document.TextLength);
+                // The stop is one offset of the closer's line; a step left inside that line is a
+                // caret on the block and must show its source again (the same-line flip back).
+                Caret(env, 5, 2);
+                Check("12 " + mode + ": a step left off the document-end stop shows the block's source",
+                    env.Session.Raw(env.Editor.Document.GetLineByNumber(3)) && MathElements(env, 3) == 0,
+                    "elements=" + MathElements(env, 3) + " caret=" + env.Editor.TextArea.Caret.Offset + "/" + env.Editor.Document.TextLength);
+                Caret(env, 4, 1);
+                Check("12 " + mode + ": a caret inside the block still shows its source",
+                    env.Session.Raw(env.Editor.Document.GetLineByNumber(3)) && MathElements(env, 3) == 0,
+                    "elements=" + MathElements(env, 3));
+            }
+            // A real click below the text or Ctrl+End moves the caret in one event (unlike Caret(),
+            // whose Line then Column assignments are two). The end stop must render the formula then too.
+            using (MathEnv env = Open(EndBlock, hide, false)) {
+                Caret(env, 1, 1);
+                env.Editor.TextArea.Caret.Offset = env.Editor.Document.TextLength;
+                Pump(env);
+                Check("12 " + mode + ": one caret event to the document-end stop renders the formula",
+                    !env.Session.Raw(env.Editor.Document.GetLineByNumber(3)) && MathElements(env, 3) == 1 && Folded(env, 3, 5),
+                    "elements=" + MathElements(env, 3) + " caret=" + env.Editor.TextArea.Caret.Offset + "/" + env.Editor.Document.TextLength);
+            }
+            using (MathEnv env = Open(EndFence, hide, false)) {
+                Caret(env, 1, 1);
+                Check("12 " + mode + ": ```math fence closed on the last line renders", MathElements(env, 3) == 1 && Folded(env, 3, 5),
+                    "elements=" + MathElements(env, 3) + " lines=" + env.Editor.Document.LineCount);
+                Caret(env, 5, 4);
+                bool raw = env.Session.Raw(env.Editor.Document.GetLineByNumber(3));
+                Check("12 " + mode + ": the document-end stop after the closing fence keeps the formula",
+                    !raw && MathElements(env, 3) == 1 && Folded(env, 3, 5),
+                    "raw=" + raw + " elements=" + MathElements(env, 3) + " caret=" + env.Editor.TextArea.Caret.Offset + "/" + env.Editor.Document.TextLength);
+                Caret(env, 5, 3);
+                Check("12 " + mode + ": a step left off the document-end stop shows the block's source",
+                    env.Session.Raw(env.Editor.Document.GetLineByNumber(3)) && MathElements(env, 3) == 0,
+                    "elements=" + MathElements(env, 3) + " caret=" + env.Editor.TextArea.Caret.Offset + "/" + env.Editor.Document.TextLength);
+            }
+            using (MathEnv env = Open(EndBlock + "\n", hide, false)) {
+                Caret(env, 6, 1);
+                Check("12 " + mode + ": one trailing line break puts the stop after the block and keeps the formula",
+                    MathElements(env, 3) == 1 && Folded(env, 3, 5),
+                    "elements=" + MathElements(env, 3) + " lines=" + env.Editor.Document.LineCount);
+            }
         }
     }
 

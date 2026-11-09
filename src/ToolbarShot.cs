@@ -97,6 +97,58 @@ public partial class MainWindow {
     /* b55: the list dropdown's slot is caption-independent; it was tuned on 목록. A probe switch lets the
        shot carry the caption in every language and report what the label got against what its glyphs need. */
     internal void ToolbarLanguage(string code){language=code;ApplyLanguage();}
+    /* --toolbar-shot panel shots: the runner is outside this partial class, so these keep the same
+       narrow internal surface as ToolbarLoadSample above. SetOutlinePanel and ShowOutlineTab are the
+       exact paths the toolbar toggle, the View menu, F10 and the header's two tabs use; the field
+       readers let the runner check the tree it just drove (the folder rows arrive from the pool). */
+    internal void PanelShotOpen(string path){LoadFileCore(path);SetMode(false);}
+    internal void PanelShotTheme(bool dark){SetDark(dark);}
+    internal void PanelShotOutline(bool show){SetOutlinePanel(show);}
+    internal void PanelShotFilesTab(){ShowOutlineTab(true);}
+    /* --toolbar-shot format sample: the runner sits outside this partial class, so edit mode, the
+       Live/Basic switch, the caret and the quiet close get the same narrow internal surface as the
+       panel shots above. The caret clamps to the document so a caller offset can never throw. */
+    internal void FormatShotEdit(){SetMode(true);}
+    internal int FormatShotLength(){return source==null||source.Document==null?0:source.Document.TextLength;}
+    // Assigning CaretIndex does not scroll, so a caret placed after an earlier shot's scroll kept
+    // that shot's viewport (the line-1 picture showed the document end and its YAML rows read as
+    // missing). Each shot now scrolls to its own caret: line 1 goes to the top of the document,
+    // any other caret is brought just inside the viewport (SafeBringCaretToView).
+    internal void FormatShotCaret(int offset){
+        if(source==null||source.Document==null)return;
+        int length=source.Document.TextLength;
+        offset=offset<0?0:(offset>length?length:offset);
+        source.CaretIndex=offset;
+        if(offset==0)source.ScrollTo(1,0);
+        else MarkdownLivePreview.Session.SafeBringCaretToView(source.TextArea);
+    }
+    internal void FormatShotLive(bool live){SetLiveMode(live);}
+    internal void FormatShotClose(){saved=text;recoveredDocument=false;Close();}
+    internal int PanelShotOutlineCount(){return outline==null?0:outline.Items.Count;}
+    internal string PanelShotOutlineTitles(){var titles=new List<string>();if(outline!=null)PanelShotOutlineTitles(outline.Items,titles);return String.Join(" | ",titles.ToArray());}
+    static void PanelShotOutlineTitles(ItemCollection items,List<string> titles){
+        foreach(object entry in items){var item=entry as TreeViewItem;if(item==null)continue;string name=System.Windows.Automation.AutomationProperties.GetName(item);if(!String.IsNullOrEmpty(name))titles.Add(name);PanelShotOutlineTitles(item.Items,titles);}
+    }
+    internal string PanelShotPanelState(){return "outline="+(outline==null?"null":outline.Visibility.ToString())+" filesTab="+outlineFilesTab+" open="+outlinePanelOpen+" folderPanel="+(folderPanel==null?"null":folderPanel.Visibility.ToString());}
+    internal TreeViewItem PanelShotFolderItem(string name){
+        if(folderTree==null)return null;
+        foreach(object child in folderTree.Items){var item=child as TreeViewItem;if(item==null)continue;var entry=item.Tag as FolderTreeEntry;if(entry!=null&&entry.IsFolder&&String.Equals(entry.Name,name,StringComparison.Ordinal))return item;}
+        return null;
+    }
+    internal string[] PanelShotFolderNames(){
+        if(folderTree==null)return new string[0];
+        var names=new List<string>();
+        foreach(object child in folderTree.Items){var item=child as TreeViewItem;if(item==null)continue;var entry=item.Tag as FolderTreeEntry;if(entry!=null)names.Add(entry.Name);}
+        return names.ToArray();
+    }
+    internal void PanelShotExpand(TreeViewItem item){if(item!=null)item.IsExpanded=true;}
+    internal bool PanelShotFolderChildren(TreeViewItem item){
+        if(item==null)return false;
+        var entry=item.Tag as FolderTreeEntry;
+        if(entry==null||!entry.Loaded)return false;
+        foreach(object child in item.Items){var node=child as TreeViewItem;if(node!=null&&node.Tag is FolderTreeEntry)return true;}
+        return false;
+    }
     internal string ToolbarCaretFormat(int line,int column){return CaretPositionText(line,column);}
     internal string ToolbarStatusHead(){var value=status==null?"":status.Text;int at=value.IndexOf("   ·",StringComparison.Ordinal);return at<0?value:value.Substring(0,at);}
     internal Control[] ToolbarCaptionControls(){return new Control[]{editButton,listButton,taskButton,quoteButton,blockButton,ruleButton,preview,headingButton,sizes};}
@@ -178,6 +230,8 @@ static class ToolbarShotRunner {
             var all=new RenderTargetBitmap(1280,1200,96,96,PixelFormats.Pbgra32);all.Render(visual);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(all));using(var stream=File.Create(Path.Combine(outDir,"source-braces.png")))encoder.Save(stream);
         }
         MeasureLiveOverflowWindow(report,outDir);
+        MeasureOutlinePanelShots(report,outDir);
+        MeasureFormatSampleShots(report,outDir);
         File.WriteAllText(Path.Combine(outDir,"toolbar-shot.txt"),report.ToString(),new UTF8Encoding(false));
         File.WriteAllText(Path.Combine(outDir,"toolbar-shot-PASS.txt"),"PASS",new UTF8Encoding(false));
         return 0;
@@ -608,6 +662,141 @@ static class ToolbarShotRunner {
             if(ribbon.Visibility==Visibility.Visible||top.Visibility==Visibility.Visible)throw new InvalidOperationException(name+": live window at 1050 px shows an overflow button");
             report.AppendLine(name+" live window 380/1050 px overflow PASS");
         }finally{window.Close();}
+    }
+    /* --toolbar-shot: the outline panel and the 파일 tab on a real (offscreen) 1050x700 window.
+       The fixture folder is the panel's own data on disk: 목차 reads the headings of 회의 기록.md below,
+       and the 파일 tab's root is that file's folder, so the two PNGs exercise the product paths the
+       F10 toggle and the header's two tabs use. */
+    static void MeasureOutlinePanelShots(StringBuilder report,string outDir){
+        string fixture=Path.Combine(outDir,"panel-fixture","노트");
+        Directory.CreateDirectory(Path.Combine(fixture,"자료"));
+        string note=Path.Combine(fixture,"회의 기록.md");
+        File.WriteAllText(note,"# 회의 기록\n\n## 결정한 것\n\n- 다음 주 배포\n\n### 아주 긴 제목이 패널 폭보다 길어서 가로 스크롤이 생기는지 보는 제목\n\n본문 한 줄\n\n## 남은 일\n\n- 검토하기\n",new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(fixture,"지난 회의.md"),"# 지난 회의\n",new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(fixture,"메모.txt"),"메모\n",new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(fixture,"자료","할 일.md"),"# 할 일\n",new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(fixture,"사진.png"),"",new UTF8Encoding(false));
+        foreach(bool dark in new bool[]{false,true}){
+            string name=dark?"dark":"light";
+            var window=PanelShotWindow(dark);
+            try{
+                window.PanelShotOpen(note);
+                PumpWindow(window);
+                window.PanelShotOutline(true);
+                PumpWindow(window);
+                int items=window.PanelShotOutlineCount();
+                report.AppendLine("panel outline "+name+" "+window.PanelShotPanelState()+" items="+items+" titles="+window.PanelShotOutlineTitles());
+                if(items==0)throw new InvalidOperationException("Panel outline shot: no headings in the tree");
+                Program.Snapshot(window,Path.Combine(outDir,"panel-outline-"+name+".png"));
+                window.PanelShotFilesTab();
+                bool folderFound=WaitFor(window,delegate{return window.PanelShotFolderItem("자료")!=null;},3000);
+                string[] rootNames=window.PanelShotFolderNames();
+                report.AppendLine("panel files "+name+" "+window.PanelShotPanelState()+" root=["+String.Join(" | ",rootNames)+"] 자료="+folderFound);
+                if(!folderFound)throw new InvalidOperationException("Panel files shot: 자료 did not appear within 3 s");
+                if(Array.IndexOf(rootNames,"사진.png")>=0)throw new InvalidOperationException("Panel files shot: the ignored png is listed");
+                var folder=window.PanelShotFolderItem("자료");
+                window.PanelShotExpand(folder);
+                bool children=WaitFor(window,delegate{return window.PanelShotFolderChildren(folder);},3000);
+                PumpWindow(window);
+                report.AppendLine("panel files "+name+" 자료 children="+children);
+                if(!children)throw new InvalidOperationException("Panel files shot: 자료 children did not load within 3 s");
+                Program.Snapshot(window,Path.Combine(outDir,"panel-files-"+name+".png"));
+            }finally{window.Close();}
+        }
+    }
+    /* One offscreen 1050x700 window in the requested theme and Korean captions, laid out before the
+       first shot (Show is what realises the panel and the tree the shots capture). Closing it needs
+       no prompt: the probe only opens a file and reads the panel, so nothing is unsaved. */
+    static MainWindow PanelShotWindow(bool dark){
+        return PanelShotWindow(dark,700);
+    }
+    static MainWindow PanelShotWindow(bool dark,int height){
+        var window=new MainWindow {ShowInTaskbar=false,ShowActivated=false,WindowStartupLocation=WindowStartupLocation.Manual,Left=-20000,Top=-20000,Width=1050,Height=height};
+        window.Show();
+        window.ToolbarLanguage("ko");
+        window.PanelShotTheme(dark);
+        PumpWindow(window);
+        return window;
+    }
+    static void PumpWindow(MainWindow window){
+        window.Dispatcher.Invoke(DispatcherPriority.Background,new Action(delegate{}));
+        window.Dispatcher.Invoke(DispatcherPriority.Loaded,new Action(delegate{}));
+        window.Dispatcher.Invoke(DispatcherPriority.ContextIdle,new Action(delegate{}));
+        window.UpdateLayout();
+    }
+    /* The folder read lands on the dispatcher from the worker pool, so the wait pumps the dispatcher
+       and lets those posted passes run between steps; the caller's 3 s cap bounds the wait. */
+    static bool WaitFor(MainWindow window,Func<bool> condition,int timeoutMs){
+        DateTime deadline=DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while(true){
+            window.Dispatcher.Invoke(DispatcherPriority.Background,new Action(delegate{}));
+            window.UpdateLayout();
+            if(condition())return true;
+            if(DateTime.UtcNow>=deadline)return false;
+            System.Threading.Thread.Sleep(25);
+        }
+    }
+    /* --toolbar-shot format sample: every 2.4 inline/form addition in one document (highlight, sup/sub,
+       kbd, u, mark, emoji, table, details, fence, front matter). A real 1050x800 light window in Korean
+       opens it the way the panel shots do; edit mode puts the caret at the document end (the last row,
+       which live draws as source) and the same caret is shot in Live (SetLiveMode(true)) and Basic
+       (SetLiveMode(false)). The caret then goes to line 1 and back to the end so the last two PNGs
+       catch a stale first-line cache. Offscreen, no hover (the probe has no mouse), and closing is
+       quiet because only the caret moved. */
+    static void MeasureFormatSampleShots(StringBuilder report,string outDir){
+        string folder=Path.Combine(outDir,"format-fixture");
+        Directory.CreateDirectory(folder);
+        string samplePath=Path.Combine(folder,"sample.md");
+        string sample=@"---
+title: 2.4 서식 확인
+tags: [mdnote, test]
+---
+<p align=""center""><b>MDNote 2.4</b> 서식 견본</p>
+
+# 새 서식
+
+이건 ==형광펜==이고, x<sup>2</sup>와 H<sub>2</sub>O, <kbd>Ctrl</kbd>+<kbd>S</kbd>, <u>밑줄</u>, <mark>표시</mark>입니다.
+
+:tada: 이모지 :+1: 와 <kbd>A</kbd> <kbd>B</kbd> <kbd>C</kbd>
+
+| 키 | 설명 |
+| --- | --- |
+| <kbd>S</kbd> | 저장 |
+
+<details>
+<summary>펼친 상자 제목</summary>
+상자 안 줄
+</details>
+
+```js
+function hello() { return 1; }
+```
+
+끝 줄
+";
+        /* the source file is LF, but keep the fixture LF even if this file is ever saved on a CRLF editor */
+        File.WriteAllText(samplePath,sample.Replace("\r\n","\n"),new UTF8Encoding(false));
+        var window=PanelShotWindow(false,800);
+        try{
+            window.PanelShotOpen(samplePath);
+            PumpWindow(window);
+            window.FormatShotEdit();
+            int length=window.FormatShotLength();
+            if(length<=0)throw new InvalidOperationException("Format shot: the sample did not load");
+            window.FormatShotCaret(length);
+            window.FormatShotLive(true);PumpWindow(window);
+            Program.Snapshot(window,Path.Combine(outDir,"format-live.png"));
+            window.FormatShotLive(false);PumpWindow(window);
+            Program.Snapshot(window,Path.Combine(outDir,"format-basic.png"));
+            window.FormatShotLive(true);window.FormatShotCaret(0);PumpWindow(window);
+            Program.Snapshot(window,Path.Combine(outDir,"format-live-caret1.png"));
+            window.FormatShotCaret(window.FormatShotLength());PumpWindow(window);
+            Program.Snapshot(window,Path.Combine(outDir,"format-live-back.png"));
+            /* caret away from the front matter with line 1 still on screen: both --- rows must be hidden */
+            window.FormatShotCaret(0);PumpWindow(window);window.FormatShotCaret(sample.IndexOf("# 새 서식",StringComparison.Ordinal));PumpWindow(window);
+            Program.Snapshot(window,Path.Combine(outDir,"format-live-mid.png"));
+            report.AppendLine("format shots: sample.md "+sample.Length+" chars, carets end/end/1/end/mid, view scrolled to each caret, 1050x800 light ko, live/basic live/basic live/back PASS (no hover)");
+        }finally{window.FormatShotClose();}
     }
     static bool ShownInRow(FrameworkElement source,MainWindow window,bool ribbon,FrameworkElement host){
         var item=source as MenuItem;

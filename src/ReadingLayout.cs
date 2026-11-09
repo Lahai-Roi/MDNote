@@ -16,16 +16,16 @@ public partial class MainWindow {
         menu.Items.Add(new Separator());customLine=new MenuItem {IsCheckable=true};customLine.Click+=delegate{string value=Input(T("줄 간격 (%)"),customLinePercent.ToString("0.##",CultureInfo.CurrentCulture));double percent;if(value!=null){if(TryLinePercent(value,out percent))SetCustomLinePercent(percent);else MessageBox.Show(this,T("50~400% 사이의 숫자를 입력해 주세요."),T("줄 간격"));}UpdateLineMenu();};menu.Items.Add(customLine);UpdateLineMenu();
     }
     /* Basic mode keeps every line formatted; Live view reveals the caret and selection lines. Both use
-       the same editor and buffer. 11-01 user: the item sits with the other display toggles (under
-       자동 줄바꿈), not under 줄 간격, and keeps the name the user knows ("라이브 보기"). */
+       the same editor and buffer. 11-01 user: the item sits with the other display toggles (다크 모드 /
+       집중 모드 / 타자기 모드), not under 줄 간격, and keeps the name the user knows ("라이브 보기").
+       The panel toggles (목차 / 제목 단계 표시 / 자동 줄바꿈) form their own group above (user, 2026-11-09). */
     void BuildLiveViewItem(MenuItem view){
         liveModeMenu=new MenuItem {Header="Markdown 라이브 미리보기",IsCheckable=true,IsChecked=!hideMarkers,ToolTip="커서가 있는 줄만 원문으로 보여 줍니다."};
         liveModeMenu.Click+=delegate{SetLiveMode(liveModeMenu.IsChecked);};
         view.Items.Add(liveModeMenu);
-        BuildHeadingMarksMenu(view);
         view.SubmenuOpened+=delegate{UpdateLiveModeMenu();UpdateHeadingMarksMenu();};
     }
-    /* user 2026-11-06: 보기 > 제목 단계 표시 sits right under the live item, in the same group, and is built
+    /* user 2026-11-09: 보기 > 제목 단계 표시 sits in the panel group with 목차 and 자동 줄바꿈, and is built
        like the 집중 모드 row (FocusMode.cs BuildFocusMenu): the row itself toggles (on with the last style,
        or off) and its submenu picks 슬래시 막대 / # 기호 / 끄기. The parent shows the check mark while a style
        is on. The three choices carry a HeadingStyleChoice tag and are translated by TranslateFocusChoice

@@ -15,11 +15,21 @@ Right below each section of the plan, a **[Writing tip]** quote box explains the
 
 ---
 
+[TOC]
+
+---
+
+> **[Writing tip]** Type `[TOC]` on a line by itself to generate a table of contents like the one above. It updates automatically when you edit headings, and clicking an item jumps to that heading.
+
+---
+
 ## 1. When, Who, and Where
 
 **Saturday, Nov 7 to Tuesday, Nov 10**, traveling to *Osaka and Kyoto* with a friend. On day one, ~~go shopping right after landing~~ drop bags at the hotel first. Visit Kyoto on **Monday** to avoid the weekend crowd.
 
-Kyoto's autumn leaves peak from mid-November, so they will just be starting to turn. Since we have to head to the airport on the last morning, we really only have **two and a half days** to explore. Don't pack too many stops into a single day!
+Kyoto's autumn leaves peak[^1] from mid-November, so they will just be starting to turn. Since we have to ==head to the airport on the last morning==, we really only have **two and a half days** to explore. Don't pack too many stops into a single day!
+
+[^1]: It varies slightly each year, so check the autumn foliage forecast before leaving.
 
 ---
 
@@ -27,6 +37,10 @@ Kyoto's autumn leaves peak from mid-November, so they will just be starting to t
 >
 > - You can also select text and click the **Bold**, **Italic**, or **Toggle strikethrough** buttons.
 > - If no text is selected, the style applies to whatever you type next.
+>
+> ![Highlight](guide-mark.png) Wrap text with `==` like `==highlight==` to give it a yellow background, like "head to the airport on the last morning" above. You can also use the **Highlight** button or **Ctrl+Shift+H**.
+>
+> Put `[^1]` in the text and `[^1]: note` on its own line below to create a **footnote**. Hover over the number next to "peak" above to preview the note, and click ↩ at the end of the note to jump back to the text.
 
 Pressing Enter inside bold, italic, strikethrough, or inline code keeps the formatting on both lines after the line break.
 

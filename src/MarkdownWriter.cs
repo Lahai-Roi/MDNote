@@ -180,7 +180,7 @@ internal static class MarkdownWriter {
     // deferral (the space stays outside "**"/"*" and the emphasis opens at the next core character).
     // The transition still runs for a whitespace-only piece even with no outer wrapper, so emphasis left
     // open by the previous run is closed before the held whitespace and the space is not dropped.
-    static List<Wrap> OuterWrappers(List<Wrap> wrappers){var outer=new List<Wrap>();for(int i=0;i<wrappers.Count;i++){string kind=wrappers[i].Kind;if(kind!="link"&&kind!="span")break;outer.Add(wrappers[i]);}return outer;}
+    static List<Wrap> OuterWrappers(List<Wrap> wrappers){var outer=new List<Wrap>();for(int i=0;i<wrappers.Count;i++){string kind=wrappers[i].Kind;if(kind!="link"&&kind!="span"&&kind!="html")break;outer.Add(wrappers[i]);}return outer;}
     // A rich paste inside an existing emphasis run drops that run's delimiter (PasteSupport.cs
     // PasteBoldSuppressed etc.); the style flags stay on the fragments, only their marker pair is
     // withheld, so the text keeps the outer run and cannot close it early.
@@ -189,6 +189,8 @@ internal static class MarkdownWriter {
         if(link!=null)list.Add(new Wrap("link",link));
         string css="";if(style[4]!="")css+="color:"+style[4]+";";if(style[5]!="")css+="font-size:"+style[5]+"px;";
         if(css!="")list.Add(new Wrap("span",css.TrimEnd(';')));
+        if(style.Length>7)foreach(string tag in style[7].Split(new[]{','},StringSplitOptions.RemoveEmptyEntries))list.Add(new Wrap("html",tag));
+        if(style.Length>6&&style[6]=="1"&&!MainWindow.PasteHighlightSuppressed)list.Add(new Wrap("highlight",""));
         bool bold=style[0]=="1"&&!MainWindow.PasteBoldSuppressed;
         bool italic=style[1]=="1"&&!MainWindow.PasteItalicSuppressed;
         bool strike=style[2]=="1"&&!MainWindow.PasteStrikeSuppressed;
@@ -218,7 +220,7 @@ internal static class MarkdownWriter {
         // the space inside it, exactly like the branch above.
         else{CloseFrom(output,open,OuterCount(open));Release(output,trail);CloseFrom(output,open,0);Release(output,lead);}
     }
-    static int OuterCount(List<Wrap> list){int i=0;while(i<list.Count&&(list[i].Kind=="link"||list[i].Kind=="span"))i++;return i;}
+    static int OuterCount(List<Wrap> list){int i=0;while(i<list.Count&&(list[i].Kind=="link"||list[i].Kind=="span"||list[i].Kind=="html"))i++;return i;}
     static int KindIndex(List<Wrap> list,string kind){for(int i=0;i<list.Count;i++)if(list[i].Kind==kind)return i;return -1;}
     // True when a bold-nested italic "_" is about to open directly after a word character (no pending
     // whitespace), where the parser's (?<!\w)_..._(?!\w) would leave the marker as literal text.
@@ -247,8 +249,8 @@ internal static class MarkdownWriter {
     // At a line break/paragraph end the emphasis layers close before the trailing space and the
     // link/span layers after it, so "**a **" never appears (same rule as Transition).
     static void FlushPending(StringBuilder output,List<Wrap> open,StringBuilder trail,StringBuilder lead){CloseFrom(output,open,OuterCount(open));Release(output,trail);CloseFrom(output,open,0);Release(output,lead);}
-    static string OpenMarker(Wrap wrap){switch(wrap.Kind){case "link":return "[";case "span":return "<span style=\""+wrap.Value+"\">";case "strike":return "~~";case "bold":return "**";default:return wrap.Value;}}
-    static string CloseMarker(Wrap wrap){switch(wrap.Kind){case "link":return "]("+wrap.Value.Replace(")","%29")+")";case "span":return "</span>";case "strike":return "~~";case "bold":return "**";default:return wrap.Value;}}
+    static string OpenMarker(Wrap wrap){switch(wrap.Kind){case "link":return "[";case "span":return "<span style=\""+wrap.Value+"\">";case "strike":return "~~";case "highlight":return "==";case "html":return "<"+wrap.Value+">";case "bold":return "**";default:return wrap.Value;}}
+    static string CloseMarker(Wrap wrap){switch(wrap.Kind){case "link":return "]("+wrap.Value.Replace(")","%29")+")";case "span":return "</span>";case "strike":return "~~";case "highlight":return "==";case "html":return "</"+wrap.Value+">";case "bold":return "**";default:return wrap.Value;}}
     static double NormalSize(Paragraph paragraph){FrameworkContentElement parent=paragraph;while(parent!=null&&!(parent is FlowDocument))parent=parent.Parent as FrameworkContentElement;return parent is FlowDocument?((FlowDocument)parent).FontSize:16;}
     static void Collect(InlineCollection items,Paragraph paragraph,string link,List<Fragment> result){Collect(items,paragraph,link,result,null,null);}
     static void Collect(InlineCollection items,Paragraph paragraph,string link,List<Fragment> result,TextPointer from,TextPointer to){
@@ -258,15 +260,24 @@ internal static class MarkdownWriter {
             if(item.Tag is string&&((string)item.Tag).StartsWith("image:")){result.Add(new Fragment{Text=((string)item.Tag).Substring(6),Style="raw"});continue;}
             var run=item as Run;
             if(run!=null){string text=run.Text;if(from!=null){int startIndex=0,endIndex=text.Length;if(from.CompareTo(run.ContentStart)>0)startIndex=Math.Max(0,Math.Min(text.Length,run.ContentStart.GetOffsetToPosition(from)));if(to.CompareTo(run.ContentEnd)<0)endIndex=Math.Max(0,Math.Min(text.Length,run.ContentStart.GetOffsetToPosition(to)));if(endIndex<=startIndex)continue;if(startIndex>0||endIndex<text.Length)text=text.Substring(startIndex,endIndex-startIndex);}if(text.Length==0)continue;
+                string tags=HtmlWrappers(run);
                 bool bold=run.FontWeight.ToOpenTypeWeight()>=600&&Markdown.HeadingLevel(paragraph,NormalSize(paragraph))==0&&!TableHeaderBold(run,paragraph);
                 bool italic=run.FontStyle==FontStyles.Italic;
                 bool strike=Decorated(run,TextDecorationLocation.Strikethrough);
-                bool code=Markdown.IsInlineCodeFont(run.FontFamily)&&!Markdown.IsInlineCodeFont(paragraph.FontFamily);
+                // A <kbd> box carries the inline code typeface for its look; it is one tag, not a
+                // backtick span (tags.IndexOf below: sup/sub never carry that font).
+                bool code=Markdown.IsInlineCodeFont(run.FontFamily)&&!Markdown.IsInlineCodeFont(paragraph.FontFamily)&&tags.IndexOf("kbd",StringComparison.Ordinal)<0;
                 string color="";var brush=run.Foreground as SolidColorBrush;var normal=paragraph.Foreground as SolidColorBrush;
                 var ancestor=run.Parent as TextElement;while(ancestor!=null&&!(ancestor is Paragraph)){if(ancestor is Hyperlink){normal=ancestor.Foreground as SolidColorBrush;break;}ancestor=ancestor.Parent as TextElement;}
                 if(brush!=null&&normal!=null&&brush.Color!=normal.Color)color="#"+brush.Color.R.ToString("X2")+brush.Color.G.ToString("X2")+brush.Color.B.ToString("X2");
-                string size=Math.Abs(run.FontSize-paragraph.FontSize)>.01?run.FontSize.ToString("0.##",CultureInfo.InvariantCulture):"";
-                result.Add(new Fragment{Text=text,Link=link,Style=(bold?"1":"0")+"|"+(italic?"1":"0")+"|"+(strike?"1":"0")+"|"+(code?"1":"0")+"|"+color+"|"+size});
+                bool highlight=Highlighted(run);double actual=run.FontSize;
+                foreach(string tag in tags.Split(new[]{','},StringSplitOptions.RemoveEmptyEntries))if(tag=="sup"||tag=="sub")actual/=.75;
+                string size=Math.Abs(actual-paragraph.FontSize)>.01?actual.ToString("0.##",CultureInfo.InvariantCulture):"";
+                result.Add(new Fragment{Text=text,Link=link,Style=(bold?"1":"0")+"|"+(italic?"1":"0")+"|"+(strike?"1":"0")+"|"+(code?"1":"0")+"|"+color+"|"+size+"|"+(highlight?"1":"0")+"|"+tags});
+            } else if(item is InlineUIContainer&&Object.Equals(item.Tag,"html:kbd")){
+                var border=((InlineUIContainer)item).Child as System.Windows.Controls.Border;
+                var text=border==null?null:border.Child as System.Windows.Controls.TextBlock;
+                if(text!=null)Collect(text.Inlines,paragraph,link,result,null,null);
             } else if(item is LineBreak)result.Add(new Fragment{Text="",Style="break",Link=null});
             else if(item is Span){var h=item as Hyperlink;if(h!=null&&h.Resources.Contains("FootnoteId")){result.Add(new Fragment {Text="[^"+(string)h.Resources["FootnoteId"]+"]",Style="raw"});continue;}Collect(((Span)item).Inlines,paragraph,h==null?link:(h.Tag as string??(h.NavigateUri==null?"":h.NavigateUri.ToString())),result,from,to);}
         }
@@ -286,6 +297,43 @@ internal static class MarkdownWriter {
         return true;
     }
     internal static bool Decorated(Inline inline,TextDecorationLocation location){for(TextElement e=inline;e!=null&&!(e is Paragraph);e=e.Parent as TextElement){var i=e as Inline;if(i!=null&&i.TextDecorations!=null)foreach(TextDecoration d in i.TextDecorations)if(d.Location==location)return true;}return false;}
+    // The ==highlight== box the parser paints (MDNote.cs HighlightBrush, light #FFF1A8 / dark
+    // #6B5A1A), plus an RTF paste's own character shading: Markdown has no other background form,
+    // so any background that is not the inline code box is written back as a pair. Background is
+    // read from the run and from every span above it (a mark's colour sits on the span).
+    static bool Highlighted(Run run){
+        for(TextElement element=run;element!=null&&!(element is Paragraph);element=element.Parent as TextElement){
+            var brush=element.Background as SolidColorBrush;
+            if(brush==null||brush.Color.A==0)continue;
+            Color color=brush.Color;
+            // The inline code box (MDNote.cs AddHtml: light #E1E6EE, dark #495363) is not a highlight.
+            if((color.R==225&&color.G==230&&color.B==238)||(color.R==73&&color.G==83&&color.B==99))continue;
+            return true;
+        }
+        return false;
+    }
+    // The tags the rich document can only give back as tags: the parser marks every inline tag
+    // span "html:<name>" (MDNote.cs AddHtml), and an RTF paste keeps superscript/subscript as a
+    // baseline alignment alone. Ordered outermost first, the order Wrappers opens them in.
+    static string HtmlWrappers(Run run){
+        var tags=new List<string>();
+        for(TextElement element=run;element!=null&&!(element is Paragraph);element=element.Parent as TextElement){
+            var span=element as Span;
+            string tagged=span==null?null:span.Tag as string;
+            if(tagged!=null&&tagged.StartsWith("html:",StringComparison.Ordinal)){
+                string name=tagged.Substring(5);
+                // code/tt/samp/var, mark, small, underline, ... are written from the run's own style
+                // flags; only these three have no Markdown or span form of their own.
+                if((name=="sup"||name=="sub"||name=="kbd")&&!tags.Contains(name))tags.Insert(0,name);
+                continue;
+            }
+            var inline=element as Inline;
+            if(inline==null||inline.BaselineAlignment==BaselineAlignment.Baseline)continue;
+            string baseline=inline.BaselineAlignment==BaselineAlignment.Superscript?"sup":inline.BaselineAlignment==BaselineAlignment.Subscript?"sub":null;
+            if(baseline!=null&&!tags.Contains(baseline))tags.Insert(0,baseline);
+        }
+        return String.Join(",",tags);
+    }
     internal static string Code(string value){int longest=0;foreach(System.Text.RegularExpressions.Match run in System.Text.RegularExpressions.Regex.Matches(value,"`+"))longest=Math.Max(longest,run.Length);string fence=new string('`',longest+1);bool pad=value.StartsWith("`")||value.EndsWith("`")||(value.StartsWith(" ")&&value.EndsWith(" ")&&value.Trim(' ').Length>0);return fence+(pad?" ":"")+value+(pad?" ":"")+fence;}
     internal static string ParagraphText(Paragraph paragraph){return new TextRange(paragraph.ContentStart,paragraph.ContentEnd).Text;}
     // A Markdown line "starts" while only spaces or tabs have been written since the last newline.

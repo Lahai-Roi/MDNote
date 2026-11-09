@@ -10,12 +10,16 @@ using System.Windows.Media;
 using System.Windows.Controls.Primitives;
 namespace MDNote {public partial class MainWindow {
     ContextMenu headingMenu,tablePickerMenu;int lastHeadingLevel=2;
+    /* 2026-11-09: the highlight toggle's button; ToolStates.cs (the other text buttons) is owned by
+       another worker for this change, so the new field lives with the ribbon wiring that uses it. */
+    readonly Button markButton=new Button();
     MenuItem listBulletMenuItem,listNumberMenuItem;
     System.Windows.Threading.DispatcherTimer tablePickerCloseTimer;bool tablePickerHoverOpened;DateTime? tablePickerOutsideSince;
     internal Func<Point> tablePickerPointerPosition;
     void CancelTablePickerClose(){if(tablePickerCloseTimer!=null)tablePickerCloseTimer.Stop();tablePickerOutsideSince=null;}
+    static bool tooltipDelayDefaults;
     static bool TablePickerContains(FrameworkElement element,Point point){if(element==null||!element.IsVisible||element.ActualWidth<=0||element.ActualHeight<=0)return false;try{return new Rect(element.PointToScreen(new Point()),element.PointToScreen(new Point(element.ActualWidth,element.ActualHeight))).Contains(point);}catch(InvalidOperationException){return false;}}
-    void PollTablePicker(DateTime now){var menu=tablePickerMenu;if(menu==null||!menu.IsOpen||!tablePickerHoverOpened){CancelTablePickerClose();return;}System.Drawing.Point cursor;try{cursor=System.Windows.Forms.Cursor.Position;}catch(System.ComponentModel.Win32Exception){return;}/* GetCursorPos fails while the input desktop is switched (UAC, lock, RDP) */Point point=tablePickerPointerPosition==null?new Point(cursor.X,cursor.Y):tablePickerPointerPosition();/* closes as soon as the pointer is outside the button, the grid and the gap between them (user, 2026-10-24) */if(TablePickerContains(tableButton,point)||TablePickerContains(menu,point)||TablePickerBridge(tableButton,menu,point)){tablePickerOutsideSince=null;return;}menu.IsOpen=false;}
+    void PollTablePicker(DateTime now){var menu=tablePickerMenu;if(menu==null||!menu.IsOpen||!tablePickerHoverOpened){CancelTablePickerClose();return;}MonitorArea.ScreenPoint cursor=new MonitorArea.ScreenPoint();if(tablePickerPointerPosition==null&&!MonitorArea.TryGetCursor(out cursor))return;/* GetCursorPos fails while the input desktop is switched (UAC, lock, RDP) */Point point=tablePickerPointerPosition==null?new Point(cursor.X,cursor.Y):tablePickerPointerPosition();/* closes as soon as the pointer is outside the button, the grid and the gap between them (user, 2026-10-24) */if(TablePickerContains(tableButton,point)||TablePickerContains(menu,point)||TablePickerBridge(tableButton,menu,point)){tablePickerOutsideSince=null;return;}menu.IsOpen=false;}
     static bool TablePickerBridge(FrameworkElement button,FrameworkElement menu,Point point){if(button==null||menu==null||!button.IsVisible||!menu.IsVisible)return false;try{Point a=button.PointToScreen(new Point()),b=button.PointToScreen(new Point(button.ActualWidth,button.ActualHeight)),c=menu.PointToScreen(new Point()),d=menu.PointToScreen(new Point(menu.ActualWidth,menu.ActualHeight));double top=Math.Min(b.Y,d.Y),bottom=Math.Max(a.Y,c.Y);if(bottom<top){double swap=top;top=bottom;bottom=swap;}var band=new Rect(new Point(Math.Min(a.X,c.X),top-1),new Point(Math.Max(b.X,d.X),bottom+1));return band.Contains(point);}catch(InvalidOperationException){return false;}}
     void QueueTablePickerClose(){if(!tablePickerHoverOpened)return;if(tablePickerCloseTimer==null){tablePickerCloseTimer=new System.Windows.Threading.DispatcherTimer {Interval=TimeSpan.FromMilliseconds(40)};tablePickerCloseTimer.Tick+=delegate{PollTablePicker(DateTime.UtcNow);};}tablePickerCloseTimer.Start();}
     /* X29: Esc must win over the button's hover-open. Closing a menu hands the mouse back, WPF re-enters
@@ -263,7 +267,10 @@ namespace MDNote {public partial class MainWindow {
     // Runs once at the end of the constructor (from BuildTextQuickButton), after every bar is built and compacted.
     void PolishToolbar(){
         ToolTipService.SetInitialShowDelay(this,250);ToolTipService.SetBetweenShowDelay(this,0);/* b41: tooltips after 250 ms, inherited by every toolbar, search and table button */
-        LabelButton(taskButton,"check","체크");LabelButton(quoteButton,"quote","인용");LabelButton(ruleButton,"rule","구분");LabelButton(blockButton,"code","코드");codeButton.Content=null;codeButton.Content=Ui.GridIcon("highlight");codeButton.Width=Double.NaN;StyleBarButton(codeButton,true);BindShortcutTip(codeButton,"inline","인라인 코드",null);
+        /* 2.4.0 (user 11-09 "설명 나오기까지 너무 오래"): the two attached delays do not inherit, so the window values above never
+           reached the buttons and every tooltip waited the system hover time. The type default is changed once instead. */
+        if(!tooltipDelayDefaults){tooltipDelayDefaults=true;ToolTipService.InitialShowDelayProperty.OverrideMetadata(typeof(FrameworkElement),new FrameworkPropertyMetadata(250));ToolTipService.BetweenShowDelayProperty.OverrideMetadata(typeof(FrameworkElement),new FrameworkPropertyMetadata(0));}
+        LabelButton(taskButton,"check","체크");LabelButton(quoteButton,"quote","인용");LabelButton(ruleButton,"rule","구분");LabelButton(blockButton,"code","코드");markButton.Content=null;markButton.Content=Ui.GridIcon("highlight");markButton.Width=Double.NaN;StyleBarButton(markButton,true);markButton.Padding=new Thickness(0);BindShortcutTip(markButton,"mark","형광펜","Ctrl+Shift+H");codeButton.Content=null;codeButton.Content=Ui.InlineCodeIcon();codeButton.Width=Double.NaN;StyleBarButton(codeButton,true);codeButton.Padding=new Thickness(0);BindShortcutTip(codeButton,"inline","인라인 코드",null);
         var tagWatch=System.ComponentModel.DependencyPropertyDescriptor.FromProperty(FrameworkElement.TagProperty,typeof(Button));tagWatch.AddValueChanged(headingButton,delegate{UpdateHeadingCaption();});
         var checkWatch=System.ComponentModel.DependencyPropertyDescriptor.FromProperty(MenuItem.IsCheckedProperty,typeof(MenuItem));
         for(int i=0;i<headingButtons.Count;i++){checkWatch.AddValueChanged(headingButtons[i],delegate{UpdateHeadingCaption();});BindShortcutTip(headingButtons[i],"h"+(i+1),"제목 "+(i+1),null);}
@@ -278,6 +285,7 @@ namespace MDNote {public partial class MainWindow {
         if(saveHover!=null&&saveMenu!=null)Ui.Dropdown(saveHover,saveMenu);
         Ui.ToolbarText(topMenu);Ui.ToolbarText(documentTabs);Ui.ToolbarText(ribbonHost);Ui.ToolbarText(tableToolsHost);Ui.ToolbarText(searchHost);Ui.ToolbarText(statusBar);Ui.ToolbarText(saveMenu);Ui.ToolbarText(headingMenu);if(colorPopup.Child!=null)Ui.ToolbarText(colorPopup.Child);
         var previewHost=preview.Parent as Border;if(previewHost!=null)previewHost.Padding=new Thickness(0,4,Ui.RightEdge,4);/* border edge = hover-box edge of the outline and close buttons */
+        SetupStateTooltips();
         InstallToolbarOverflow();
         HookEditImageCommand();
     }
@@ -431,7 +439,8 @@ namespace MDNote {public partial class MainWindow {
         RegisterOverflow(boldButton,"bold",null,boldButton,boldButton,null,null,null);
         RegisterOverflow(italicButton,"italic",null,italicButton,italicButton,null,null,null);
         RegisterOverflow(strikeButton,"strike",null,strikeButton,strikeButton,null,null,null);
-        RegisterOverflow(codeButton,"highlight",null,codeButton,codeButton,null,null,null);
+        RegisterOverflow(markButton,"mark",Ui.HighlighterIcon,markButton,markButton,null,null,null);
+        RegisterOverflow(codeButton,"highlight",Ui.InlineCodeIcon,codeButton,codeButton,null,null,null);
         RegisterOverflow(colorHover,null,OverflowColorIcon,colorMain,colorMain,ColorOverflowItems,null,"글자색");
         RegisterOverflow(listHover,null,OverflowListIcon,listButton,listButton,ListOverflowItems,null,null);
         RegisterOverflow(taskButton,"check",null,taskButton,taskButton,null,null,null);
@@ -441,8 +450,8 @@ namespace MDNote {public partial class MainWindow {
         RegisterOverflow(linkButton,"link",null,linkButton,linkButton,null,null,null);
         RegisterOverflow(imageButton,"image",null,imageButton,imageButton,null,null,null);
         RegisterOverflow(tableButton,"table",null,tableButton,tableButton,null,OpenTableFromOverflow,null);
-        /* the bar's own {···} mark, drawn like the other » entries (Ui.MenuSourceIcon) */
-        sourceOverflowCommand=RegisterOverflow(null,null,Ui.MenuSourceIcon,null,preview,null,ToggleSourceFromOverflow,"원문");
+        /* 2026-11-09: the 원문 toggle no longer has a » entry — it stays on the bar and drops its
+           label on a narrow window instead (UpdateRibbonOverflow / Ui.CompactToggleLabel). */
         var commands=quickFind.Parent as Panel;
         if(commands!=null)foreach(UIElement child in commands.Children){
             var button=child as Button;if(button==null)continue;
@@ -454,7 +463,8 @@ namespace MDNote {public partial class MainWindow {
         RegisterOverflow(quickFind,"find",null,quickFind,quickFind,null,null,null);
         RegisterOverflow(quickReplace,"replace",null,quickReplace,quickReplace,null,null,null);
         RegisterOverflow(editButton,"edit",null,editButton,editButton,null,null,null);
-        if(quickText!=null)RegisterOverflow(quickText,"type",null,quickText,quickText,null,null,null);
+        /* 2026-11-09: the TXT toggle is not a toolbar command any more; it lives on the status bar
+           (TextMode.BuildTextQuickButton), so it has no row slot to fold into "»". */
         RegisterOverflow(quickDark,"dark",null,quickDark,quickDark,null,null,null);
         if(outlineButton!=null)RegisterOverflow(outlineButton,"menu",null,outlineButton,outlineButton,null,null,null);
     }
@@ -541,24 +551,25 @@ namespace MDNote {public partial class MainWindow {
        the gap again at its end, so one pass per width is enough. */
     static void ResetOverflowOffset(Button button){if(button==null)return;Thickness margin=button.Margin;if(margin.Right!=0)button.Margin=new Thickness(margin.Left,margin.Top,0,margin.Bottom);}
     void UpdateRibbonOverflow(){
-        /* the 원문 toggle starts every pass on the bar; it moves into the » list only when the row overflows (below) */
-        ribbonSourceFolded=false;ribbonPreviewHost.Visibility=Visibility.Visible;
         if(ribbonHost.Visibility!=Visibility.Visible||ribbonHost.ActualWidth<=0){ResetOverflowOffset(ribbonOverflow);ribbonOverflow.Visibility=Visibility.Collapsed;return;}
         ResetOverflowOffset(ribbonOverflow);
         ShowOverflowUnits(ribbonOverflowUnits);
         for(int i=0;i<ribbonOverflowGroups.Count;i++)ribbonOverflowGroups[i].Visibility=Visibility.Visible;
         ribbonOverflow.Visibility=Visibility.Collapsed;
-        double preview=0;
-        if(ribbonPreviewHost.Visibility==Visibility.Visible){ribbonPreviewHost.Measure(new Size(Double.PositiveInfinity,Double.PositiveInfinity));preview=ribbonPreviewHost.DesiredSize.Width;}
+        /* 2026-11-09 (user): the 원문 toggle is never folded into "»" either. Its width is kept in the
+           row and only its text label may go (Ui.CompactToggleLabel) once the window is very narrow;
+           every other command folds around it first. */
+        Ui.CompactToggleLabel(preview,ribbonHost.ActualWidth<Ui.CompactToggleHostWidth);SyncViewButtonWidths();
+        ribbonPreviewHost.Visibility=Visibility.Visible;
+        ribbonPreviewHost.Measure(new Size(Double.PositiveInfinity,Double.PositiveInfinity));
+        double previewWidth=ribbonPreviewHost.DesiredSize.Width;
         double margins=formatBar.Margin.Left+formatBar.Margin.Right;
         MeasureOverflowUnits(ribbonOverflowUnits);
-        double width=ribbonHost.ActualWidth,total=margins+preview+SumOverflowWidth(ribbonOverflowUnits);
+        double width=ribbonHost.ActualWidth,total=margins+previewWidth+SumOverflowWidth(ribbonOverflowUnits);
         int visible=ribbonOverflowUnits.Count;
         bool over=total>width+0.01;
         if(!over&&width-total<2){ribbonScroll.UpdateLayout();over=ribbonScroll.ScrollableWidth>0.5;}
-        /* 2.0.1 (user, 11-02): like the top row's end items, the 원문 toggle is the first to go: once the row overflows at all it
-           leaves the bar and becomes the » list's final entry, and its width goes back to the commands. */
-        if(over){ribbonSourceFolded=true;ribbonPreviewHost.Visibility=Visibility.Collapsed;visible=OverflowRibbonTo(visible,width-margins);}
+        if(over)visible=OverflowRibbonTo(visible,width-margins-previewWidth);
         ribbonOverflowVisibleCount=visible;
         BuildRibbonOverflowMenu(visible);
         PlaceOverflowNearLastUnit(ribbonOverflow,ribbonHost,ribbonOverflowUnits,visible);
@@ -588,9 +599,13 @@ namespace MDNote {public partial class MainWindow {
         RestoreTopOverflowMenus();
         ShowOverflowUnits(topOverflowUnits);
         topOverflow.Visibility=Visibility.Collapsed;
+        double width=topBarHost.ActualWidth;
         double margins=topBarPanel==null?0:topBarPanel.Margin.Left+topBarPanel.Margin.Right;
+        /* The 목차 toggle keeps its place on the bar; on a very narrow window it loses the label and
+           keeps the 22 px icon box, and the foldable units take whatever width is left. */
+        Ui.CompactToggleLabel(outlineButton,width<Ui.CompactToggleHostWidth);SyncViewButtonWidths();
         MeasureOverflowUnits(topOverflowUnits);
-        double width=topBarHost.ActualWidth,total=margins+SumOverflowWidth(topOverflowUnits);
+        double total=margins+SumOverflowWidth(topOverflowUnits);
         int visible=topOverflowUnits.Count;
         if(total>width+0.01){visible=OverflowTopTo(visible,width,margins);}
         else if(width-total<2&&topBarScroll!=null){topBarScroll.UpdateLayout();if(topBarScroll.ScrollableWidth>0.5)visible=OverflowTopTo(visible,width,margins);}
@@ -628,9 +643,12 @@ namespace MDNote {public partial class MainWindow {
         topOverflow.Visibility=Visibility.Visible;
         double outline=0;int outlineIndex=-1;
         for(int i=0;i<topOverflowUnits.Count;i++)if(Object.ReferenceEquals(topOverflowUnits[i].Element,outlineButton)){outline=topOverflowUnits[i].Width;outlineIndex=i;}
+        /* 2026-11-09 (user): the 목차 toggle never joins the » list. Reserve its width first and fit the
+           other units around it, so it is always the last thing painted at the row's right edge; if the
+           row still needs more room, its label was already dropped by UpdateTopOverflow. */
         double budget=width-margins-topOverflow.Width;
         visible=FitOverflowUnits(topOverflowUnits,budget-outline);
-        if(outlineIndex>=0&&visible<=outlineIndex)visible=FitOverflowUnits(topOverflowUnits,budget);
+        if(outlineIndex>=0&&visible>outlineIndex)visible=outlineIndex;
         ApplyTopOverflowVisibility(visible);
         if(topBarScroll!=null){
             topBarScroll.UpdateLayout();
@@ -643,6 +661,8 @@ namespace MDNote {public partial class MainWindow {
     void ApplyTopOverflowVisibility(int visibleCount){
         for(int i=0;i<topOverflowUnits.Count;i++){
             var unit=topOverflowUnits[i];bool visible=i<visibleCount;
+            /* the 목차 toggle is never folded away: it stays painted even when every other unit is gone */
+            if(Object.ReferenceEquals(unit.Element,outlineButton)){unit.Element.Visibility=Visibility.Visible;continue;}
             if(unit.Menu!=null){
                 bool inMenu=topMenu.Items.IndexOf(unit.Menu)>=0;
                 if(visible){if(!inMenu)InsertTopMenuItem(unit);}
@@ -677,21 +697,15 @@ namespace MDNote {public partial class MainWindow {
             menu.Items.Add(OverflowMenuItem(unit.Command));
             lastGroup=unit.Group;
         }
-        if(ribbonSourceFolded&&sourceOverflowCommand!=null){
-            if(menu.Items.Count>0)menu.Items.Add(new Separator());
-            menu.Items.Add(OverflowMenuItem(sourceOverflowCommand));
-        }
         Ui.ToolbarText(menu,FontFamily);TranslateTree(menu);
     }
-    bool ribbonSourceFolded;
-    OverflowCommand sourceOverflowCommand;
-    void ToggleSourceFromOverflow(){preview.IsChecked=preview.IsChecked!=true;}
     void BuildTopOverflowMenu(int visibleCount){
         var menu=topOverflowMenu;if(menu==null)return;
         menu.Items.Clear();
         int lastKind=-1;
         for(int i=visibleCount;i<topOverflowUnits.Count;i++){
             var unit=topOverflowUnits[i];
+            if(Object.ReferenceEquals(unit.Element,outlineButton))continue;/* never listed in »: it never leaves the bar */
             if(unit.Divider)continue;
             if(unit.Menu==null&&unit.Command==null)continue;
             int kind=unit.Menu==null?0:1;

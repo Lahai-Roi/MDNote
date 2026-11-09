@@ -8,6 +8,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Media;
+using System.Windows.Input;
+using System.Windows.Threading;
 using ICSharpCode.AvalonEdit.Document;
 
 namespace MDNote {public partial class MainWindow {
@@ -19,6 +21,9 @@ namespace MDNote {public partial class MainWindow {
            IsExpanded to it two-way, so a fold the reader makes survives the rebuild an edit causes. */
         public bool Expanded {get;set;}
         public string Label {get{return "H"+Level+" "+Title;}}
+        /* The tree draws level 1 in SemiBold; every other level reads as body text (the level bars
+           already carry the level). Presentation only, like Label: the scanner never reads it. */
+        public FontWeight Weight {get{return Level==1?FontWeights.SemiBold:FontWeights.Normal;}}
         internal int Offset;
     }
     CancellationTokenSource sourceOutlineCancellation;
@@ -32,7 +37,116 @@ namespace MDNote {public partial class MainWindow {
     /* The row the current left press is on, from its down to the input that ends it. A selection
        change inside that window belongs to the same click and must not jump a second time. */
     TreeViewItem outlinePressedItem;
-    void CancelSourceOutline(){if(sourceOutlineCancellation!=null){sourceOutlineCancellation.Cancel();sourceOutlineCancellation=null;}sourceOutlineDocument=null;sourceOutlineVersion=null;sourceOutlineStyle=null;}
+    // The heading list the outline last published, shared with the in-document [TOC] box. The
+    // same scans the panel runs fill it; while the panel is closed a TOC document gets a
+    // debounced background scan of the same kind, never a walk from the live parser.
+    MarkdownLivePreview.TocData tocData;
+    CancellationTokenSource tocHeadingsCancellation;
+    DispatcherTimer tocHeadingsIdle;
+    DispatcherOperation tocHeadingsQueued;
+    System.Threading.Tasks.Task tocHeadingsTask;
+    void CancelSourceOutline(){
+        if(sourceOutlineCancellation!=null){sourceOutlineCancellation.Cancel();sourceOutlineCancellation=null;}
+        // The TOC's heading scan follows the same lifecycle: a closed or hidden panel and a tab
+        // switch stop a pending walk instead of publishing for a document nobody shows.
+        if(tocHeadingsCancellation!=null){tocHeadingsCancellation.Cancel();tocHeadingsCancellation=null;}
+        if(tocHeadingsIdle!=null)tocHeadingsIdle.Stop();
+        sourceOutlineDocument=null;sourceOutlineVersion=null;sourceOutlineStyle=null;
+    }
+    // True while the published list was read from this document's current version, so a
+    // heading edit or a tab switch is the only thing that starts another scan.
+    bool TocHeadingsCurrent(){
+        return source!=null&&source.Document!=null&&tocData!=null&&
+            Object.ReferenceEquals(tocData.Document,source.Document)&&
+            Object.ReferenceEquals(tocData.Version,source.Document.Version);
+    }
+    // A "[TOC]" line was parsed (Settings.TocRequested) or a heading edit landed in a document
+    // that uses one: scan after the typing pauses. The list is the outline's own, so the box
+    // and the panel always agree; an up-to-date list costs one compare. The first call is
+    // posted: the [TOC] parse runs while the view builds a visual line, and Update (a redraw
+    // when the list is already current) must not run inside that build.
+    void EnsureTocHeadingsSoon(){
+        if(source==null||source.Document==null||PlainText)return;
+        if(tocHeadingsQueued!=null){
+            if(tocHeadingsQueued.Status==DispatcherOperationStatus.Pending)return;
+            tocHeadingsQueued=null;
+        }
+        tocHeadingsQueued=Dispatcher.BeginInvoke(DispatcherPriority.Background,new Action(delegate{
+            tocHeadingsQueued=null;
+            EnsureTocHeadingsNow();
+        }));
+    }
+    void EnsureTocHeadingsNow(){
+        if(source==null||source.Document==null||PlainText)return;
+        if(TocHeadingsCurrent()){
+            // The panel's scan already answered for this version: hand the list to a session
+            // that has just parsed its first [TOC] line (its Toc may still be null or old).
+            if(livePreview!=null&&LivePreviewAttached&&livePreview.TocSeen)livePreview.Update(LiveSettings());
+            return;
+        }
+        if(tocHeadingsIdle==null){
+            tocHeadingsIdle=new DispatcherTimer(DispatcherPriority.Background,Dispatcher);
+            tocHeadingsIdle.Interval=TimeSpan.FromMilliseconds(160);
+            tocHeadingsIdle.Tick+=TocHeadingsIdle;
+        }
+        tocHeadingsIdle.Stop();
+        tocHeadingsIdle.Start();
+    }
+    void TocHeadingsIdle(object sender,EventArgs e){
+        tocHeadingsIdle.Stop();
+        if(source==null||source.Document==null||PlainText||TocHeadingsCurrent())return;
+        if(tocHeadingsCancellation!=null){tocHeadingsCancellation.Cancel();tocHeadingsCancellation=null;}
+        var pending=new CancellationTokenSource();
+        tocHeadingsCancellation=pending;
+        var document=source.Document;
+        var version=document.Version;
+        tocHeadingsTask=BuildTocHeadingsAsync(pending,document.CreateSnapshot(),document,version);
+    }
+    async Task BuildTocHeadingsAsync(CancellationTokenSource pending,ITextSource snapshot,TextDocument document,ITextSourceVersion version){
+        try{
+            await Task.Delay(40,pending.Token);
+            var nodes=await Task.Run(delegate{return ScanSourceOutline(snapshot,pending.Token);},pending.Token);
+            if(pending.IsCancellationRequested||tocHeadingsCancellation!=pending||source==null||PlainText||source.Document!=document)return;
+            PublishOutlineHeadings(nodes,document,version);
+        }catch(OperationCanceledException){
+        }catch(Exception error){
+            // The panel's error field is the one the probes read; a TOC scan must not throw out
+            // of a dispatcher continuation.
+            if(!pending.IsCancellationRequested&&tocHeadingsCancellation==pending)LastSourceOutlineError=error;
+        }finally{
+            if(tocHeadingsCancellation==pending)tocHeadingsCancellation=null;
+            pending.Dispose();
+        }
+    }
+    // Flattens the panel's heading tree into the TOC's rows (document order, cap 200: the box
+    // is not meant to swallow a whole book's outline).
+    static void CollectTocEntries(List<SourceOutlineNode> nodes,List<MarkdownLivePreview.TocEntry> entries){
+        if(nodes==null)return;
+        foreach(var node in nodes){
+            if(entries.Count>=200)return;
+            if(node.Title!=null&&node.Title.Length>0)
+                // The heading's visible text: a ":name:" shortcode shows its character here the
+                // way the heading itself draws it (the outline panel keeps the source form).
+                entries.Add(new MarkdownLivePreview.TocEntry {Title=MarkdownPlainText.EmojiText(node.Title),Level=node.Level,Offset=node.Offset});
+            CollectTocEntries(node.Children,entries);
+        }
+    }
+    void PublishOutlineHeadings(List<SourceOutlineNode> nodes,TextDocument document,ITextSourceVersion version){
+        var entries=new List<MarkdownLivePreview.TocEntry>();
+        CollectTocEntries(nodes,entries);
+        tocData=new MarkdownLivePreview.TocData(entries.ToArray(),version,document);
+        // A session that has no [TOC] line pays nothing for a publish; the line's first parse
+        // (EnsureTocHeadingsSoon) hands the current list over when it appears.
+        if(livePreview!=null&&LivePreviewAttached&&livePreview.TocSeen)livePreview.Update(LiveSettings());
+    }
+    // The heading list for the print parser and the HTML export: the outline's own scan of a
+    // text, with no live session involved (the export runs on a worker thread).
+    internal static List<MarkdownLivePreview.TocEntry> ScanTocEntries(string text){
+        var entries=new List<MarkdownLivePreview.TocEntry>();
+        if(text==null)return entries;
+        CollectTocEntries(ScanSourceOutline(new ICSharpCode.AvalonEdit.Document.StringTextSource(text),CancellationToken.None),entries);
+        return entries;
+    }
     void ClearOutlineItems(){outline.ItemsSource=null;outline.Items.Clear();outline.ItemTemplate=null;outline.ItemContainerStyle=null;displayedOutlineDocument=null;displayedOutlineVersion=null;}
     // Ordinary text keeps at most OutlineHead characters: enough for every outer marker the
     // grammar reads and for a heading's label, so a document with one very long line is never
@@ -77,6 +191,10 @@ namespace MDNote {public partial class MainWindow {
            not consume (MarkdownLivePreview's headingIndent), so ">    # x" is a heading and
            ">     # x" is paragraph text, the same as the view draws them. */
         bool outer=quotes>0?afterQuote-q<=3:lead<=3;
+        /* A one-line block heading ("<h2>제목</h2>", the live view's ParseHtmlSingleLine): the
+           cheap shape only, so a line without "<hN>" pays three character compares. The raw
+           title's closing "</hN>" is trimmed by OutlineAtxRaw. */
+        if(outer&&OutlineHtmlAtx(text,length,afterQuote,out level,out titleStart))return;
         if(outer&&OutlineAtx(text,length,afterQuote,out level,out titleStart))return;
         int body;
         if(OutlineList(text,length,quotes>0?q:0,out body)){
@@ -85,6 +203,31 @@ namespace MDNote {public partial class MainWindow {
             if(OutlineAtx(text,length,itemQuote,out level,out titleStart))return;
         }
         level=0;titleStart=0;
+    }
+    // "<hN>" ... "</hN>" on one line. Attributes are left to the live view's full parser; the
+    // outline's cheap check accepts the plain form only (the common one), and the closing run
+    // must exist on the same line.
+    static bool OutlineHtmlAtx(char[] text,int length,int at,out int level,out int titleStart){
+        level=0;titleStart=at;
+        if(at<0||at+4>=length||text[at]!='<')return false;
+        if(text[at+1]!='h'&&text[at+1]!='H')return false;
+        int digit=at+2;
+        if(text[digit]<'1'||text[digit]>'6')return false;
+        level=text[digit]-'0';
+        int open=digit+1;
+        if(open>=length)return false;
+        if(text[open]!='>'){
+            if(text[open]!=' '&&text[open]!='\t')return false;
+            while(open<length&&text[open]!='>')open++;
+            if(open>=length)return false;
+        }
+        titleStart=open+1;
+        char close=(char)('0'+level);
+        for(int q=titleStart;q+3<length;q++){
+            if(text[q]!='<'||text[q+1]!='/'||(text[q+2]!='h'&&text[q+2]!='H')||text[q+3]!=close)continue;
+            if(q+4<length&&text[q+4]=='>')return true;
+        }
+        level=0;titleStart=at;return false;
     }
     static bool OutlineAtx(char[] text,int length,int at,out int level,out int titleStart){
         level=0;titleStart=at;
@@ -165,6 +308,7 @@ namespace MDNote {public partial class MainWindow {
         if(p>=length)return false;
         if(text[p]=='>')return false;
         int level,start;
+        if(OutlineHtmlAtx(text,length,p,out level,out start))return false;
         if(OutlineAtx(text,length,p,out level,out start))return false;
         if(OutlineRule(text,length,p,columns))return false;
         int body;
@@ -182,6 +326,20 @@ namespace MDNote {public partial class MainWindow {
         int hash=end;
         while(hash>start&&text[hash-1]=='#')hash--;
         if(hash<end&&(hash==start||Char.IsWhiteSpace(text[hash-1]))){end=hash;while(end>start&&Char.IsWhiteSpace(text[end-1]))end--;}
+        /* An HTML heading's closer ("</h2>", with an optional space before its ">") is markup. */
+        if(end>start&&text[end-1]=='>'){
+            int lt=end-2;
+            while(lt>start&&lt>end-8&&text[lt]!='<')lt--;
+            if(lt>=start&&text[lt]=='<'){
+                int p=lt+1;
+                if(p<end&&text[p]=='/'&&p+1<end&&(text[p+1]=='h'||text[p+1]=='H')&&p+2<end&&text[p+2]>='1'&&text[p+2]<='6'){
+                    int after=p+3;
+                    while(after<end-1&&Char.IsWhiteSpace(text[after]))after++;
+                    if(after==end-1)end=lt;
+                }
+            }
+        }
+        while(end>start&&Char.IsWhiteSpace(text[end-1]))end--;
         if(end<=start)return null;
         return new string(text,start,end-start);
     }
@@ -209,10 +367,16 @@ namespace MDNote {public partial class MainWindow {
     static List<SourceOutlineNode> ScanSourceOutline(ITextSource snapshot,CancellationToken cancellation){
         var roots=new List<SourceOutlineNode>();var parents=new SourceOutlineNode[6];int offset=0;char fence='\0';int fenceLength=0;
         bool pending=false;int pendingOffset=0;char[] pendingText=null;int pendingLength=0;
+        // YAML front matter is not document structure: its "---"s are not rules/underlines and a
+        // "#" line inside it is not a heading. The shared rule reads only line 1 for the common case.
+        int frontMatterEnd=MarkdownLivePreview.FrontMatterEnd(snapshot);
+        int lineNumber=1;
         using(var reader=snapshot.CreateReader()){
             var line=new OutlineLine();var chunk=new char[8192];int count;bool previousCR=false;
             Action consume=delegate{
                 cancellation.ThrowIfCancellationRequested();
+                int number=lineNumber++;
+                if(number<=frontMatterEnd){line.Reset();pending=false;return;}
                 bool fenceLine=line.Fence;char symbol=line.Marker;int length=line.MarkerLength;bool white=line.TailWhite,backtick=line.HasBacktick;
                 int lineLength=line.Length,headLength=line.HeadLength;char[] head=line.Head;line.Reset();
                 if(fence!='\0'){if(fenceLine&&symbol==fence&&length>=fenceLength&&white)fence='\0';pending=false;return;}
@@ -244,6 +408,7 @@ namespace MDNote {public partial class MainWindow {
         return roots;
     }
     void SetupSourceOutline(){
+        outline.Loaded+=delegate{HookOutlineSideways();};
         VirtualizingStackPanel.SetIsVirtualizing(outline,true);VirtualizingStackPanel.SetVirtualizationMode(outline,VirtualizationMode.Recycling);ScrollViewer.SetCanContentScroll(outline,true);
         outline.SelectedItemChanged+=delegate(object sender,RoutedPropertyChangedEventArgs<object> args){if(outlineRestoring||outlinePressedItem!=null)return;var node=args.NewValue as SourceOutlineNode;if(node==null||!CodeMode||displayedOutlineDocument!=source.Document||displayedOutlineVersion==null)return;
             SelectOutlineOffset(displayedOutlineVersion.MoveOffsetTo(source.Document.Version,node.Offset));
@@ -293,10 +458,18 @@ namespace MDNote {public partial class MainWindow {
         try{
             LastSourceOutlineError=null;await Task.Delay(120,pending.Token);var nodes=await Task.Run(delegate{return ScanSourceOutline(snapshot,pending.Token);},pending.Token);
             if(pending.IsCancellationRequested||sourceOutlineCancellation!=pending||fileOpenClosed||!CodeMode||PlainText||outline.Visibility!=Visibility.Visible||sourceOutlineDocument!=source.Document||!Object.ReferenceEquals(sourceOutlineVersion,source.Document.Version))return;
-            var template=new HierarchicalDataTemplate(typeof(SourceOutlineNode)) {ItemsSource=new Binding("Children")};var label=new FrameworkElementFactory(typeof(TextBlock));label.SetBinding(TextBlock.TextProperty,new Binding("Label"));label.SetBinding(ToolTipService.ToolTipProperty,new Binding("Title"));label.SetBinding(System.Windows.Automation.AutomationProperties.NameProperty,new Binding("Label"));label.SetValue(TextBlock.FontWeightProperty,FontWeights.Normal);label.SetValue(TextBlock.FontSizeProperty,Math.Max(12,Math.Min(16,fontSize)));label.SetValue(TextBlock.TextTrimmingProperty,TextTrimming.CharacterEllipsis);label.SetValue(FrameworkElement.WidthProperty,Math.Max(45,outline.Width-55));label.SetValue(FrameworkElement.MarginProperty,new Thickness(4,3,4,3));label.SetResourceReference(TextBlock.ForegroundProperty,"Ink");template.VisualTree=label;
-            var style=new Style(typeof(TreeViewItem),(Style)Resources[typeof(TreeViewItem)]);/* a recycling container must take its fold from the node, not from a constant: the setters below run again for every heading a rebuild binds */style.Setters.Add(new Setter(TreeViewItem.IsExpandedProperty,new Binding("Expanded"){Mode=BindingMode.TwoWay}));style.Setters.Add(new Setter(VirtualizingStackPanel.IsVirtualizingProperty,true));style.Setters.Add(new Setter(VirtualizingStackPanel.VirtualizationModeProperty,VirtualizationMode.Recycling));
+            /* The large path's row matches the small path's: level bars, then the full title (no
+               fixed width and no trimming - the tree scrolls sideways), level 1 SemiBold. */
+            var template=new HierarchicalDataTemplate(typeof(SourceOutlineNode)) {ItemsSource=new Binding("Children")};
+            var row=new FrameworkElementFactory(typeof(StackPanel));row.SetValue(StackPanel.OrientationProperty,Orientation.Horizontal);
+            var mark=new FrameworkElementFactory(typeof(OutlineLevelMark));mark.SetBinding(OutlineLevelMark.LevelProperty,new Binding("Level"));mark.SetValue(FrameworkElement.MarginProperty,new Thickness(0,0,7,0));mark.SetValue(FrameworkElement.VerticalAlignmentProperty,VerticalAlignment.Center);mark.SetResourceReference(OutlineLevelMark.InkProperty,"Muted");
+            var label=new FrameworkElementFactory(typeof(TextBlock));label.SetBinding(TextBlock.TextProperty,new Binding("Title"));label.SetBinding(ToolTipService.ToolTipProperty,new Binding("Title"));label.SetBinding(System.Windows.Automation.AutomationProperties.NameProperty,new Binding("Label"));label.SetBinding(TextBlock.FontWeightProperty,new Binding("Weight"));label.SetValue(TextBlock.FontSizeProperty,FolderTree.RowFontSize(fontSize));label.SetValue(FrameworkElement.VerticalAlignmentProperty,VerticalAlignment.Center);label.SetResourceReference(TextBlock.ForegroundProperty,"Ink");row.AppendChild(mark);row.AppendChild(label);template.VisualTree=row;
+            var style=new Style(typeof(TreeViewItem),OutlineRowStyle());/* a recycling container must take its fold from the node, not from a constant: the setters below run again for every heading a rebuild binds */style.Setters.Add(new Setter(TreeViewItem.IsExpandedProperty,new Binding("Expanded"){Mode=BindingMode.TwoWay}));style.Setters.Add(new Setter(VirtualizingStackPanel.IsVirtualizingProperty,true));style.Setters.Add(new Setter(VirtualizingStackPanel.VirtualizationModeProperty,VirtualizationMode.Recycling));style.Setters.Add(new EventSetter(FrameworkElement.RequestBringIntoViewEvent,new RequestBringIntoViewEventHandler(OutlineRowBringIntoView)));
             var state=CaptureOutlineState();
-            ClearOutlineItems();outline.ItemTemplate=template;outline.ItemContainerStyle=style;displayedOutlineDocument=sourceOutlineDocument;displayedOutlineVersion=sourceOutlineVersion;outline.ItemsSource=nodes;ApplyOutlineState(state);published=true;
+            ClearOutlineItems();outline.ItemTemplate=template;outline.ItemContainerStyle=style;displayedOutlineDocument=sourceOutlineDocument;displayedOutlineVersion=sourceOutlineVersion;outline.ItemsSource=nodes;ApplyOutlineState(state);
+            // The same scan answers the in-document [TOC]; its Element waits for this list.
+            PublishOutlineHeadings(nodes,sourceOutlineDocument,sourceOutlineVersion);
+            published=true;
         }catch(OperationCanceledException){}catch(Exception error){if(!pending.IsCancellationRequested&&sourceOutlineCancellation==pending)LastSourceOutlineError=error;}
         finally{if(sourceOutlineCancellation==pending){sourceOutlineCancellation=null;if(!published){sourceOutlineDocument=null;sourceOutlineVersion=null;sourceOutlineStyle=null;}}pending.Dispose();}
     }
@@ -340,15 +513,65 @@ namespace MDNote {public partial class MainWindow {
         if(jump==null||jump.Version==null||jump.Document!=source.Document)return;
         SelectOutlineOffset(jump.Version.MoveOffsetTo(source.Document.Version,jump.Offset));
     }
+    /* The panel's row size, shared with the 파일 tab's file names (FolderTree.RowFontSize). The small
+       path's label is built in ToolStates.OutlineItem with its own 12-16 scale, so the size is set
+       here; weight and indent stay as that row made them (user, 2026-11-09). */
+    void SetOutlineRowTextSize(TreeViewItem item){
+        if(item==null)return;
+        var row=item.Header as Panel;
+        if(row==null)return;
+        double size=FolderTree.RowFontSize(fontSize);
+        foreach(UIElement child in row.Children){var label=child as TextBlock;if(label!=null){label.FontSize=size;return;}}
+    }
+    /* Sideways position of the heading list (user, 2026-11-09, three passes). The list keeps one wanted
+       horizontal offset: the reader's own moves (the horizontal scroll bar under the mouse, Shift+wheel)
+       set it, a click on a heading sets it to 0 so the row's start is always in view, and every other
+       sideways move (bring-into-view of a long or deep row, the panel opening on the current heading,
+       a selection that follows the caret) is put back to it. ScrollChanged runs inside the layout pass,
+       so the put-back costs one more arrange and nothing shifted is drawn. Vertical scrolling is untouched. */
+    bool outlineSidewaysHooked,outlineSidewaysByReader;
+    double outlineSidewaysWanted;
+    void OutlineRowBringIntoView(object sender,RequestBringIntoViewEventArgs args){HookOutlineSideways();}
+    void HookOutlineSideways(){
+        if(outlineSidewaysHooked)return;
+        var scroller=ScrollViewerIn(outline);
+        if(scroller==null)return;
+        outlineSidewaysHooked=true;
+        scroller.ApplyTemplate();
+        var bar=scroller.Template==null?null:scroller.Template.FindName("PART_HorizontalScrollBar",scroller) as UIElement;
+        scroller.PreviewMouseWheel+=delegate{
+            if((Keyboard.Modifiers&ModifierKeys.Shift)==0)return;
+            outlineSidewaysByReader=true;
+            Dispatcher.BeginInvoke(DispatcherPriority.Input,new Action(delegate{outlineSidewaysByReader=false;}));
+        };
+        scroller.PreviewMouseLeftButtonDown+=delegate(object sender,MouseButtonEventArgs args){
+            if(bar!=null&&bar.IsMouseOver)return;
+            var hit=args.OriginalSource as DependencyObject;
+            while(hit!=null&&!(hit is TreeViewItem))hit=hit is Visual||hit is System.Windows.Media.Media3D.Visual3D?VisualTreeHelper.GetParent(hit):LogicalTreeHelper.GetParent(hit);
+            if(hit==null)return;
+            outlineSidewaysWanted=0;
+            if(scroller.HorizontalOffset!=0)scroller.ScrollToHorizontalOffset(0);
+        };
+        scroller.ScrollChanged+=delegate(object sender,ScrollChangedEventArgs args){
+            if(args.HorizontalChange==0)return;
+            if(outlineSidewaysByReader||bar!=null&&(bar.IsMouseOver||bar.IsMouseCaptureWithin)){outlineSidewaysWanted=args.HorizontalOffset;return;}
+            /* an offset past a narrower list just clamps, so this cannot loop */
+            if(Math.Abs(args.HorizontalOffset-outlineSidewaysWanted)>.01)scroller.ScrollToHorizontalOffset(outlineSidewaysWanted);
+        };
+    }
     TreeViewItem CreateSourceOutlineItem(SourceOutlineNode node,TextDocument document,ITextSourceVersion version){
         var item=OutlineItem(node.Title,node.Level);
+        SetOutlineRowTextSize(item);
+        item.RequestBringIntoView+=OutlineRowBringIntoView;
         item.Tag=new OutlineJump {Document=document,Version=version,Offset=node.Offset,Key=OutlineKey(node.Level,node.Title)};
         item.Selected+=delegate(object sender,RoutedEventArgs args){if(args.OriginalSource!=sender||outlineRestoring||outlinePressedItem!=null)return;JumpOutlineItem(item);args.Handled=true;};
         foreach(var child in node.Children)item.Items.Add(CreateSourceOutlineItem(child,document,version));return item;
     }
     void RefreshSmallSourceOutline(){
         var snapshot=source.Document.CreateSnapshot();var version=snapshot.Version;
-        foreach(var node in ScanSourceOutline(snapshot,CancellationToken.None))outline.Items.Add(CreateSourceOutlineItem(node,source.Document,version));
+        var nodes=ScanSourceOutline(snapshot,CancellationToken.None);
+        foreach(var node in nodes)outline.Items.Add(CreateSourceOutlineItem(node,source.Document,version));
+        PublishOutlineHeadings(nodes,source.Document,version);
     }
     /* What the reader arranged in the tree, so the rebuild an edit causes does not unfold every
        heading, drop the selection or put the list back at the top (UI bug hunt P2-4). A heading's

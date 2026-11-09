@@ -992,7 +992,7 @@ ImeInlineGenerator imeInline;bool imeFocusHooked;
 [System.Runtime.InteropServices.DllImport("user32.dll",EntryPoint="DefWindowProcW")]static extern IntPtr DefWindowProcW(IntPtr hWnd,int msg,IntPtr wParam,IntPtr lParam);
 // Probe seam (ImeClickHangProbe): a test that has no Korean layout on its thread asks for the Korean rules.
 internal static Func<bool> KoreanLayoutOverride;internal static int ProbeParkCalls;
-static bool KoreanLayout(){var forced=KoreanLayoutOverride;if(forced!=null&&forced())return true;return (GetKeyboardLayout(0).ToInt64()&0x3FF)==0x12;}
+internal static bool KoreanLayout(){var forced=KoreanLayoutOverride;if(forced!=null&&forced())return true;return (GetKeyboardLayout(0).ToInt64()&0x3FF)==0x12;}
 // ko (0x12), ja (0x11), zh (0x04): the OS composition window is hidden and the string is drawn inline.
 static bool CjkLayout(){if(KoreanLayout())return true;long lang=GetKeyboardLayout(0).ToInt64()&0x3FF;return lang==0x12||lang==0x11||lang==0x04;}
 byte[] imeAttrs;int imeCursor=-1;bool imeCandidateQueued;
@@ -1243,8 +1243,19 @@ internal Func<bool> NativeComposition;
 bool NativeCompositionHere(){var ask=NativeComposition;if(ask==null)return false;try{return ask();}catch(Exception){return false;}}
 // The style armed for the next input, answered by the host (null when none): the composition string is drawn in it (ImeInlineStyle.WithPending).
 internal Func<ImePendingStyle> PendingImeStyle;
+// The background of the inline span the composition starts in (highlight, inline code), answered by the live preview (null when none or not
+// attached). The span's box lives on the line element, not in the run properties ImeInlineStyle.Pick reads, so without this a syllable typed
+// inside an existing highlight or code span was drawn on a hole in the span (11-09 user). Asked once per line build, only on the caret's line.
+internal Func<int,Brush> ImeSpanBackground;
+// The offset whose run style and span box the composition copies, answered by the live preview (null when not attached). The closing-edge
+// space rule keeps the typed space outside the emphasis/code closers and writes the next character back inside them on commit, so a syllable
+// composed right after that space must be drawn with the pair's style (italic, bold, size, colour, box) instead of the plain space around it
+// (11-09 user). Unchanged offset when nothing applies. Asked once per line build, only on the caret's line.
+internal Func<int,int> ImeStyleOffset;
 // The size a picked font size will give the next typed text, 0 when none is armed (the table caret and the composition font follow it).
 internal double PendingImeSize(){var ask=PendingImeStyle;if(ask==null)return 0;try{var style=ask();return style==null?0:style.Size;}catch(Exception){return 0;}}
+// The composition offset whose run style and span box the drawn string copies (ImeStyleOffset), the offset itself when nothing applies.
+internal int ImeStyleAt(int offset){var map=ImeStyleOffset;if(map==null)return offset;try{var mapped=map(offset);return mapped>=0?mapped:offset;}catch(Exception){return offset;}}
 // The composition string now, null when nothing composes (drawn inline, or by the IME's own window on a table row).
 internal string ImeCompositionText{get{var gen=imeInline;return gen==null?null:gen.Text;}}
 // The clause attributes of the composition string (1 / 3 = the target clause), null when none were reported.
@@ -1468,7 +1479,11 @@ internal sealed class ImeInlineGenerator:VisualLineElementGenerator{
         // (heading, bold ...) once the colorizers have run (ImeInlineElement.CreateTextRun).
         var line=FormatLine(context.TextView,text,attrs,props);
         owner.NoteImeDrawn(offset);
-        return new ImeInlineElement(line,offset,this,text,attrs,props);
+        var element=new ImeInlineElement(line,offset,this,text,attrs,props);
+        // The enclosing ==/` box is the element background, not a run background: TextView merges neighbouring elements with the same brush into
+        // one rounded box, so the composing syllable joins the span instead of drawing its own square, offset box (user 11-09, VM photo).
+        var spanBack=owner.ImeSpanBackground;if(spanBack!=null)element.BackgroundBrush=spanBack(owner.ImeStyleAt(offset));
+        return element;
     }
     // Formats the composition string with the given run properties and records its measured Width and TargetX.
     internal System.Windows.Media.TextFormatting.TextLine FormatLine(System.Windows.DependencyObject view,string text,byte[] attrs,System.Windows.Media.TextFormatting.TextRunProperties props){
@@ -1489,7 +1504,8 @@ internal sealed class ImeInlineProps:System.Windows.Media.TextFormatting.TextRun
         decorations=new TextDecorationCollection();
         // The run's own decorations (a strikethrough run, or one armed for the next input) stay under the clause underline.
         if(baseProps.TextDecorations!=null)foreach(var d in baseProps.TextDecorations)if(d.Location!=TextDecorationLocation.Underline)decorations.Add(d);
-        decorations.Add(new TextDecoration(TextDecorationLocation.Underline,new Pen(foreground,target?2:1),0,TextDecorationUnit.FontRecommended,TextDecorationUnit.Pixel));
+        // Korean composes one syllable at a time and Windows Notepad shows it without an underline (only the highlight), so the clause underline is for ja/zh.
+        if(!SourceEditor.KoreanLayout())decorations.Add(new TextDecoration(TextDecorationLocation.Underline,new Pen(foreground,target?2:1),0,TextDecorationUnit.FontRecommended,TextDecorationUnit.Pixel));
         decorations.Freeze();
         if(target){var c=SystemColors.HighlightColor;var b=new SolidColorBrush(Color.FromArgb(70,c.R,c.G,c.B));b.Freeze();background=b;}
         // The rest keeps the run's own background (inline code's box) so the syllable does not punch a hole in it.
@@ -1540,6 +1556,8 @@ internal sealed class ImeInlineElement:FormattedTextElement{
     internal System.Windows.Media.TextFormatting.TextLine DrawnLine{get{return current;}}
     internal Typeface DrawnFace{get{return curFace;}}
     internal double DrawnEm{get{return curEm;}}
+    // The background the drawn line carries (the enclosing span's box, or the armed style's): read by the probes.
+    internal Brush DrawnBackground{get{return BackgroundBrush??curBack;}}
     internal ImeInlineElement(System.Windows.Media.TextFormatting.TextLine line,int builtOffset,ImeInlineGenerator generator,string text,byte[] attrs,System.Windows.Media.TextFormatting.TextRunProperties baseProps):base(line,0){
         BuiltOffset=builtOffset;this.generator=generator;this.text=text;this.attrs=attrs;current=line;curFace=baseProps.Typeface;curEm=baseProps.FontRenderingEmSize;curBrush=baseProps.ForegroundBrush;curDeco=baseProps.TextDecorations;curBack=baseProps.BackgroundBrush;
     }
@@ -1547,7 +1565,7 @@ internal sealed class ImeInlineElement:FormattedTextElement{
     // draws the syllable in that weight at once instead of after the commit). The underline and target background stay the clause styling.
     // A line whose font equals the formatted one is reused, so plain lines cost nothing extra; Width and TargetX follow the final line.
     public override System.Windows.Media.TextFormatting.TextRun CreateTextRun(int startVisualColumn,ITextRunConstructionContext context){
-        var chosen=ImeInlineStyle.WithPending(generator.Owner,ImeInlineStyle.Pick(this,context));
+        var chosen=ImeInlineStyle.WithPending(generator.Owner,ImeInlineStyle.Pick(this,context,generator.Owner.ImeStyleAt(BuiltOffset)));
         if(!ImeInlineStyle.Same(chosen,curFace,curEm,curBrush)||!Object.ReferenceEquals(chosen.TextDecorations,curDeco)||!Object.ReferenceEquals(chosen.BackgroundBrush,curBack)){
             current=generator.FormatLine(context.TextView,text,attrs,chosen);curFace=chosen.Typeface;curEm=chosen.FontRenderingEmSize;curBrush=chosen.ForegroundBrush;curDeco=chosen.TextDecorations;curBack=chosen.BackgroundBrush;
         }
@@ -1556,9 +1574,9 @@ internal sealed class ImeInlineElement:FormattedTextElement{
     // No caret stop inside the provisional text; the caret stays where the document says it is.
     public override int GetNextCaretPosition(int visualColumn,System.Windows.Documents.LogicalDirection direction,CaretPositioningMode mode){return -1;}
 }
-// A style armed for the next input (B / I / S / code / colour / size pressed with no selection): the pair is written only when the first syllable commits,
+// A style armed for the next input (B / I / S / highlight / code / colour / size pressed with no selection): the pair is written only when the first syllable commits,
 // so while it composes nothing around the caret carries the style yet. The host answers it (SourceEditor.PendingImeStyle) and the syllable is drawn in it.
-internal sealed class ImePendingStyle{internal bool Bold,Italic,Strike,Code;internal Brush Color;internal double Size;internal FontFamily CodeFamily;internal Brush CodeBackground;}
+internal sealed class ImePendingStyle{internal bool Bold,Italic,Strike,Highlight,Code;internal Brush Color;internal double Size;internal FontFamily CodeFamily;internal Brush CodeBackground;internal Brush HighlightBackground;}
 internal sealed class ImePendingProps:System.Windows.Media.TextFormatting.TextRunProperties{
     readonly System.Windows.Media.TextFormatting.TextRunProperties baseProps;readonly ImePendingStyle style;readonly Typeface face;readonly TextDecorationCollection decorations;
     internal ImePendingProps(System.Windows.Media.TextFormatting.TextRunProperties baseProps,ImePendingStyle style,TextDecorationCollection strike){
@@ -1571,7 +1589,22 @@ internal sealed class ImePendingProps:System.Windows.Media.TextFormatting.TextRu
     public override double FontHintingEmSize{get{return style.Size>0?style.Size:baseProps.FontHintingEmSize;}}
     public override TextDecorationCollection TextDecorations{get{return decorations;}}
     public override Brush ForegroundBrush{get{return style.Color??baseProps.ForegroundBrush;}}
-    public override Brush BackgroundBrush{get{return style.Code&&style.CodeBackground!=null?style.CodeBackground:baseProps.BackgroundBrush;}}
+    public override Brush BackgroundBrush{get{return style.Code&&style.CodeBackground!=null?style.CodeBackground:(style.Highlight&&style.HighlightBackground!=null?style.HighlightBackground:baseProps.BackgroundBrush);}}
+    public override System.Globalization.CultureInfo CultureInfo{get{return baseProps.CultureInfo;}}
+    public override TextEffectCollection TextEffects{get{return baseProps.TextEffects;}}
+}
+// The composition run properties with the enclosing inline span's background (highlight / inline code) under them. The box is painted
+// from the element's BackgroundBrush on a committed line, which the run properties Pick reads do not carry; the composing syllable takes
+// it from here so it does not punch a hole in the span. The brush is the session's frozen one, so a rebuild compares and reuses its line.
+internal sealed class ImeSpanProps:System.Windows.Media.TextFormatting.TextRunProperties{
+    readonly System.Windows.Media.TextFormatting.TextRunProperties baseProps;readonly Brush background;
+    internal ImeSpanProps(System.Windows.Media.TextFormatting.TextRunProperties baseProps,Brush background){this.baseProps=baseProps;this.background=background;}
+    public override Typeface Typeface{get{return baseProps.Typeface;}}
+    public override double FontRenderingEmSize{get{return baseProps.FontRenderingEmSize;}}
+    public override double FontHintingEmSize{get{return baseProps.FontHintingEmSize;}}
+    public override TextDecorationCollection TextDecorations{get{return baseProps.TextDecorations;}}
+    public override Brush ForegroundBrush{get{return baseProps.ForegroundBrush;}}
+    public override Brush BackgroundBrush{get{return baseProps.BackgroundBrush??background;}}
     public override System.Globalization.CultureInfo CultureInfo{get{return baseProps.CultureInfo;}}
     public override TextEffectCollection TextEffects{get{return baseProps.TextEffects;}}
 }
@@ -1582,18 +1615,40 @@ internal static class ImeInlineStyle{
     // The chosen run properties with the armed style laid over them (unchanged when nothing is armed). The strikethrough collection is shared so a
     // rebuild with the same arm compares equal by reference (ImeInlineElement.CreateTextRun reformats only on a change).
     static readonly TextDecorationCollection strikeOnly=System.Windows.TextDecorations.Strikethrough;
+    // The chosen properties with the enclosing span's box under them (highlight yellow, inline-code grey). The host answers the box for the
+    // composition offset from the caret line's own parse (MarkdownLivePreview.Session.ImeSpanBackgroundAt); unchanged when it has none or when
+    // the run already carries a background of its own (a table cell's run properties do).
+    internal static System.Windows.Media.TextFormatting.TextRunProperties WithSpanBackground(SourceEditor owner,int offset,System.Windows.Media.TextFormatting.TextRunProperties p){
+        if(owner==null||p==null||p.BackgroundBrush!=null)return p;
+        var source=owner.ImeSpanBackground;if(source==null)return p;
+        Brush brush;try{brush=source(offset);}catch(Exception){return p;}
+        return brush==null?p:new ImeSpanProps(p,brush);
+    }
     internal static System.Windows.Media.TextFormatting.TextRunProperties WithPending(SourceEditor owner,System.Windows.Media.TextFormatting.TextRunProperties p){
         if(owner==null||p==null)return p;var source=owner.PendingImeStyle;if(source==null)return p;
         ImePendingStyle style;try{style=source();}catch(Exception){return p;}
         if(style==null)return p;
         return new ImePendingProps(p,style,strikeOnly);
     }
-    internal static System.Windows.Media.TextFormatting.TextRunProperties Pick(ImeInlineElement self,ITextRunConstructionContext context){
+    // styleOffset: the offset whose run style the composition copies (ImeStyleOffset), the element's own offset when nothing applies. The
+    // closing-edge space rule maps the caret back to the pair's inside edge, so the syllable takes the style the commit will give it.
+    internal static System.Windows.Media.TextFormatting.TextRunProperties Pick(ImeInlineElement self,ITextRunConstructionContext context,int styleOffset){
         var global=context.GlobalTextRunProperties;
         System.Windows.Media.TextFormatting.TextRunProperties own=self.TextRunProperties;
         if(own!=null&&Usable(own)&&!Same(own,global.Typeface,global.FontRenderingEmSize,global.ForegroundBrush))return own;
         var line=context.VisualLine;var elements=line==null?null:line.Elements;
         if(elements!=null){
+            // The mapped spot is not the caret's: take the run that covers the character just before it, the text the committed syllable
+            // will join. O(elements of the caret line), only when the map moved the offset.
+            if(styleOffset!=self.BuiltOffset&&line.FirstDocumentLine!=null){
+                int relative=styleOffset-line.FirstDocumentLine.Offset;
+                VisualLineElement inside=null;
+                if(relative>0)for(int i=0;i<elements.Count;i++){var element=elements[i];if(!(element is VisualLineText)||element.DocumentLength<=0)continue;
+                    if(element.RelativeTextOffset>=relative||element.RelativeTextOffset+element.DocumentLength<relative)continue;
+                    if(inside==null||element.RelativeTextOffset>inside.RelativeTextOffset)inside=element;}
+                System.Windows.Media.TextFormatting.TextRunProperties mapped=inside==null?null:inside.TextRunProperties;
+                if(mapped!=null&&Usable(mapped))return mapped;
+            }
             int index=-1;for(int i=0;i<elements.Count;i++)if(Object.ReferenceEquals(elements[i],self)){index=i;break;}
             if(index>=0){
                 for(int i=index-1;i>=0;i--){var found=TextProps(elements[i]);if(found!=null)return found;}

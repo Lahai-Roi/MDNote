@@ -141,6 +141,7 @@ internal static class InputFormatProbeRunner {
             VerifyWholeSelectionFormats(window,check);
             VerifyReleaseFixes(window,check);
             VerifyOverlapFormatting(window,check);
+            VerifyHighlightToggles(window,check);
             // The picker polling and save-dialog ownership checks do not use the removed rich
             // surface; the source-only window still runs their product paths.
             VerifyPickerTimer(window,check);VerifySaveDialog(window,check);
@@ -150,6 +151,100 @@ internal static class InputFormatProbeRunner {
         foreach(string state in new[]{"PASS","FAIL"}){string file=Path.Combine(outDir,"inputformat-probe-"+state+".txt");if(File.Exists(file))File.Delete(file);}
         File.WriteAllText(Path.Combine(outDir,"inputformat-probe-"+(all?"PASS":"FAIL")+".txt"),report.ToString(),new UTF8Encoding(false));return all?0:1;
     }
+    // 11-09 user video: every drag edge of ==테스트== must light/remove highlight, and code
+    // and highlight replace one another for selections and for the next typed run. No clipboard/IME.
+    static void VerifyHighlightToggles(MainWindow window,Action<string,bool,string> check){
+        var editor=Field<SourceEditor>(window,"source");
+        foreach(bool live in new[]{false,true}){
+            Call(window,"SetLiveMode",live);Pump();
+            string mode=live?"live highlight ":"basic highlight ";
+            string seed="==테스트==";
+            foreach(bool reverse in new[]{false,true})for(int a=0;a<=2;a++)for(int b=5;b<=7;b++){
+                Reset(window,seed);
+                editor.Select(a,b-a);
+                if(reverse){editor.TextArea.Selection=ICSharpCode.AvalonEdit.Editing.Selection.Create(editor.TextArea,b,a);editor.TextArea.Caret.Offset=a;}
+                Pump();
+                bool lit=FormatLit(window,"markButton")&&!FormatLit(window,"codeButton");
+                Click(window,"markButton");string plain=editor.Document.Text;
+                bool off=!FormatLit(window,"markButton");
+                Call(window,"Undo");Pump();string undone=editor.Document.Text;
+                Call(window,"Redo");Pump();
+                check(mode+"drag edges "+a+".."+b+(reverse?" reverse":" forward"),
+                    lit&&off&&plain=="테스트"&&undone==seed&&editor.Document.Text==plain,
+                    "lit="+lit+", off="+off+", removed=["+plain+"] undo=["+undone+"] redo=["+editor.Document.Text+"]");
+            }
+            Reset(window,seed);editor.Select(3,1);Pump();bool innerLit=FormatLit(window,"markButton");
+            Click(window,"markButton");
+            check(mode+"one selected syllable loses only its highlight",innerLit&&editor.Document.Text=="==테==스==트==",
+                "lit="+innerLit+", text=["+editor.Document.Text+"]");
+            Reset(window,"==테스트== 보통");editor.Select(0,editor.Document.TextLength);Pump();
+            bool mixedOff=!FormatLit(window,"markButton");Click(window,"markButton");string mixed=editor.Document.Text;
+            Click(window,"markButton");
+            check(mode+"mixed selection applies then removes",mixedOff&&mixed=="==테스트 보통=="&&editor.Document.Text=="테스트 보통",
+                "mixed off="+mixedOff+", applied=["+mixed+"] removed=["+editor.Document.Text+"]");
+            for(int a=0;a<=2;a++)for(int b=5;b<=7;b++){
+                HighlightReplacement(window,check,mode+"selection to code "+a+".."+b,seed,a,b-a,"codeButton","`테스트`");
+            }
+            HighlightReplacement(window,check,mode+"code selection to highlight","`테스트`",1,3,"markButton","==테스트==");
+            HighlightReplacement(window,check,mode+"whole code selection to highlight","`테스트`",0,5,"markButton","==테스트==");
+            HighlightReplacement(window,check,mode+"partial code selection to highlight","`테스트`",2,1,"markButton","==테스트==");
+            HighlightReplacement(window,check,mode+"partial highlight to code","==앞 테스트 뒤==",4,3,"codeButton","==앞== `테스트` ==뒤==");
+            HighlightReplacement(window,check,mode+"padded code to highlight","` 테스트 `",2,3,"markButton","==테스트==");
+            HighlightReplacement(window,check,mode+"literal equals in code stay visible","`==x==`",0,7,"markButton","=="+"\\=\\=x\\=\\="+"==");
+            HighlightReplacement(window,check,mode+"nested bold keeps bold","==**테스트**==",4,3,"codeButton","**`테스트`**");
+            HighlightReplacement(window,check,mode+"code in link loses code","[`테스트`](u)",2,3,"markButton","==[테스트](u)==");
+            HighlightReplacement(window,check,mode+"table cell keeps pipes","| ==테스트== | b |\n|---|---|",4,3,"codeButton","| `테스트` | b |\n|---|---|");
+            HighlightReplacement(window,check,mode+"heading keeps prefix","## ==테스트==",5,3,"codeButton","## `테스트`");
+            HighlightReplacement(window,check,mode+"CRLF selection keeps lines","==하나==\r\n==둘==",0,13,"codeButton","`하나`\r\n`둘`");
+            foreach(bool codeLast in new[]{false,true}){
+                string first=codeLast?"markButton":"codeButton",last=codeLast?"codeButton":"markButton";
+                Reset(window,"");Click(window,first);Click(window,last);
+                bool exclusive=FormatLit(window,last)&&!FormatLit(window,first);
+                Type(window,"테스트");string typed=editor.Document.Text;
+                Call(window,"Undo");Pump();string undone=editor.Document.Text;
+                Call(window,"Redo");Pump();
+                string expected=codeLast?"`테스트`":"==테스트==";
+                check(mode+"later armed choice wins "+last,exclusive&&typed==expected&&undone==""&&editor.Document.Text==typed,
+                    "exclusive="+exclusive+", typed=["+typed+"] undo=["+undone+"] redo=["+editor.Document.Text+"]");
+                Reset(window,"");Click(window,"boldButton");Click(window,first);Click(window,last);Type(window,"테스트");
+                check(mode+"replacement preserves other armed styles "+last,editor.Document.Text=="**"+expected+"**","text=["+editor.Document.Text+"]");
+                Reset(window,"");Click(window,first);Click(window,last);Click(window,last);Type(window,"테스트");
+                check(mode+"second press cancels the replacement "+last,editor.Document.Text=="테스트","text=["+editor.Document.Text+"]");
+            }
+            HighlightTypingReplacement(window,check,mode+"code at highlight start",seed,2,"codeButton","`X`==테스트==");
+            HighlightTypingReplacement(window,check,mode+"code at highlight end",seed,5,"codeButton","==테스트==`X`");
+            HighlightTypingReplacement(window,check,mode+"code after highlight closer",seed,7,"codeButton","==테스트==`X`");
+            HighlightTypingReplacement(window,check,mode+"highlight at code start","`테스트`",1,"markButton","==X==`테스트`");
+            HighlightTypingReplacement(window,check,mode+"highlight at code end","`테스트`",4,"markButton","`테스트`==X==");
+            HighlightTypingReplacement(window,check,mode+"typing splits a highlight run","==앞 뒤==",4,"codeButton","==앞== `X`==뒤==");
+        }
+        Call(window,"SetLiveMode",true);Pump();
+    }
+    static bool FormatLit(MainWindow window,string name){return Object.Equals(Field<Button>(window,name).Tag,"Active");}
+    static void HighlightReplacement(MainWindow window,Action<string,bool,string> check,string name,string seed,int start,int length,string button,string expected){
+        Reset(window,seed);var editor=Field<SourceEditor>(window,"source");editor.Select(start,length);Pump();
+        Click(window,button);string actual=editor.Document.Text;
+        // Multi-line selections deliberately report neither inline button rather than scanning
+        // the entire selected document on every caret event. They still must never report both.
+        bool multipleLines=editor.Document.GetLineByOffset(editor.SelectionStart)!=editor.Document.GetLineByOffset(editor.SelectionStart+editor.SelectionLength);
+        bool exclusive=(multipleLines||FormatLit(window,button))&&!FormatLit(window,button=="codeButton"?"markButton":"codeButton");
+        Call(window,"Undo");Pump();string undone=editor.Document.Text;
+        Call(window,"Redo");Pump();
+        check(name,actual==expected&&exclusive&&undone==seed&&editor.Document.Text==actual,
+            "exclusive="+exclusive+", text=["+Flat(actual)+"] expected=["+Flat(expected)+"] undo=["+Flat(undone)+"]");
+    }
+    static void HighlightTypingReplacement(MainWindow window,Action<string,bool,string> check,string name,string seed,int caret,string button,string expected){
+        Reset(window,seed);var editor=Field<SourceEditor>(window,"source");editor.Select(caret,0);Pump();Click(window,button);
+        bool exclusive=FormatLit(window,button)&&!FormatLit(window,button=="codeButton"?"markButton":"codeButton");
+        string inputTrace="";
+        EventHandler moved=delegate{inputTrace+=" move="+editor.CaretIndex+" arm="+Property<bool>(window,"TypingStyleArmed");};
+        editor.TextArea.Caret.PositionChanged+=moved;
+        Type(window,"X");editor.TextArea.Caret.PositionChanged-=moved;
+        string actual=editor.Document.Text;Call(window,"Undo");Pump();
+        check(name,exclusive&&actual==expected&&editor.Document.Text==seed,
+            "exclusive="+exclusive+", text=["+actual+"] expected=["+expected+"] undo=["+editor.Document.Text+"]"+inputTrace);
+    }
+
     // Real-use regressions on the basic (markers hidden) surface, built through the toolbar the
     // way a user does it, not from a loaded literal:
     //  1. Enter between "b" and "c" of a nested run closes every pair on the first line and opens

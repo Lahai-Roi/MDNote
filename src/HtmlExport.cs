@@ -71,6 +71,7 @@ internal static class HtmlExporter {
         "pre.plain{white-space:pre-wrap;overflow-wrap:anywhere}\n"+
         "code{font-family:Consolas,\"Cascadia Mono\",\"Malgun Gothic\",monospace;font-size:.92em}\n"+
         "p code,li code,td code,th code{background:#eef0f3;padding:.1em .35em;border-radius:4px}\n"+
+        "mark{background:#fff1a8;color:inherit}\n"+
         "blockquote{margin:.8em 0 1em;padding:.2em 1em;border-left:4px solid #b8c0cc;color:#5f6774}\n"+
         ".markdown-alert{margin:.8em 0 1em;padding:.2em 1em;border-left:4px solid #0969da;color:#5f6774}\n"+
         ".markdown-alert>:last-child{margin-bottom:0}\n"+
@@ -88,9 +89,13 @@ internal static class HtmlExporter {
         "table{border-collapse:collapse}\n"+
         "th,td{border:1px solid #c5ccd6;padding:6px 10px;text-align:left;vertical-align:top}\n"+
         "th{background:#eef1f5}\n"+
-        "img{max-width:100%;height:auto}\n"+
+        "img{max-width:min(100%,700px);max-height:700px}img:not([height]){height:auto}img[height]:not([width]){width:auto}\n"+
+        "kbd{font-family:Consolas,monospace;background:#eef0f3;border:1px solid #bac1ca;border-radius:3px}small{font-size:.85em}sup,sub{font-size:.75em}abbr,dfn{text-decoration:underline dotted}tt,samp,var{font-family:Consolas,monospace;background:#eef0f3}\n"+
         "hr{border:0;border-top:1px solid #d9dde3;margin:1.6em 0}\n"+
         ".footnote{font-size:.9em;color:#5f6774}\n"+
+        ".toc{margin:.6em 0 1em;padding:.2em 0}\n"+
+        ".toc ul{list-style:none;margin:0;padding:0}\n"+
+        ".toc li{margin:.15em 0;color:#5f6774}\n"+
         "sup a{text-decoration:none}\n";
     static readonly Regex ColorPattern=new Regex(@"(?:color\s*:\s*|\bcolor\s*=\s*[""']?)(#[a-fA-F0-9]{3,8}\b|[a-zA-Z]+)");
     static readonly Regex SizePattern=new Regex(@"font-size\s*:\s*(\d+(?:\.\d+)?)\s*(px|pt|em|%)?",RegexOptions.IgnoreCase);
@@ -107,7 +112,25 @@ internal static class HtmlExporter {
             body.Append("<pre class=\"plain\">");AppendEscaped(body,normalized,0,normalized.Length,false);body.Append("</pre>\n");
         }else{
             string[] lines=normalized.Split('\n');
+            // YAML front matter is document metadata, not page content: drop it (the same shared
+            // rule the live box and the outline use, so the page and the screen agree). The opener
+            // test is FrontMatterEnd's own first check, repeated here so an ordinary page never
+            // loads the live-preview type (cold WPF statics) just to learn "no".
+            int frontMatter=lines.Length>=2&&String.Equals(lines[0],"---",StringComparison.Ordinal)?MarkdownLivePreview.FrontMatterEnd(lines):0;
+            for(int i=0;i<frontMatter;i++)lines[i]="";
             ScanReferences(lines,context);
+            // A page with a "[TOC]" marker needs the heading ids before the marker is written.
+            // A trial render with its own context collects them in the same document order the
+            // real render uses (HeadingId is deterministic from the sequence), so the nav's
+            // links match the <hN id> attributes that follow or precede it.
+            if(HasTocLine(lines)){
+                var scan=new Context(documentPath,htmlPath,imageLabel??DefaultImageLabel);
+                ScanReferences(lines,scan);
+                scan.TocHeadings=new List<TocHeading>();
+                scan.CollectToc=true;
+                new BlockWriter(scan,new StringBuilder(),false).Render(lines,0);
+                context.TocHeadings=scan.TocHeadings;
+            }
             new BlockWriter(context,body).Render(lines,0);
         }
         string title=context.Title;
@@ -130,6 +153,14 @@ internal static class HtmlExporter {
     internal static byte[] Encode(string html){return new UTF8Encoding(false).GetBytes(html);}
     internal static void WriteFile(string path,string html){File.WriteAllBytes(path,Encode(html));}
 
+    // One heading row of the in-page [TOC]: the id WriteHeading gave it (identical in the trial
+    // pass that collects the rows and in the real render, which assigns ids in document order)
+    // and its plain title text.
+    sealed class TocHeading {
+        internal int Level;
+        internal string Id;
+        internal string Title;
+    }
     // Everything a conversion shares: where the images live, the reference definitions, the title.
     sealed class Context {
         internal readonly string DocDir,HtmlDir,ImageLabel;
@@ -137,6 +168,11 @@ internal static class HtmlExporter {
         internal readonly Dictionary<string,int> Notes=new Dictionary<string,int>(StringComparer.OrdinalIgnoreCase);
         internal readonly HashSet<string> NoteUsed=new HashSet<string>();
         internal readonly HashSet<string> HeadingIds=new HashSet<string>(StringComparer.Ordinal);
+        // The in-page [TOC] rows: a trial render collects them (with the ids the real render
+        // assigns in the same order) before the nav is written at the marker's own position.
+        internal List<TocHeading> TocHeadings;
+        // The trial pass that fills TocHeadings: the real render only reads the list.
+        internal bool CollectToc;
         internal string Title;
         internal Context(string documentPath,string htmlPath,string imageLabel){
             ImageLabel=imageLabel;
@@ -191,8 +227,16 @@ internal static class HtmlExporter {
     }
     // Text as the screen shows it: character references decoded, backslash escapes restored, then
     // escaped for HTML. A newline (a multi-line footnote) becomes <br>.
-    static void AppendText(StringBuilder sb,string raw,bool code){
-        string value=code?RestoreCodeEscapes(raw):RestoreEscapes(MarkdownPlainText.DecodeEntities(raw));
+    static void AppendText(StringBuilder sb,string raw,bool code){AppendText(sb,raw,code,true);}
+    // emoji: a plain text run turns ":name:" into the character (the same rule the screen and
+    // print read). Code spans, code blocks and tag attributes never do: code passes false here
+    // and attributes go through AppendAttribute.
+    static void AppendText(StringBuilder sb,string raw,bool code,bool emoji){
+        // The emoji pass runs before the escape sentinels are restored, so "\:name:" (an escaped
+        // colon pair) never turns into a shortcode; code spans skip it entirely.
+        string value=code?raw:MarkdownPlainText.DecodeEntities(raw);
+        if(emoji&&!code)value=MarkdownPlainText.EmojiText(value);
+        value=code?RestoreCodeEscapes(value):RestoreEscapes(value);
         int from=0;
         while(true){
             int newline=value.IndexOf('\n',from);
@@ -221,6 +265,18 @@ internal static class HtmlExporter {
     }
     // CommonMark code-span padding (Markdown.UnpadCode).
     static string UnpadCode(string value){return value.Length>=2&&value.StartsWith(" ")&&value.EndsWith(" ")&&value.Trim(' ').Length>0?value.Substring(1,value.Length-2):value;}
+    // Whether any line outside a fence is a lone "[TOC]": only such a page pays for the heading
+    // trial render that the nav's anchors need.
+    static bool HasTocLine(string[] lines){
+        char marker='\0';int length=0;
+        for(int i=0;i<lines.Length;i++){
+            string line=lines[i];char fm;int fc;int fi;
+            if(marker!='\0'){if(ClosingFence(line,marker,length))marker='\0';continue;}
+            if(FenceOpen(line,out fm,out fc,out fi)){marker=fm;length=fc;continue;}
+            if(MarkdownPlainText.TocLine(line))return true;
+        }
+        return false;
+    }
 
     // ---- block scanners (copies of the private MarkdownPlainText helpers; same rules, see there) ----
     static bool Space(char c){return c==' '||c=='\t';}
@@ -445,6 +501,7 @@ internal static class HtmlExporter {
         while(p<value.Length){
             int end;int kind;bool bang;string label;string id;
             if(!ReferenceMatch(value,p,out end,out kind,out bang,out label,out id)){p++;continue;}
+            if(end<=p){p++;continue;}   // a match that does not move the cursor stays literal text
             if(p>at)result.Append(value,at,p-at);
             if(kind==1){
                 result.Append(value,p,end-p);
@@ -503,7 +560,7 @@ internal static class HtmlExporter {
     // ---- inline token scan (MarkdownPlainText.Token and its helpers; TargetEnd, CommentEnd and
     // AutolinkEnd are the shared internal scans and are called as they are) ----
     // kinds: 1 span, 2 font, 3 code, 4 image, 5 link, 6/7 bold, 8 strike, 9/10 italic, 11 br,
-    // 12 angle autolink, 13 comment
+    // 12 angle autolink, 13 comment, 14 highlight
     static bool Token(string value,int p,out int kind,out int end,out int contentStart,out int contentEnd){
         kind=0;end=0;contentStart=0;contentEnd=0;
         char c=value[p];
@@ -549,6 +606,14 @@ internal static class HtmlExporter {
         }
         if(c=='~'){
             if(p+1<value.Length&&value[p+1]=='~'&&BoldClose(value,p,'~',out end,out contentEnd)){kind=8;contentStart=p+2;return true;}
+            return false;
+        }
+        if(c=='='){
+            // The live parser's flanking rule: "== x ==" and a lone "==" stay literal.
+            if(p+1<value.Length&&value[p+1]=='='&&p+2<value.Length&&!Char.IsWhiteSpace(value[p+2])
+                &&BoldClose(value,p,'=',out end,out contentEnd)&&!Char.IsWhiteSpace(value[contentEnd-1])){
+                kind=14;contentStart=p+2;return true;
+            }
             return false;
         }
         if(c=='*'||c=='_'){
@@ -806,7 +871,7 @@ internal static class HtmlExporter {
     sealed class BlockWriter {
         sealed class Level {internal int Indent,Content;internal bool Ordered,Task;}
         // Soft: the open item's body is plain inline text, so a continuation line joins it with a <br>.
-        sealed class State {internal readonly List<Level> Levels=new List<Level>();internal bool Paragraph,Soft;}
+        sealed class State {internal readonly List<Level> Levels=new List<Level>();internal bool Paragraph,Soft,HtmlPre;}
         readonly Context context;readonly StringBuilder sb;readonly bool quiet;
         // quiet: a trial rendering (the title text) that must not mark footnote references as used.
         internal BlockWriter(Context context,StringBuilder sb,bool quiet=false){this.context=context;this.sb=sb;this.quiet=quiet;}
@@ -860,7 +925,38 @@ internal static class HtmlExporter {
                     sb.Append("</code></pre>\n");
                     continue;
                 }
+                // GitHub-allowed block HTML passes through with the allowed attributes only; its
+                // content is ordinary Markdown. A tag-only <pre> body stays literal and escaped.
+                int htmlTagStart;
+                InlineHtml.Tag htmlTag=InlineHtml.BlockTagLine(line,out htmlTagStart);
+                if(s.HtmlPre){
+                    if(htmlTag!=null&&htmlTag.Name=="pre"&&htmlTag.Closing){
+                        WriteHtmlOpen(line,htmlTag);sb.Append('\n');s.HtmlPre=false;
+                    }else{
+                        AppendEscaped(sb,line,0,line.Length,false);sb.Append('\n');
+                    }
+                    continue;
+                }
+                if(htmlTag!=null){
+                    Flush(s);CloseLists(s);
+                    WriteHtmlOpen(line,htmlTag);
+                    sb.Append('\n');
+                    if(htmlTag.Name=="pre")s.HtmlPre=!htmlTag.Closing;
+                    continue;
+                }
+                InlineHtml.Tag htmlOpen;
+                if(InlineHtml.SingleLineBlock(line,out htmlOpen)){
+                    Flush(s);CloseLists(s);
+                    WriteHtmlOpen(line,htmlOpen);
+                    string htmlBody=line.Substring(htmlOpen.End,htmlOpen.CloseStart-htmlOpen.End);
+                    if(htmlOpen.Name=="pre")AppendEscaped(sb,htmlBody,0,htmlBody.Length,false);
+                    else AppendInline(htmlBody);
+                    sb.Append("</").Append(htmlOpen.Name).Append(">\n");
+                    continue;
+                }
                 if(WhiteOnly(line,0)){Flush(s);continue;}   // a blank line ends the paragraph, not the list
+                // A lone "[TOC]" (top level): the page's own table of contents, in place.
+                if(depth==0&&MarkdownPlainText.TocLine(line)){Flush(s);CloseLists(s);WriteToc();continue;}
                 string definitionId,definitionBody;bool note;
                 if(TryDefinition(line,out definitionId,out definitionBody,out note)){
                     Flush(s);CloseLists(s);
@@ -1025,10 +1121,31 @@ internal static class HtmlExporter {
             if(context.Title==null&&!quiet)context.Title=TitleText(body);
             sb.Append("<h").Append(level.ToString(CultureInfo.InvariantCulture));
             string id=quiet?null:context.HeadingId(body);
+            if(context.CollectToc)context.TocHeadings.Add(new TocHeading {Level=level,Id=id,Title=TitleText(body)});
             if(id!=null)AppendAttribute(sb,"id",id);
             sb.Append('>');
             AppendInline(body);
             sb.Append("</h").Append(level.ToString(CultureInfo.InvariantCulture)).Append(">\n");
+        }
+        // The in-place [TOC]: a flat list indented by level, every row an anchor to the heading
+        // id the same render wrote (the trial pass collected them in this document order).
+        void WriteToc(){
+            sb.Append("<nav class=\"toc\"><ul>\n");
+            var headings=context.TocHeadings;
+            if(headings!=null){
+                for(int i=0;i<headings.Count&&i<200;i++){
+                    TocHeading heading=headings[i];
+                    sb.Append("<li");
+                    if(heading.Level>1)sb.Append(" style=\"margin-left:").Append(((heading.Level-1)*1.2).ToString("0.#",CultureInfo.InvariantCulture)).Append("em\"");
+                    sb.Append('>');
+                    if(heading.Id!=null){sb.Append("<a");AppendAttribute(sb,"href","#"+heading.Id);sb.Append('>');}
+                    string title=heading.Title??"";
+                    AppendEscaped(sb,title,0,title.Length,false);
+                    if(heading.Id!=null)sb.Append("</a>");
+                    sb.Append("</li>\n");
+                }
+            }
+            sb.Append("</ul></nav>\n");
         }
         // The heading's text without markup: the inline rendering with its tags dropped.
         string TitleText(string body){
@@ -1038,6 +1155,30 @@ internal static class HtmlExporter {
             text=System.Net.WebUtility.HtmlDecode(text);
             text=Regex.Replace(text,@"\s+"," ").Trim();
             return text.Length==0?null:text;
+        }
+        /* "<name ...>" for a GitHub-allowed block tag. Only align, open, width, height, src, alt,
+           href and title survive; every other attribute is dropped, and a closing tag is written
+           as "</name>". Values are entity-decoded and escaped again, so the page shows them. */
+        void WriteHtmlOpen(string value,InlineHtml.Tag tag){
+            sb.Append('<');
+            if(tag.Closing){sb.Append('/').Append(tag.Name).Append('>');return;}
+            sb.Append(tag.Name);
+            if(tag.Name!="hr"){
+                foreach(KeyValuePair<string,string> attribute in InlineHtml.Attributes(value,tag)){
+                    if(!HtmlAttributeAllowed(attribute.Key))continue;
+                    string name=attribute.Key.ToLowerInvariant();
+                    if(attribute.Value==null)sb.Append(' ').Append(name);
+                    else AppendAttribute(sb,name,MarkdownPlainText.DecodeEntities(attribute.Value));
+                }
+            }
+            sb.Append('>');
+        }
+        static bool HtmlAttributeAllowed(string name){
+            switch(name.ToLowerInvariant()){
+                case "align":case "open":case "width":case "height":
+                case "src":case "alt":case "href":case "title":return true;
+                default:return false;
+            }
         }
         void Row(string[] cells,string[] alignments,bool header){
             sb.Append("<tr>");
@@ -1076,9 +1217,23 @@ internal static class HtmlExporter {
                 if(value.IndexOf("\\\n",StringComparison.Ordinal)>=0)value=value.Replace("\\\n","\n");
             }
             int at=0,p=0;
+            Dictionary<int,InlineHtml.Tag> html=InlineHtml.Parse(value);
             while(p<value.Length){
+                InlineHtml.Tag tag;
+                if(value[p]=='<'&&html.TryGetValue(p,out tag)){
+                    // The pair must end past its own start; a map entry that did not would keep p
+                    // where it is forever, so step over the '<' instead.
+                    if(tag.CloseEnd<=p||tag.CloseStart<tag.End){p++;continue;}
+                    if(p>at)AppendText(sb,value.Substring(at,p-at),false);
+                    AppendHtml(value,tag,html,depth);
+                    at=tag.CloseEnd;p=at;continue;
+                }
+                if(value[p]=='<'){
+                    InlineHtml.Tag literal=InlineHtml.Read(value,p);
+                    if(literal!=null){p=literal.End>p?literal.End:p+1;continue;}
+                }
                 int kind;int end;int contentStart;int contentEnd;
-                if(!Token(value,p,out kind,out end,out contentStart,out contentEnd)){p++;continue;}
+                if(!Token(value,p,out kind,out end,out contentStart,out contentEnd)||end<=p){p++;continue;}
                 if(p>at)AppendText(sb,value.Substring(at,p-at),false);
                 switch(kind){
                     case 1:case 2:{
@@ -1100,6 +1255,7 @@ internal static class HtmlExporter {
                     case 6:case 7:Wrap("strong",value,contentStart,contentEnd,depth);break;
                     case 8:Wrap("del",value,contentStart,contentEnd,depth);break;
                     case 9:case 10:Wrap("em",value,contentStart,contentEnd,depth);break;
+                    case 14:Wrap("mark",value,contentStart,contentEnd,depth);break;
                     case 11:sb.Append("<br>\n");break;
                     case 12:{
                         string target=value.Substring(contentStart,contentEnd-contentStart);
@@ -1111,9 +1267,58 @@ internal static class HtmlExporter {
                     }
                     default:break;   // 13: a same-line HTML comment is markup and shows nothing
                 }
+                if(end<=p){p++;continue;}   // a rewritten end must never move the cursor backwards
                 at=end;p=end;
             }
             if(at<value.Length)AppendText(sb,value.Substring(at),false);
+        }
+        void AppendHtml(string value,InlineHtml.Tag tag,Dictionary<int,InlineHtml.Tag> html,int depth){
+            string name=tag.Name;
+            if(name=="picture"){
+                InlineHtml.Tag image=InlineHtml.PictureImage(html,tag);
+                if(image!=null){sb.Append("<picture>");AppendHtml(value,image,html,depth);sb.Append("</picture>");}
+                else AppendText(sb,value.Substring(tag.Start,tag.CloseEnd-tag.Start),false);
+                return;
+            }
+            if(name=="img"){
+                string source=ResolveImage(context,RestoreCodeEscapes(InlineHtml.Attribute(value,tag,"src")));
+                string alt=RestoreEscapes(InlineHtml.Attribute(value,tag,"alt"));
+                if(source==null){AppendText(sb,context.ImageLabel+alt+"]",false);return;}
+                sb.Append("<img");AppendAttribute(sb,"src",source);AppendAttribute(sb,"alt",alt);
+                double w=InlineHtml.Dimension(value,tag,"width"),h=InlineHtml.Dimension(value,tag,"height");
+                if(w>0&&h>0)InlineHtml.ImageSize(w,h,w,h,700,out w,out h);
+                if(w>0)AppendAttribute(sb,"width",Math.Min(700,w).ToString("0.###",CultureInfo.InvariantCulture));
+                if(h>0)AppendAttribute(sb,"height",Math.Min(700,h).ToString("0.###",CultureInfo.InvariantCulture));
+                sb.Append('>');return;
+            }
+            if(name=="br"||name=="wbr"){sb.Append('<').Append(name).Append('>');return;}
+            if(name=="hr"){sb.Append("<hr>");return;}
+            string content=value.Substring(tag.End,tag.CloseStart-tag.End);
+            // A block tag inside a paragraph (a one-line "<h2>…</h2>", "<p align=..>", …) passes
+            // through the same way as its tag-only form, with the allowed attributes only.
+            if(InlineHtml.BlockName(name)){
+                WriteHtmlOpen(value,tag);
+                if(name=="pre")AppendEscaped(sb,content,0,content.Length,false);
+                else Inline(content,depth+1);
+                sb.Append("</").Append(name).Append('>');
+                return;
+            }
+            if(name=="span"||name=="font"){
+                string style=SpanStyle(value.Substring(tag.Start,tag.End-tag.Start));
+                if(style!=null)sb.Append("<span style=\"").Append(style).Append("\">");
+                Inline(content,depth+1);if(style!=null)sb.Append("</span>");return;
+            }
+            string href=name=="a"?LinkTarget(RestoreCodeEscapes(InlineHtml.Attribute(value,tag,"href"))):null;
+            bool emit=name!="a"||href!=null;
+            if(emit){
+                sb.Append('<').Append(name);
+                if(href!=null)AppendAttribute(sb,"href",AnchorHref(href));
+                string attribute=name=="time"?"datetime":name=="abbr"||name=="dfn"?"title":null;
+                if(attribute!=null){string title=RestoreEscapes(InlineHtml.Attribute(value,tag,attribute));if(title.Length>0)AppendAttribute(sb,attribute,title);}
+                sb.Append('>');
+            }
+            if(InlineHtml.Code(name))AppendText(sb,content,false,false);else Inline(content,depth+1);
+            if(emit)sb.Append("</").Append(name).Append('>');
         }
         void Wrap(string tag,string value,int start,int stop,int depth){
             sb.Append('<').Append(tag).Append('>');

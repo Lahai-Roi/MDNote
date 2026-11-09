@@ -51,9 +51,14 @@ internal static class MarkdownPlainText {
         string normalized=markdown.Replace("\r\n","\n").Replace('\r','\n');
         string[] lines=normalized.Split('\n');
         var references=new References();
-        ScanReferences(lines,references);
+        // YAML front matter is kept as plain source lines: its "---" delimiters are not rules
+        // and nothing inside it is a definition or block markup (the live box and export agree).
+        // The opener test is FrontMatterEnd's own first check, repeated here so an ordinary
+        // document never loads the live-preview type (cold WPF statics) just to learn "no".
+        int frontMatter=lines.Length>=2&&String.Equals(lines[0],"---",StringComparison.Ordinal)?MarkdownLivePreview.FrontMatterEnd(lines):0;
+        ScanReferences(lines,references,frontMatter);
         var result=new StringBuilder(normalized.Length+16);
-        Render(lines,references,result,imageLabel??ImageLabel);
+        Render(lines,references,result,imageLabel??ImageLabel,frontMatter);
         if(result.Length>0)result.Length--;        // ReadableText drops the final block newline
         return Canonical(result.ToString());
     }
@@ -69,6 +74,25 @@ internal static class MarkdownPlainText {
     // The live view's blank-line rule (MarkdownLivePreview.BlankLine): ASCII spaces and tabs
     // only, so a U+3000 line is content for all three renderers and ends a list everywhere.
     internal static bool BlankLine(string line){return WhiteOnly(line,0);}
+    // "[TOC]" alone on a line (case-insensitive), the in-place table of contents. At most three
+    // leading spaces/tabs, like every block marker, and nothing but spaces after the "]" so a
+    // sentence that starts with it stays paragraph text. The live view, the print parser and the
+    // HTML export read this one rule; a line inside a fence or a container is decided by the
+    // caller's own block state.
+    internal static bool TocLine(string line){
+        if(line==null)return false;
+        int p=0,columns=0;
+        while(p<line.Length&&(line[p]==' '||line[p]=='\t')){columns+=line[p]=='\t'?4:1;if(columns>3)return false;p++;}
+        return TocAt(line,p);
+    }
+    internal static bool TocAt(string text,int start){
+        if(text==null||start<0||start+5>text.Length)return false;
+        if(text[start]!='['||text[start+4]!=']')return false;
+        char t=text[start+1],o=text[start+2],c=text[start+3];
+        if((t!='t'&&t!='T')||(o!='o'&&o!='O')||(c!='c'&&c!='C'))return false;
+        for(int i=start+5;i<text.Length;i++)if(text[i]!=' '&&text[i]!='\t')return false;
+        return true;
+    }
     // .NET \w: letters, non-spacing marks, decimal digits and connector punctuation, plus the joiners.
     static bool Word(char c){
         switch(Char.GetUnicodeCategory(c)){
@@ -416,10 +440,12 @@ internal static class MarkdownPlainText {
         return 1;
     }
     // Emits one document's blocks in order; quotes recurse with their own list state.
-    static void Render(string[] lines,References references,StringBuilder result,string imageLabel){
+    static void Render(string[] lines,References references,StringBuilder result,string imageLabel,int frontMatter=0){
         var levels=new List<ListLevel>(); // NestLists drops its levels at every non-list block except a blank line
+        bool inPre=false;
         for(int i=0;i<lines.Length;i++){
             string line=lines[i];
+            if(i<frontMatter){result.Append(line).Append('\n');continue;}
             char fenceMarker;int fenceCount;int fenceInfo;
             if(FenceOpen(line,out fenceMarker,out fenceCount,out fenceInfo)){
                 var code=new StringBuilder();
@@ -430,6 +456,29 @@ internal static class MarkdownPlainText {
                     code.Append(lines[i]);
                 }
                 result.Append(code.ToString()).Append('\n');
+                levels.Clear();
+                continue;
+            }
+            // GitHub-allowed block HTML: a tag-only line is structure and leaves no text. <pre> and
+            // </pre> toggle the literal body, where no markdown or block rule runs.
+            int htmlTagStart;
+            InlineHtml.Tag htmlTag=InlineHtml.BlockTagLine(line,out htmlTagStart);
+            if(inPre){
+                if(htmlTag!=null&&htmlTag.Name=="pre"&&htmlTag.Closing)inPre=false;
+                else result.Append(line).Append('\n');
+                continue;
+            }
+            if(htmlTag!=null){
+                if(htmlTag.Name=="pre")inPre=!htmlTag.Closing;
+                levels.Clear();
+                continue;
+            }
+            InlineHtml.Tag htmlOpen;
+            if(InlineHtml.SingleLineBlock(line,out htmlOpen)){
+                string htmlBody=line.Substring(htmlOpen.End,htmlOpen.CloseStart-htmlOpen.End);
+                if(htmlOpen.Name=="pre")result.Append(htmlBody);
+                else AppendInline(result,htmlBody,references,imageLabel);
+                result.Append('\n');
                 levels.Clear();
                 continue;
             }
@@ -616,14 +665,33 @@ internal static class MarkdownPlainText {
             if(value.IndexOf("\\\n",StringComparison.Ordinal)>=0)value=value.Replace("\\\n","\n");
         }
         int at=0;int p=0;
+        Dictionary<int,InlineHtml.Tag> html=InlineHtml.Parse(value);
         while(p<value.Length){
+            InlineHtml.Tag tag;
+            if(value[p]=='<'&&html.TryGetValue(p,out tag)){
+                // The pair must end past its own start (and its content must not run backwards);
+                // a broken pair would keep p where it is forever, so step over the '<'.
+                if(tag.CloseEnd<=p||tag.CloseStart<tag.End){p++;continue;}
+                if(p>at)result.Append(Markdown.RestoreEscapes(DecodeEntities(value.Substring(at,p-at))));
+                InlineHtml.Tag image=tag.Name=="picture"?InlineHtml.PictureImage(html,tag):tag.Name=="img"?tag:null;
+                if(image!=null)result.Append(Markdown.RestoreEscapes(InlineHtml.Attribute(value,image,"alt")));
+                else if(tag.Name=="br")result.Append('\n');
+                else if(tag.Name=="wbr"){}
+                else if(InlineHtml.Code(tag.Name))result.Append(Markdown.RestoreEscapes(DecodeEntities(value.Substring(tag.End,tag.CloseStart-tag.End))));
+                else Inline(result,value.Substring(tag.End,tag.CloseStart-tag.End),references,imageLabel,depth+1);
+                at=tag.CloseEnd;p=at;continue;
+            }
+            if(value[p]=='<'){
+                InlineHtml.Tag literal=InlineHtml.Read(value,p);
+                if(literal!=null){p=literal.End>p?literal.End:p+1;continue;}
+            }
             int kind;int end;int contentStart;int contentEnd;
-            if(!Token(value,p,out kind,out end,out contentStart,out contentEnd)){p++;continue;}
+            if(!Token(value,p,out kind,out end,out contentStart,out contentEnd)||end<=p){p++;continue;}
             if(p>at)result.Append(Markdown.RestoreEscapes(DecodeEntities(value.Substring(at,p-at))));
             if(kind==1||kind==2){
-                string tag=kind==1?"span":"font";
+                string htmlTag=kind==1?"span":"font";
                 int closeStart;int closeEnd;
-                if(BalancedTag(value,contentStart,tag,out closeStart,out closeEnd)){contentEnd=closeStart;end=closeEnd;}
+                if(BalancedTag(value,contentStart,htmlTag,out closeStart,out closeEnd)){contentEnd=closeStart;end=closeEnd;}
                 Inline(result,value.Substring(contentStart,contentEnd-contentStart),references,imageLabel,depth+1);
             }else if(kind==3){
                 result.Append(Markdown.RestoreCodeEscapes(Markdown.UnpadCode(value.Substring(contentStart,contentEnd-contentStart)))); // no HTML decode for inline code
@@ -640,6 +708,7 @@ internal static class MarkdownPlainText {
             }else{
                 Inline(result,value.Substring(contentStart,contentEnd-contentStart),references,imageLabel,depth+1);
             }
+            if(end<=p){p++;continue;}   // a rewritten end must never move the cursor backwards
             at=end;p=end;
         }
         if(at<value.Length)result.Append(Markdown.RestoreEscapes(DecodeEntities(value.Substring(at))));
@@ -695,6 +764,10 @@ internal static class MarkdownPlainText {
         }
         if(c=='~'){
             if(p+1<value.Length&&value[p+1]=='~'&&BoldClose(value,p,'~',out end,out contentEnd)){kind=8;contentStart=p+2;return true;}
+            return false;
+        }
+        if(c=='='){
+            if(p+1<value.Length&&value[p+1]=='='&&HighlightClose(value,p,out end,out contentEnd)){kind=14;contentStart=p+2;return true;}
             return false;
         }
         if(c=='*'||c=='_'){
@@ -782,6 +855,19 @@ internal static class MarkdownPlainText {
         for(int scan=p+3;scan+1<value.Length;scan++){
             if(value[scan]=='\n')return false;
             if(value[scan]==c&&value[scan+1]==c){contentEnd=scan;end=scan+2;return true;}
+        }
+        return false;
+    }
+    // ==text== highlight: the print parser's "==(?=\S)(.+?)(?<=\S)==" lookarounds, so the opener
+    // must be followed and the closer preceded by a non-space character ("== x ==" stays literal)
+    // and the pair never crosses a newline. "==" with no content char after the opener stays
+    // literal too, like "===".
+    static bool HighlightClose(string value,int p,out int end,out int contentEnd){
+        end=0;contentEnd=0;
+        if(p+2>=value.Length||Char.IsWhiteSpace(value[p+2]))return false;
+        for(int scan=p+3;scan+1<value.Length;scan++){
+            if(value[scan]=='\n')return false;
+            if(value[scan]=='='&&value[scan+1]=='='&&!Char.IsWhiteSpace(value[scan-1])){contentEnd=scan;end=scan+2;return true;}
         }
         return false;
     }
@@ -880,6 +966,48 @@ internal static class MarkdownPlainText {
         return decoded==entity?null:decoded;
     }
 
+    /* `:name:` emoji shortcodes for the rendered views (live/Basic and print). The flank rule keeps
+       a shortcode from matching inside a word, a URL path or another shortcode: the opening colon
+       may not follow a shortcode-name character, ":" or "/", and the closing colon may not be
+       followed by one, so "a:b:c" stays literal. A run holding "://" before the opening colon is
+       a URL, not a shortcode host (a query string in prose stays text). Names come from
+       EmojiShortcodes (GitHub's set); the TXT converter never calls this, so MD->TXT keeps
+       ":name:" exactly as typed. */
+    internal static bool EmojiAt(string text,int start,out int end){
+        end=start;
+        if(text==null||start<0||start>=text.Length||text[start]!=':')return false;
+        if(start>0&&!EmojiFlank(text[start-1]))return false;
+        int p=start+1,nameStart=p;
+        while(p<text.Length&&p-nameStart<64&&EmojiShortcodes.IsNameChar(text[p]))p++;
+        if(p==nameStart||p>=text.Length||text[p]!=':')return false;
+        if(p+1<text.Length&&!EmojiFlank(text[p+1]))return false;
+        if(EmojiShortcodes.Lookup(text.Substring(nameStart,p-nameStart))==null)return false;
+        int run=start-1;
+        while(run>=0&&start-run<256&&!Char.IsWhiteSpace(text[run]))run--;
+        if(run<start-1&&text.IndexOf("://",run+1,start-run-1,StringComparison.Ordinal)>=0)return false;
+        end=p+1;
+        return true;
+    }
+    static bool EmojiFlank(char c){
+        return !(EmojiShortcodes.IsNameChar(c)||c==':'||c=='/');
+    }
+    // The same rule over a whole string. The input instance comes back when nothing matched.
+    internal static string EmojiText(string value){
+        if(value==null||value.IndexOf(':')<0)return value;
+        StringBuilder result=null;int at=0;
+        for(int p=0;p<value.Length;){
+            int end;
+            if(!EmojiAt(value,p,out end)||end<=p){p++;continue;}
+            if(result==null)result=new StringBuilder(value.Length+8);
+            if(p>at)result.Append(value,at,p-at);
+            result.Append(EmojiShortcodes.Lookup(value.Substring(p+1,end-p-2)));
+            at=end;p=end;
+        }
+        if(result==null)return value;
+        if(at<value.Length)result.Append(value,at,value.Length-at);
+        return result.ToString();
+    }
+
     // Markdown.ExpandReferences: protects `code`, expands [label][id] and [label] against the definitions.
     static string ExpandReferences(string value,References references){
         if(value.Length==0)return value;
@@ -888,6 +1016,7 @@ internal static class MarkdownPlainText {
         while(p<value.Length){
             int end;int kind;bool bang;string label;string id;
             if(!ReferenceMatch(value,p,out end,out kind,out bang,out label,out id)){p++;continue;}
+            if(end<=p){p++;continue;}   // a match that does not move the cursor stays literal text
             if(p>at)result.Append(value,at,p-at);
             if(kind==1){
                 result.Append(value,p,end-p);
@@ -1003,9 +1132,10 @@ internal static class MarkdownPlainText {
     }
 
     // Markdown.ScanReferences: definitions are collected outside fenced code only.
-    static void ScanReferences(string[] lines,References references){
+    static void ScanReferences(string[] lines,References references,int frontMatter=0){
         char marker='\0';int length=0;
         for(int i=0;i<lines.Length;i++){
+            if(i<frontMatter)continue;
             string line=lines[i];
             char fenceMarker;int fenceCount;int fenceInfo;
             if(marker!='\0'){

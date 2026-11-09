@@ -22,7 +22,10 @@ public partial class MainWindow {
         string directory=null;
         string basePath=DocumentBasePath();
         if(!String.IsNullOrEmpty(basePath)){try{directory=Path.GetDirectoryName(Path.GetFullPath(basePath));}catch(ArgumentException){}catch(NotSupportedException){}catch(PathTooLongException){}}
-        return new MarkdownLivePreview.Settings {FontSize=fontSize,Family=family,LinePercent=linePercent,Dark=dark,TextColor=customColor,WordWrap=wordWrap,BaseDirectory=directory,ReadOnly=!editing||documentOperationBusy,Busy=documentOperationBusy,HideMarkers=hideMarkers||MarkdownLivePreview.Settings.HideMarkersFromEnvironment(),HeadingMarks=headingMarkStyle!=2,HeadingHash=headingMarkStyle==1,Translate=T};
+        return new MarkdownLivePreview.Settings {FontSize=fontSize,Family=family,LinePercent=linePercent,Dark=dark,TextColor=customColor,WordWrap=wordWrap,BaseDirectory=directory,ReadOnly=!editing||documentOperationBusy,Busy=documentOperationBusy,HideMarkers=hideMarkers||MarkdownLivePreview.Settings.HideMarkersFromEnvironment(),HeadingMarks=headingMarkStyle!=2,HeadingHash=headingMarkStyle==1,Translate=T,Notice=ShowStatusNotice,
+            // The in-document [TOC] reads the outline's published heading list; a parsed TOC
+            // line asks for a scan (debounced, and skipped while the list is current).
+            Toc=tocData,TocRequested=delegate{if(source!=null)EnsureTocHeadingsSoon();}};
     }
     // The raw source view (원문 편집 toggle, preview detached) is source text, not prose: ASCII
     // symbols take the Latin code face while Hangul keeps the chosen document family. The live
@@ -38,6 +41,9 @@ public partial class MainWindow {
     // Called after layout, render, theme, font, wrap and line-spacing changes; cheap when nothing changed.
     void UpdateLivePreview(){
         if(source==null)return;
+        // A tab switch leaves the previous document's heading list behind; drop it so a closed
+        // document's text is not kept alive by the TOC cache (a publish for this tab fills it).
+        if(tocData!=null&&source.Document!=null&&!Object.ReferenceEquals(tocData.Document,source.Document))tocData=null;
         ApplySourceFace();
         // A tab switch replaces `source`; a whole-document swap disposes the session itself.
         if(livePreview!=null&&!LivePreviewAttached)DetachLivePreview(false);
@@ -46,7 +52,7 @@ public partial class MainWindow {
             // A TXT long-line session can outlive the switch to the live preview; the
             // preview owns the line height and inserts its own generators first.
             bool previous=LongLinesAttached;
-            livePreview=MarkdownLivePreview.Attach(source,LiveSettings());livePreview.LinkActivated+=OpenLiveLink;HookLiveCodeMenu(source.TextArea);
+            livePreview=MarkdownLivePreview.Attach(source,LiveSettings());livePreview.LinkActivated+=OpenLiveLink;livePreview.TocJump+=LiveTocJump;livePreview.Edited+=LivePreviewEdited;HookLiveCodeMenu(source.TextArea);
             UpdateLongLines(true);
             if(previous){var session=longLines as LongLineWindow.Session;if(session!=null){session.PreviewActivated();session.BringToFront();}}
         }else{livePreview.Update(LiveSettings());UpdateLongLines(true);}
@@ -62,6 +68,20 @@ public partial class MainWindow {
     void RefreshLiveDocumentPath(){
         if(livePreview==null||livePreview.IsDisposed||!LivePreviewAttached)return;
         livePreview.Update(LiveSettings());
+    }
+    // A [TOC] row click: the heading goes to the caret exactly like an outline row (JumpLiveAnchor
+    // also centres it in typewriter mode), so the two ways of jumping behave the same.
+    void LiveTocJump(int offset){
+        if(source==null||source.Document==null)return;
+        JumpLiveAnchor(offset);
+    }
+    /* A document edit while the live session holds a [TOC]: refresh the heading list the box
+       draws. The outline's own cheap rule (OutlineMayChange) decides whether this edit can change
+       a heading at all, so typing inside a paragraph costs a line read, not a document scan. */
+    void LivePreviewEdited(ICSharpCode.AvalonEdit.Document.DocumentChangeEventArgs change){
+        if(tocData==null||source==null||source.Document==null)return;
+        if(livePreview==null||!livePreview.TocSeen)return;
+        if(OutlineMayChange(source.Document,change))EnsureTocHeadingsSoon();
     }
     // Ctrl+click targets: "#^id" jumps to the footnote definition, "ref:id" opens the URL of the
     // "[id]: url" definition (case-insensitive), "#heading" jumps to that heading (the basic

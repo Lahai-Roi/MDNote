@@ -11,7 +11,7 @@
 !ifndef OUTPUT
  !error "OUTPUT is required"
 !endif
-!define VERSION "2.3.1"
+!define VERSION "2.4.0"
 !ifdef TEST_BUILD
  !define APP_NAME "MDNote (설치 검사)"
  !define APP_KEY "MDNoteInstallerSmokeTest"
@@ -39,7 +39,7 @@ SetOverwrite on
 ShowInstDetails show
 ShowUninstDetails show
 ManifestDPIAware true
-VIProductVersion "2.3.1.0"
+VIProductVersion "2.4.0.0"
 VIAddVersionKey /LANG=1042 "ProductName" "$(MDNoteText16)"
 VIAddVersionKey /LANG=1042 "FileDescription" "${APP_NAME} 설치 프로그램"
 VIAddVersionKey /LANG=1042 "FileVersion" "${VERSION}"
@@ -236,6 +236,12 @@ Section "MDNote" Main
   StrCpy $R9 "zh-TW"
  ${EndIf}
  WriteINIStr "$INSTDIR\install-info.ini" "MDNote" "Language" "$R9"
+ !ifndef TEST_BUILD
+  ; 2.4.0 memory work: precompile MDNote.exe (and its DLLs) so start-up skips the JIT. Hidden
+  ; process (nsExec, no console), result ignored: a failed NGEN only means the app JITs as before.
+  IfFileExists "$WINDIR\Microsoft.NET\Framework64\v4.0.30319\ngen.exe" 0 +2
+   nsExec::Exec '"$WINDIR\Microsoft.NET\Framework64\v4.0.30319\ngen.exe" install "$INSTDIR\MDNote.exe" /nologo /silent'
+ !endif
  WriteUninstaller "$INSTDIR\Uninstall.exe"
  WriteRegStr ${REG_ROOT} "${REG_APP}" "InstallDir" "$INSTDIR"
  WriteRegStr ${REG_ROOT} "${REG_UNINSTALL}" "DisplayName" "${APP_NAME}"
@@ -345,6 +351,10 @@ FunctionEnd
 
 Section "Uninstall"
  Call un.CheckClosed
+ !ifndef TEST_BUILD
+  IfFileExists "$WINDIR\Microsoft.NET\Framework64\v4.0.30319\ngen.exe" 0 +2
+   nsExec::Exec '"$WINDIR\Microsoft.NET\Framework64\v4.0.30319\ngen.exe" uninstall "$INSTDIR\MDNote.exe" /nologo /silent'
+ !endif
  ; Explicit compile-time manifest; never recursively remove a user-selected folder.
  !include "legacy-cleanup.nsh"
  !include "uninstall-files.nsh"

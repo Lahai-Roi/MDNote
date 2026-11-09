@@ -3,7 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 namespace MDNote {public partial class MainWindow {
-    void SetupInteractionLayout(){Resources[SystemParameters.VerticalScrollBarWidthKey]=10.0;Resources[SystemParameters.HorizontalScrollBarHeightKey]=10.0;Closed+=delegate{fileOpenClosed=true;CancelFileOpen();searchWindowClosed=true;CancelParallelSearch();CancelEditorRefresh();foreach(var state in documents)ReleaseTabSurfaces(state);textGutter.Editor=null;};}
+    void SetupInteractionLayout(){Resources[SystemParameters.VerticalScrollBarWidthKey]=17.0;Resources[SystemParameters.HorizontalScrollBarHeightKey]=14.0;/* 2.4.0: appinn #30 "scroll bar too thin" */Closed+=delegate{fileOpenClosed=true;CancelFileOpen();searchWindowClosed=true;CancelParallelSearch();CancelEditorRefresh();foreach(var state in documents)ReleaseTabSurfaces(state);textGutter.Editor=null;};}
     // Ctrl+wheel scrolls the source by four lines, independent of the preview's own scrolling.
     void FastScroll(object sender,MouseWheelEventArgs args){
         if((Keyboard.Modifiers&ModifierKeys.Control)!=0||args.Delta==0)return;

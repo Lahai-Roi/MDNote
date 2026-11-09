@@ -30,28 +30,117 @@ public partial class MainWindow {
     // an empty marker pair: the style is armed for the text typed next and the pair is written
     // with that first input. A caret move, any applied command or a second toggle of the same
     // style drops the arm, so no raw "****" (or empty span) is ever left in the source and the
-    // toggle itself records no history entry.
-    string typingOpen,typingClose,typingMarker;
+    // toggle itself records no history entry. Armed styles stack (outermost first), so a size
+    // picked before Bold still wraps the first typed text together:
+    // <span style="font-size:24px">**가**</span>, the way Word applies both to the typing point.
+    sealed class ArmedPair {
+        internal string Open;
+        internal string Close;
+        internal string Marker;
+    }
+    List<ArmedPair> typingArmed;
+    string typingOpen,typingClose;
     int typingAt=-1;
     TextDocument typingDocument;
     ICSharpCode.AvalonEdit.Document.ITextSourceVersion typingVersion;
     ICSharpCode.AvalonEdit.Editing.TextArea typingCaretArea;
     EventHandler typingCaretHandler,typingTextHandler;
-    // True while the armed style still belongs to the caret: same surface, same document, text
-    // unchanged since the toggle, and a collapsed caret that has not moved.
+    // True while the armed styles still belong to the caret: same surface, same document, text
+    // unchanged since the toggle, and a collapsed caret that has not moved. One move is the armed
+    // code pair's own: the live view's closing-edge rule steps a caret right after a closed
+    // highlight to the run's inner edge (the same drawn spot), and the arm survives it
+    // (ClosingEdgeArmSpot).
     bool TypingStyleArmed{
         get{
             if(typingOpen==null||!LiveFormat||source==null||typingDocument==null)return false;
             if(!Object.ReferenceEquals(source.Document,typingDocument))return false;
             if(!Object.ReferenceEquals(source.Document.Version,typingVersion))return false;
-            return source.SelectionLength==0&&source.SelectionStart==typingAt;
+            if(source.SelectionLength!=0)return false;
+            return source.SelectionStart==typingAt||ClosingEdgeArmSpot();
         }
     }
-    void ClearTypingStyle(){typingOpen=null;typingClose=null;typingMarker=null;typingAt=-1;typingDocument=null;typingVersion=null;UnhookTypingStyleCaret();if(source!=null)source.TextArea.Caret.Refresh();}
-    // Arming the same pair again on a live arm is the toggle being switched off before any input.
+    // 11-09: with inline code armed on a closed highlight's outer edge ("==테스트==|"), the live
+    // view's closing-edge rule (HiddenCloseTypingEntering) moves the caret to the run's inner edge
+    // before the first character lands. That move must not spend the arm: the pair is written at
+    // the arming spot, where WrapTyped's exclusive rule splits the highlight and writes the code
+    // pair outside it ("==테스트==" + "`X`"). Bold, italic, strike and the span styles keep the
+    // older answer (the typed text takes the run, the arm ends on the move).
+    bool ClosingEdgeArmSpot(){
+        if(typingOpen==null||typingArmed==null||source==null||typingDocument==null)return false;
+        if(!Object.ReferenceEquals(source.Document,typingDocument))return false;
+        if(!Object.ReferenceEquals(source.Document.Version,typingVersion))return false;
+        if(source.SelectionLength!=0||source.CaretIndex==typingAt)return false;
+        bool codeArmed=false;
+        for(int i=0;i<typingArmed.Count;i++)if(typingArmed[i].Marker=="`"){codeArmed=true;break;}
+        if(!codeArmed||!LivePreviewAttached||livePreview==null)return false;
+        // The moved spot must be the inner edge the preview's rule names for this caret (the
+        // innermost closer of the stacked run at typingAt), and that run must be a closed
+        // highlight the exclusive replacement actually splits.
+        var document=source.Document;
+        DocumentLine line=document.GetLineByOffset(typingAt);
+        int start,end;
+        if(!MarkdownLivePreview.Session.HiddenCloseRun(livePreview.Info(line),typingAt-line.Offset,out start,out end))return false;
+        if(source.CaretIndex!=line.Offset+start)return false;
+        return MarkdownCommands.CaretAfterClosedHighlight(document,typingAt);
+    }
+    void ClearTypingStyle(){typingArmed=null;typingOpen=null;typingClose=null;typingAt=-1;typingDocument=null;typingVersion=null;UnhookTypingStyleCaret();if(source!=null)source.TextArea.Caret.Refresh();}
+    // The style property a caret-armed span pair writes ("font-size", "color"), null for a marker
+    // pair. A size and a colour each replace the armed one of their own kind instead of stacking.
+    static string ArmedSpanProperty(string open){
+        const string prefix="<span style=\"";
+        if(open==null||!open.StartsWith(prefix,StringComparison.Ordinal))return null;
+        int colon=open.IndexOf(':',prefix.Length);
+        if(colon<0)return null;
+        string name=open.Substring(prefix.Length,colon-prefix.Length).Trim();
+        if(name.Equals("font-size",StringComparison.OrdinalIgnoreCase))return "font-size";
+        if(name.Equals("color",StringComparison.OrdinalIgnoreCase))return "color";
+        return null;
+    }
+    // The value one armed span pair carries, null when it is a marker pair or writes another property.
+    static string ArmedSpanValue(string open,string property){
+        const string prefix="<span style=\"";
+        if(open==null||!open.StartsWith(prefix,StringComparison.Ordinal))return null;
+        int colon=open.IndexOf(':',prefix.Length);
+        if(colon<0)return null;
+        if(!String.Equals(open.Substring(prefix.Length,colon-prefix.Length).Trim(),property,StringComparison.OrdinalIgnoreCase))return null;
+        int end=colon+1;
+        while(end<open.Length&&open[end]!=';'&&open[end]!='"'&&open[end]!='\'')end++;
+        return open.Substring(colon+1,end-colon-1).Trim();
+    }
+    static ArmedPair NewArmedPair(CommandResult result){return new ArmedPair {Open=result.TypingOpen,Close=result.TypingClose,Marker=result.TypingMarker};}
+    // The opening runs in list order and the closing runs in reverse, so the pairs nest.
+    string CombinedTypingOpen(){
+        string value="";
+        for(int i=0;i<typingArmed.Count;i++)value+=typingArmed[i].Open;
+        return value;
+    }
+    string CombinedTypingClose(){
+        string value="";
+        for(int i=typingArmed.Count-1;i>=0;i--)value+=typingArmed[i].Close;
+        return value;
+    }
+    // Arming a pair again switches that one style off before any input. A size or a colour
+    // replaces the armed one of its own kind (two sizes never stack); any other style is added
+    // inside the armed ones.
     void ArmTypingStyle(CommandResult result){
-        if(TypingStyleArmed&&String.Equals(typingOpen,result.TypingOpen,StringComparison.Ordinal)&&String.Equals(typingClose,result.TypingClose,StringComparison.Ordinal)){ClearTypingStyle();return;}
-        typingOpen=result.TypingOpen;typingClose=result.TypingClose;typingMarker=result.TypingMarker;
+        if(result==null||result.TypingOpen==null)return;
+        if(!TypingStyleArmed)ClearTypingStyle();
+        if(typingArmed==null)typingArmed=new List<ArmedPair>();
+        string property=ArmedSpanProperty(result.TypingOpen);
+        // 11-09 user: highlight and inline code replace one another; the later choice wins.
+        string opposite=result.TypingMarker=="=="?"`":result.TypingMarker=="`"?"==":null;
+        if(opposite!=null)typingArmed.RemoveAll(delegate(ArmedPair pair){return pair.Marker==opposite;});
+        int index=-1;
+        for(int i=0;i<typingArmed.Count;i++){
+            ArmedPair pair=typingArmed[i];
+            if(property!=null){if(String.Equals(ArmedSpanProperty(pair.Open),property,StringComparison.Ordinal)){index=i;break;}}
+            else if(String.Equals(pair.Open,result.TypingOpen,StringComparison.Ordinal)&&String.Equals(pair.Close,result.TypingClose,StringComparison.Ordinal)){index=i;break;}
+        }
+        if(index<0)typingArmed.Add(NewArmedPair(result));
+        else if(property!=null)typingArmed[index]=NewArmedPair(result);
+        else typingArmed.RemoveAt(index);
+        if(typingArmed.Count==0){ClearTypingStyle();return;}
+        typingOpen=CombinedTypingOpen();typingClose=CombinedTypingClose();
         typingAt=Math.Max(0,Math.Min(result.SelectionStart,source.Document.TextLength));
         typingDocument=source.Document;typingVersion=source.Document.Version;
         HookTypingStyleCaret();
@@ -59,25 +148,28 @@ public partial class MainWindow {
         // 11-08 user: a size picked before typing left the caret at the old height until the first syllable composed.
         source.TextArea.Caret.PendingEmSize=PendingTypingSize;source.TextArea.Caret.Refresh();
     }
-    // 11-08 user: a syllable composed right after B / I / S / code / colour was drawn plain until it committed (the pair is written with the commit).
-    // The armed style for the composition string, read from the same marker and opening tag the commit writes; null when nothing is armed.
+    // 11-08 user: a syllable composed right after B / I / S / highlight / code / colour was drawn plain until it committed (the pair is written with the commit).
+    // Every armed style shows on the composition string together (size and bold both), read from
+    // the same pairs the commit writes; null when nothing is armed.
     ImePendingStyle PendingImeStyleNow(){
-        if(!TypingStyleArmed||typingOpen==null)return null;
+        if(!TypingStyleArmed||typingArmed==null)return null;
         var style=new ImePendingStyle();
-        if(typingMarker=="**")style.Bold=true;
-        else if(typingMarker=="*")style.Italic=true;
-        else if(typingMarker=="~~")style.Strike=true;
-        else if(typingMarker=="`")style.Code=true;
-        style.Size=PendingTypingSize();
-        const string colorPrefix="color:";
-        int at=typingOpen.IndexOf(colorPrefix,StringComparison.OrdinalIgnoreCase);
-        if(at>=0){
-            int start=at+colorPrefix.Length,end=start;
-            while(end<typingOpen.Length&&typingOpen[end]!=';'&&typingOpen[end]!='"'&&typingOpen[end]!='\'')end++;
-            try{var brush=new BrushConverter().ConvertFromString(typingOpen.Substring(start,end-start).Trim()) as Brush;if(brush!=null){brush.Freeze();style.Color=brush;}}catch(FormatException){}catch(NotSupportedException){}
+        for(int i=0;i<typingArmed.Count;i++){
+            ArmedPair pair=typingArmed[i];
+            if(pair.Marker=="**")style.Bold=true;
+            else if(pair.Marker=="*")style.Italic=true;
+            else if(pair.Marker=="~~")style.Strike=true;
+            else if(pair.Marker=="==")style.Highlight=true;
+            else if(pair.Marker=="`")style.Code=true;
+            string color=ArmedSpanValue(pair.Open,"color");
+            if(color!=null&&style.Color==null){
+                try{var brush=new BrushConverter().ConvertFromString(color) as Brush;if(brush!=null){brush.Freeze();style.Color=brush;}}catch(FormatException){}catch(NotSupportedException){}
+            }
         }
+        style.Size=PendingTypingSize();
         if(style.Code){style.CodeFamily=MarkdownLivePreview.InlineCodeFamily;if(LivePreviewAttached)style.CodeBackground=livePreview.Colors.InlineCode;}
-        if(!style.Bold&&!style.Italic&&!style.Strike&&!style.Code&&style.Color==null&&style.Size<=0)return null;
+        if(style.Highlight&&LivePreviewAttached)style.HighlightBackground=livePreview.Colors.Highlight;
+        if(!style.Bold&&!style.Italic&&!style.Strike&&!style.Highlight&&!style.Code&&style.Color==null&&style.Size<=0)return null;
         return style;
     }
     // A caret that leaves the armed spot (a click, Home/End, an arrow, a selection) cancels the
@@ -102,34 +194,41 @@ public partial class MainWindow {
     }
     void TypingStyleCaretMoved(object sender,EventArgs e){
         if(typingOpen==null){UnhookTypingStyleCaret();return;}
-        if(source==null||source.SelectionLength!=0||source.CaretIndex!=typingAt){ClearTypingStyle();UpdateTools();}
+        if(source==null||source.SelectionLength!=0||source.CaretIndex!=typingAt){
+            // The closing-edge step the armed code pair survives is not a real caret move (see
+            // ClosingEdgeArmSpot); every other move ends the arm.
+            if(source!=null&&source.SelectionLength==0&&ClosingEdgeArmSpot())return;
+            ClearTypingStyle();UpdateTools();
+        }
     }
     void TypingStyleTextChanged(object sender,EventArgs e){
         if(typingOpen==null){UnhookTypingStyleCaret();return;}
         if(!TypingStyleArmed){ClearTypingStyle();if(LiveFormat)UpdateTools();}
     }
-    // The size a pending span style will write, 0 when the armed pair carries none. Read from the
-    // armed opening tag, so the size box shows the pending value instead of the caret's size.
+    // The size a pending span style will write, 0 when no armed pair carries one. Read from the
+    // armed opening tags, so the size box shows the pending value instead of the caret's size.
     double PendingTypingSize(){
-        if(!TypingStyleArmed||typingOpen==null)return 0;
-        const string sizePrefix="font-size:";
-        int at=typingOpen.IndexOf(sizePrefix,StringComparison.Ordinal);
-        if(at<0)return 0;
-        int start=at+sizePrefix.Length,end=start;
-        while(end<typingOpen.Length&&(Char.IsDigit(typingOpen[end])||typingOpen[end]=='.'))end++;
-        double value;
-        if(end==start)return 0;
-        if(!Double.TryParse(typingOpen.Substring(start,end-start),System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture,out value))return 0;
-        return value;
+        if(!TypingStyleArmed||typingArmed==null)return 0;
+        for(int i=0;i<typingArmed.Count;i++){
+            string size=ArmedSpanValue(typingArmed[i].Open,"font-size");
+            if(size==null)continue;
+            int end=0;
+            while(end<size.Length&&(Char.IsDigit(size[end])||size[end]=='.'))end++;
+            double value;
+            if(end>0&&Double.TryParse(size.Substring(0,end),System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture,out value))return value;
+        }
+        return 0;
     }
     // Whitespace cannot sit inside an emphasis pair (the markers would stay literal) and a
     // newline is the line's own structural command, so such input ends the armed style instead
     // of being wrapped in it.
     static bool EndsTypingStyle(string text){return String.IsNullOrEmpty(text)||Char.IsWhiteSpace(text[0]);}
-    // The armed pair written around the first input, applied as the same command path every
+    // The armed pairs written around the first input, applied as the same command path every
     // toolbar command takes: one history entry holding the markers and the typed text together.
     bool WrapTypingStyle(string text){
-        CommandResult wrapped=MarkdownCommands.WrapTyped(source.Document,typingAt,typingOpen,typingClose,text);
+        string exclusive=null;
+        if(typingArmed!=null)foreach(ArmedPair pair in typingArmed)if(pair.Marker=="=="||pair.Marker=="`")exclusive=pair.Marker;
+        CommandResult wrapped=MarkdownCommands.WrapTyped(source.Document,typingAt,typingOpen,typingClose,text,exclusive);
         ClearTypingStyle();
         if(wrapped==null)return false;
         // The pair is recorded as typing, not as a command: the rest of the run is typed before the
@@ -292,6 +391,10 @@ public partial class MainWindow {
         if(LivePreviewAttached&&!wholeTables&&SelectionTouchesDelimiter())return true;
         /* 2.3.1: a formatted paste lands inside the caret line's emphasis pairs; the markers of the kinds that already enclose it would collide with the pair's own, so they are dropped from the pasted text (both views, point and selection, table cells too). */
         if(!plain&&!code)markdown=StripEnclosingStyles(markdown,source.SelectionStart);
+        /* 11-09 user: a multi-line paste inside an inline pair (==, `, <span>) split the pair - the break landed between its markers and the
+           tail drew raw "</span>==". An inline pair never crosses a line, so the block is inserted as its visible text and every line break
+           is written as the enclosing pairs' closers + newline + openers, the same split Enter writes (MarkdownInlineSpans.Split). */
+        if(LivePreviewAttached&&livePreview!=null)markdown=SpanBalancedPaste(markdown,source.SelectionStart,source.SelectionLength,plain,code);
         // Stage 4: pasting into a table cell follows the basic view - the pasted lines become the
         // cell's paragraphs, saved as "<br>", and a cell-spanning selection keeps the "|"s.
         if(LivePreviewAttached&&!wholeTables){
@@ -327,7 +430,7 @@ public partial class MainWindow {
         return true;
     }
     // The same rule as the toolbar's "inner same style of a link label is removed": a paste that lands
-    // inside bold, italic or strike pairs of the caret line (the caret, or the start of a selection) does
+    // inside bold, italic, strike or highlight pairs of the caret line (the caret, or the start of a selection) does
     // not repeat those kinds, because "**번**굵게**글자**" closes the outer pair early and pairs the stars
     // wrongly. Only the markers MarkdownLivePreview.ParseInlineText pairs in the pasted FIRST line are
     // dropped; its other styles and literal stars stay. A later pasted line cannot join the caret line's
@@ -339,7 +442,7 @@ public partial class MainWindow {
         if(at<0||at>document.TextLength)return markdown;
         int stop=markdown.IndexOfAny(new char[]{'\r','\n'});
         string head=stop<0?markdown:markdown.Substring(0,stop);
-        if(head.IndexOfAny(new char[]{'*','_','~'})<0)return markdown;
+        if(head.IndexOfAny(new char[]{'*','_','~','='})<0)return markdown;
         var line=document.GetLineByOffset(at);
         var info=livePreview.Info(line);
         if(info==null||info.Text==null||info.Text.Length!=line.Length||info.Code||info.FenceLine||info.Delimiter||info.SetextUnderline>0)return markdown;
@@ -347,7 +450,7 @@ public partial class MainWindow {
         /* A selection that leaves a table row is not one cell's text: the cell rules own that paste. */
         if(selected&&info.Table&&source.SelectionStart+source.SelectionLength>line.EndOffset)return markdown;
         int relative=at-line.Offset;
-        bool bold=false,italic=false,strike=false;
+        bool bold=false,italic=false,strike=false,highlight=false;
         foreach(MarkdownInlineSpans.Span span in MarkdownInlineSpans.Build(info,info.Text)){
             if(span.Kind!=MarkdownInlineSpans.SpanKind.Emphasis)continue;
             /* Inside the pair: after its opener and before its closer; a selection that starts on the closer replaces the closer's side, not the pair's text. */
@@ -355,15 +458,116 @@ public partial class MainWindow {
             if(span.OpenText=="**"||span.OpenText=="__")bold=true;
             else if(span.OpenText=="*"||span.OpenText=="_")italic=true;
             else if(span.OpenText=="~~")strike=true;
+            else if(span.OpenText=="==")highlight=true;
         }
-        if(!bold&&!italic&&!strike)return markdown;
-        string stripped=StripPastedPairs(head,bold,italic,strike);
+        if(!bold&&!italic&&!strike&&!highlight)return markdown;
+        string stripped=StripPastedPairs(head,bold,italic,strike,highlight);
         return String.Equals(stripped,head,StringComparison.Ordinal)?markdown:stripped+markdown.Substring(head.Length);
+    }
+    // 11-09 user (bug B): a multi-line paste that lands inside an inline pair's visible text keeps the pair on every line. The rule:
+    //   1. only a paste whose insertion point lies inside a pair the caret line's own parse found (==, `, **, ~~, <span>, links) is touched;
+    //   2. one-line pastes keep today's behaviour (their markup stays; StripEnclosingStyles already drops a repeated enclosing kind);
+    //   3. a multi-line block is written as its visible text - the markdown is reduced to what the reader would see, the same result the
+    //      rich view's paste gives - and every character that could start a pair is escaped, so the clipboard's own markers can never pair
+    //      with the document's (the pasted "==테스트입력" stays literal text instead of joining the enclosing highlight);
+    //   4. each line break is written as the enclosing pairs' closers + newline + openers, exactly the split Enter writes, so every line
+    //      of the block sits inside the same pair set and the document's own markers stay balanced on each line.
+    // Inline code is literal already (P6): only the backtick split is written there. Returns the text unchanged when the rule does not apply.
+    string SpanBalancedPaste(string markdown,int at,int length,bool plain,bool code){
+        if(String.IsNullOrEmpty(markdown)||!LivePreviewAttached||livePreview==null||source==null||source.Document==null)return markdown;
+        string newline=String.IsNullOrEmpty(documentNewline)?"\n":documentNewline;
+        if(markdown.IndexOf('\n')<0&&markdown.IndexOf('\r')<0)return markdown;
+        var document=source.Document;
+        if(at<0||at>document.TextLength||length<0||at+length>document.TextLength)return markdown;
+        /* A selection that leaves one line keeps the whole-pair rule the selection paste already has. */
+        if(length>0&&document.GetLineByOffset(at)!=document.GetLineByOffset(Math.Min(document.TextLength,at+length)))return markdown;
+        /* A paste on the line directly under a table can be moved to a line of its own (PasteBelowTable) after this rule ran; the
+           enclosers written here would then land on the new line. That case keeps the ordinary paste. */
+        int firstRow,lastRow;
+        if(MarkdownTableCommands.LineAfterTable(document,at,out firstRow,out lastRow))return markdown;
+        var line=document.GetLineByOffset(at);
+        var info=livePreview.Info(line);
+        if(info==null||info.Text==null||info.Text.Length!=line.Length||info.Code||info.Table||info.Delimiter||info.SetextUnderline>0||info.FenceLine)return markdown;
+        int relative=at-line.Offset;
+        var closeParts=new List<MarkdownInlineSpans.Span>();
+        var openParts=new List<MarkdownInlineSpans.Span>();
+        foreach(MarkdownInlineSpans.Span span in MarkdownInlineSpans.Build(info,info.Text)){
+            if(span.Kind==MarkdownInlineSpans.SpanKind.Atomic||span.CloseLen<=0)continue;
+            /* Only the pairs the user reported (==, inline code, <span>): bold/italic/strike keep their existing multi-line paste, which
+               paste-abuse pins line for line (a pasted table inside ** kept all its rows). */
+            string opener=span.OpenText??"";
+            if(opener!="=="&&!opener.StartsWith("`",StringComparison.Ordinal)&&!opener.StartsWith("<span",StringComparison.OrdinalIgnoreCase))continue;
+            /* Inside the visible content: the opener's inner edge and the caret before the closer both count. */
+            if(span.OpenStart+span.OpenLen>relative||relative>span.CloseStart)continue;
+            closeParts.Add(span);openParts.Add(span);
+        }
+        if(openParts.Count==0)return markdown;
+        closeParts.Sort(delegate(MarkdownInlineSpans.Span a,MarkdownInlineSpans.Span b){return a.CloseStart.CompareTo(b.CloseStart);});
+        openParts.Sort(delegate(MarkdownInlineSpans.Span a,MarkdownInlineSpans.Span b){return a.OpenStart.CompareTo(b.OpenStart);});
+        var closing=new System.Text.StringBuilder();var opening=new System.Text.StringBuilder();
+        for(int i=0;i<closeParts.Count;i++)closing.Append(closeParts[i].CloseText);
+        for(int i=0;i<openParts.Count;i++)opening.Append(openParts[i].OpenText);
+        bool trailing=markdown.Length>0&&(markdown[markdown.Length-1]=='\n'||markdown[markdown.Length-1]=='\r');
+        string text;
+        if(code)text=markdown;   /* inline code is literal (P6): its backticks cannot be escaped, only the split is written */
+        else if(plain)text=EscapeEquals(markdown);   /* the plain path already wrote the visible text (SoftLiteral) */
+        else text=SpanPasteLiteral(DropPastedTags(MarkdownPlainText.Convert(markdown,T("[이미지: "))));
+        /* The converter drops the block's final newline; a pasted block that ended on one keeps its line break. */
+        if(trailing&&text.Length>0&&text[text.Length-1]!='\n'&&text[text.Length-1]!='\r')text+="\n";
+        /* One closing set at the end of every line, one opening set at the start of the next non-blank line: a blank line stays outside
+           the pair, and a block that ends on one reopens it for the rest of the caret line (the document's own closer is still there). */
+        String[] lines=text.Replace("\r\n","\n").Replace('\r','\n').Split('\n');
+        var built=new System.Text.StringBuilder(text.Length+(closing.Length+opening.Length+newline.Length)*2);
+        bool open=true;
+        for(int i=0;i<lines.Length;i++){
+            if(!open&&lines[i].Length>0){built.Append(opening);open=true;}
+            built.Append(lines[i]);
+            if(i+1>=lines.Length)continue;
+            if(open){built.Append(closing);open=false;}
+            built.Append(newline);
+        }
+        if(!open)built.Append(opening);
+        return built.ToString();
+    }
+    // The pasted block's visible text with every character that could start a pair escaped: the live preview draws "\*" as "*", so the text
+    // reads as copied and only the enclosing pair remains markup. "=" joins the escape set (the rich path never escapes it): an unpaired
+    // "==" in a pasted line would otherwise pair with the closers and openers written around the line break.
+    static string SpanPasteLiteral(string value){
+        string escaped=FullSoftLiteral(value);
+        return EscapeEquals(escaped);
+    }
+    // A partial copy can start or end inside a tag ("테스트</span>" then the next copied line): the reader keeps an unmatched tag as
+    // literal text (Markdown and MarkdownPlainText both do), and inside the span that would draw the raw "</span>" the user saw. A tag is
+    // formatting, never the reader's text, so the tag runs the converted block still carries are dropped here. A "<" that is not a tag
+    // (a comparison, a lone bracket) is left alone.
+    static string DropPastedTags(string value){
+        if(String.IsNullOrEmpty(value)||value.IndexOf('<')<0)return value;
+        var built=new System.Text.StringBuilder(value.Length);
+        int at=0,p=0;
+        while(p<value.Length){
+            if(value[p]=='<'){
+                InlineHtml.Tag tag=InlineHtml.Read(value,p);
+                if(tag!=null&&tag.End>p){built.Append(value,at,p-at);p=tag.End;at=p;continue;}
+            }
+            p++;
+        }
+        built.Append(value,at,value.Length-at);
+        return built.ToString();
+    }
+    // Escapes every "=" (already escaped ones keep their backslash) for the multi-line-in-a-span paste.
+    static string EscapeEquals(string value){
+        if(value==null||value.IndexOf('=')<0)return value;
+        var built=new System.Text.StringBuilder(value.Length+8);
+        for(int i=0;i<value.Length;i++){char c=value[i];if(c=='='&&(i==0||value[i-1]!='\\'))built.Append('\\');built.Append(c);}
+        return built.ToString();
     }
     // One pasted line without the markers of the pairs it parses as, for the kinds asked. The result must
     // still parse as the other pairs (same count); if removing the markers re-pairs the rest, the line is
     // returned unchanged.
     static string StripPastedPairs(string pasted,bool bold,bool italic,bool strike){
+        return StripPastedPairs(pasted,bold,italic,strike,false);
+    }
+    static string StripPastedPairs(string pasted,bool bold,bool italic,bool strike,bool highlight){
         MarkdownLivePreview.LineInfo parsed=MarkdownLivePreview.ParseInlineText(pasted,false);
         var drop=new bool[pasted.Length];
         var kept=new List<MarkdownInlineSpans.Span>();
@@ -371,7 +575,7 @@ public partial class MainWindow {
         foreach(MarkdownInlineSpans.Span span in MarkdownInlineSpans.Build(parsed,pasted)){
             if(span.Kind!=MarkdownInlineSpans.SpanKind.Emphasis)continue;
             string open=span.OpenText;
-            bool same=(bold&&(open=="**"||open=="__"))||(italic&&(open=="*"||open=="_"))||(strike&&open=="~~");
+            bool same=(bold&&(open=="**"||open=="__"))||(italic&&(open=="*"||open=="_"))||(strike&&open=="~~")||(highlight&&open=="==");
             if(!same||span.OpenStart<0||span.CloseStart<0||span.OpenStart+span.OpenLen>pasted.Length||span.CloseStart+span.CloseLen>pasted.Length){kept.Add(span);continue;}
             for(int i=0;i<span.OpenLen;i++)drop[span.OpenStart+i]=true;
             for(int i=0;i<span.CloseLen;i++)drop[span.CloseStart+i]=true;
@@ -401,7 +605,7 @@ public partial class MainWindow {
     static bool PasteIsOwnSpan(string markdown){
         if(String.IsNullOrEmpty(markdown)||markdown.Length>4096||markdown.IndexOfAny(new char[]{'\r','\n'})>=0)return false;
         char first=markdown[0];
-        if(first!='*'&&first!='_'&&first!='~'&&first!='`')return false;
+        if(first!='*'&&first!='_'&&first!='~'&&first!='='&&first!='`')return false;
         MarkdownLivePreview.LineInfo parsed=MarkdownLivePreview.ParseInlineText(markdown,false);
         foreach(MarkdownInlineSpans.Span span in MarkdownInlineSpans.Build(parsed,markdown)){
             if(span.Kind!=MarkdownInlineSpans.SpanKind.Emphasis&&span.Kind!=MarkdownInlineSpans.SpanKind.Code)continue;
@@ -1370,20 +1574,37 @@ public partial class MainWindow {
         Active(taskButton,tasked);
         Active(quoteButton,ruleInfo!=null&&(ruleInfo.Quote||ruleInfo.QuoteLevels>0));
         Active(blockButton,ruleInfo!=null&&(ruleInfo.Code||ruleInfo.FenceLine));
-        bool bold,italic,strike,code;int heading;
-        livePreview.FormatAt(source.CaretIndex,out bold,out italic,out strike,out code,out heading);
+        bool bold,italic,strike,code,highlight;int heading;
+        livePreview.FormatAt(source.CaretIndex,out bold,out italic,out strike,out code,out highlight,out heading);
         // FormatAt answers the format the next character would take, so at the outer edge of a
         // hidden closing run it reports the pair's inside. Inline code has no such inheritance:
         // the button is lit only where the caret is really inside the code run (user, 2026-10-29).
         code=LiveInlineCodeAt(source.CaretIndex);
-        // An armed style is shown as active at the caret: the next typed text is written in it.
-        if(TypingStyleArmed){
-            if(typingMarker=="**")bold=true;
-            else if(typingMarker=="*")italic=true;
-            else if(typingMarker=="~~")strike=true;
-            else if(typingMarker=="`")code=true;
+        if(source.SelectionLength>0){
+            // A drag's caret can be on either side of the hidden == (or on the next line).
+            // Read the selected visible text, not that insertion point. One line only: pairs
+            // never cross a newline, and a caret/selection callback must stay O(edited line).
+            int start=source.SelectionStart,end=start+source.SelectionLength;
+            var line=source.Document.GetLineByOffset(start);
+            var selected=livePreview.Info(line);
+            highlight=end<=line.EndOffset&&MarkdownCommands.SelectionHasInlineStyle(selected,start-line.Offset,end-line.Offset,MarkdownLivePreview.Style.Highlight);
+            code=end<=line.EndOffset&&MarkdownCommands.SelectionHasInlineStyle(selected,start-line.Offset,end-line.Offset,MarkdownLivePreview.Style.Code);
+        }
+        if(code)highlight=false;
+        // Every armed style is shown as active at the caret: the next typed text is written in all
+        // of them (the size box reads the armed size through PendingTypingSize in RefreshSizeBox).
+        if(TypingStyleArmed&&typingArmed!=null){
+            for(int i=0;i<typingArmed.Count;i++){
+                string armedMarker=typingArmed[i].Marker;
+                if(armedMarker=="**")bold=true;
+                else if(armedMarker=="*")italic=true;
+                else if(armedMarker=="~~")strike=true;
+                else if(armedMarker=="=="){highlight=true;code=false;}
+                else if(armedMarker=="`"){code=true;highlight=false;}
+            }
         }
         boldButton.Tag=bold?"Active":null;italicButton.Tag=italic?"Active":null;strikeButton.Tag=strike?"Active":null;
+        markButton.Tag=highlight?"Active":null;
         codeButton.Tag=code?"Active":null;headingButton.Tag=heading>0?"Active":null;if(liveHeadingLevel!=heading){liveHeadingLevel=heading;UpdateHeadingCaption();}/* b39: caption follows the caret line level (cached per line, O(line)) */
         UpdateTableTools();
         return true;
@@ -1544,8 +1765,9 @@ public partial class MainWindow {
             return MarkdownCommands.ToggleInline(document,selectionStart,selectionLength,"`");
         return null;
     }
+    bool LiveScript(bool superscript){return RunLiveCommand(delegate(TextDocument d,int s,int l){return MarkdownCommands.ToggleScript(d,s,l,superscript);});}
     bool LiveInline(string kind){
-        string marker=kind=="bold"?"**":kind=="italic"?"*":kind=="strike"?"~~":"`";
+        string marker=kind=="bold"?"**":kind=="italic"?"*":kind=="strike"?"~~":kind=="highlight"?"==":"`";
         if(!LiveFormat||source==null)return false;
         // R8: the pending closing-edge space is the live surface's own state and the caret it
         // names must be the settled one, so the check runs after a pending IME commit has landed,

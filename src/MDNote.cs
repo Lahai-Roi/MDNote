@@ -19,18 +19,96 @@ public static partial class Markdown {
     // Links and images are not in this pattern: their target ends at MarkdownPlainText.TargetEnd
     // (balanced parentheses, an <angle> destination, a quoted title), the same scan the TXT
     // renderer and the live preview use, so Inline finds them itself (LinkAt). With the two
-    // alternatives gone the groups are: 5 code, 6/7 bold, 8 strike, 9/10 italic.
-    static readonly Regex token=new Regex(@"(<span\s+[^>]*>)([\s\S]*?)</span>|(<font\s+[^>]*>)([\s\S]*?)</font>|(?<!`)(?<ticks>`+)(?!`)([^\n]*?)(?<!`)\k<ticks>(?!`)|\*\*(.+?)\*\*|__(.+?)__|~~(.+?)~~|\*([^*\n]+)\*|(?<!\w)_([^_\n]+)_(?!\w)|<br\s*/?>",RegexOptions.IgnoreCase);
+    // alternatives gone the groups are: 5 code, 6/7 bold, 8 strike, 9/10 italic, 11 highlight
+    // (the lookarounds keep "== x ==" literal, the live parser's own flanking rule).
+    static readonly Regex token=new Regex(@"(<span\s+[^>]*>)([\s\S]*?)</span>|(<font\s+[^>]*>)([\s\S]*?)</font>|(?<!`)(?<ticks>`+)(?!`)([^\n]*?)(?<!`)\k<ticks>(?!`)|\*\*(.+?)\*\*|__(.+?)__|~~(.+?)~~|\*([^*\n]+)\*|(?<!\w)_([^_\n]+)_(?!\w)|==(?=\S)(.+?)(?<=\S)==|<br\s*/?>",RegexOptions.IgnoreCase);
     internal static bool IsInlineCodeFont(FontFamily font){return font!=null&&(String.Equals(font.Source,"Consolas, Malgun Gothic",StringComparison.OrdinalIgnoreCase)||font.Source.EndsWith(", Consolas, Malgun Gothic",StringComparison.OrdinalIgnoreCase));}
     internal static FontFamily InlineCodeFont(string family){return new FontFamily(family+", Consolas, Malgun Gothic");}
+    // The print view's emoji: a ":name:" Run's text becomes the character (the TXT converter
+    // keeps the shortcode). Inline code runs keep their literal text: their font is the code
+    // face the check above reads, so "<code>" and `x` never turn into an emoji.
+    static void EmojiInlines(InlineCollection inlines){EmojiInlines(inlines,false);}
+    // code: inside an inline code span (or a <code>/<kbd>/<samp> tag), whose text stays literal
+    // even when the Run itself carries no family (the code face sits on the Span).
+    static void EmojiInlines(InlineCollection inlines,bool code){
+        foreach(Inline inline in inlines){
+            var run=inline as Run;
+            if(run!=null){
+                if(!code&&(run.FontFamily==null||!IsInlineCodeFont(run.FontFamily))){
+                    string replaced=MarkdownPlainText.EmojiText(run.Text);
+                    if(!Object.ReferenceEquals(replaced,run.Text))run.Text=replaced;
+                }
+                continue;
+            }
+            var span=inline as Span;
+            if(span!=null)EmojiInlines(span.Inlines,code||IsInlineCodeFont(span.FontFamily));
+        }
+    }
     internal static double HeadingScale(int level){return level==1?2:level==2?1.6:level==3?1.3:level==4?1.15:level==5?1.1:1.06;}
     internal static int HeadingLevel(Paragraph paragraph,double normal){if(paragraph.FontWeight.ToOpenTypeWeight()<600||paragraph.FontSize<=normal*1.05)return 0;double ratio=paragraph.FontSize/normal,best=Double.MaxValue;int found=0;for(int level=1;level<=6;level++){double distance=Math.Abs(ratio-HeadingScale(level));if(distance<best){best=distance;found=level;}}return found;}
     static int ImageDecodeWidth(Uri uri){if(!uri.IsFile)return 0;try{using(var image=System.Drawing.Image.FromFile(uri.LocalPath))return Math.Min(1400,image.Width);}catch{return 0;}}
     static SolidColorBrush Brush(byte r,byte g,byte b){return new SolidColorBrush(Color.FromRgb(r,g,b));}
+    // ---- GitHub-allowed block HTML in the print path ---------------------------------------
+    static InlineHtml.Tag HtmlTagLine(string line){int start;return InlineHtml.BlockTagLine(line,out start);}
+    static InlineHtml.Tag HtmlSingleLine(string line){InlineHtml.Tag open;return InlineHtml.SingleLineBlock(line,out open)?open:null;}
+    // 1 = center, 2 = right, 0 = none.
+    static int HtmlAlignValue(InlineHtml.Tag tag,string line){
+        if(tag.Name=="center")return 1;
+        string align=InlineHtml.Attribute(line,tag,"align");
+        if(String.Equals(align,"center",StringComparison.OrdinalIgnoreCase))return 1;
+        if(String.Equals(align,"right",StringComparison.OrdinalIgnoreCase))return 2;
+        return 0;
+    }
+    // The line holding the matching close of the container opened before `from`, within the
+    // same 200-line bound the live view uses, or -1.
+    static int HtmlCloseIndex(string[] lines,int from,string name){
+        int depth=1,limit=Math.Min(lines.Length,from+200);
+        for(int i=from;i<limit;i++){
+            InlineHtml.Tag tag=HtmlTagLine(lines[i]);
+            if(tag==null||tag.Name!=name)continue;
+            if(tag.Closing){if(--depth==0)return i;}
+            else depth++;
+        }
+        return -1;
+    }
+    static string HtmlInnerText(string[] lines,int from,int to){
+        var text=new StringBuilder();
+        for(int i=from;i<to;i++){if(text.Length>0)text.Append('\n');text.Append(lines[i]);}
+        return text.ToString();
+    }
+    static void MoveBlocks(FlowDocument source,BlockCollection target){
+        while(source.Blocks.FirstBlock!=null){Block block=source.Blocks.FirstBlock;source.Blocks.Remove(block);target.Add(block);}
+    }
+    static void ApplyHtmlAlignment(Block block,TextAlignment align){
+        var paragraph=block as Paragraph;
+        if(paragraph!=null){paragraph.TextAlignment=align;return;}
+        var section=block as Section;
+        if(section!=null){foreach(Block child in section.Blocks)ApplyHtmlAlignment(child,align);return;}
+        var list=block as System.Windows.Documents.List;
+        if(list!=null){foreach(ListItem item in list.ListItems)foreach(Block child in item.Blocks)ApplyHtmlAlignment(child,align);}
+    }
+    // <ol> items: the same bullet paragraph the <li> branch made, numbered in document order.
+    static void NumberHtmlItems(FlowDocument document){
+        int number=1;
+        foreach(Block block in document.Blocks){
+            var paragraph=block as Paragraph;
+            if(paragraph==null)continue;
+            var run=paragraph.Inlines.FirstInline as Run;
+            if(run==null||run.Text!="•  ")continue;
+            run.Text=number.ToString(System.Globalization.CultureInfo.InvariantCulture)+".  ";
+            number++;
+        }
+    }
+    static Paragraph HtmlCodeParagraph(string code,double size,bool dark){
+        return new Paragraph(new Run(code)){FontFamily=new FontFamily("Consolas, Malgun Gothic"),FontSize=size*.9,Background=dark?Brush(55,61,73):Brush(235,238,242),BorderBrush=dark?Brush(91,103,120):Brush(173,184,198),BorderThickness=new Thickness(1),Padding=new Thickness(14),Margin=new Thickness(0,6,0,12)};
+    }
     static FlowDocument ParseCore(string text,double size,string family,Brush foreground,bool dark,string file,string imageLabel) {
         var doc=new FlowDocument {FontFamily=new FontFamily(family),FontSize=size,Foreground=foreground,PagePadding=new Thickness(18,24,0,24),ColumnWidth=100000};
         string[] lines=text.Replace("\r\n","\n").Replace('\r','\n').Split('\n');
-        for(int i=0;i<lines.Length;i++) {
+        // The [TOC] heading list, scanned once per document from the outline's own rule.
+        List<MarkdownLivePreview.TocEntry> tocEntries=null;
+        // YAML front matter is not printed (the live view's box and the HTML export drop it too).
+        for(int i=MarkdownLivePreview.FrontMatterEnd(lines);i<lines.Length;i++) {
             if(i%500==0)Stage("parse-lines",i);int start=i;string line=lines[i];
             int mathLast;string mathSource;
             if(TryDisplayMath(lines,i,out mathLast,out mathSource)&&MathRender.Check(mathSource)){
@@ -44,7 +122,97 @@ public static partial class Markdown {
                 while(++i<lines.Length&&!Regex.IsMatch(lines[i],@"^\s{0,3}"+Regex.Escape(new string(marker,count))+marker+@"*\s*$")){if(!firstCodeLine)code.Append('\n');firstCodeLine=false;code.Append(lines[i]);}
                 var p=new Paragraph(new Run(code.ToString())){FontFamily=new FontFamily("Consolas, Malgun Gothic"),FontSize=size*.9,Background=dark?Brush(55,61,73):Brush(235,238,242),BorderBrush=dark?Brush(91,103,120):Brush(173,184,198),BorderThickness=new Thickness(1),Padding=new Thickness(14),Margin=new Thickness(0,6,0,12)};DecorateCode(p,fence.Groups[2].Value.Trim(),dark);Add(doc,p,lines,start,i,"code:"+fence.Groups[2].Value.Trim());continue;
             }
+            // GitHub-allowed block HTML: tag-only containers keep their content (a centered
+            // group, a quote, a details group, a pre body), single-line elements become their
+            // heading/rule/list/description paragraph, and an unmatched opener draws nothing.
+            InlineHtml.Tag htmlTag=HtmlTagLine(line);
+            if(htmlTag!=null){
+                if(htmlTag.Name=="hr"&&!htmlTag.Closing){Add(doc,new BlockUIContainer(new System.Windows.Controls.Border {Height=1,Background=dark?Brush(110,118,130):Brush(220,222,226),Margin=new Thickness(0,10,0,10)}),lines,start,i,"htmlhr");continue;}
+                if(htmlTag.Closing)continue;
+                int htmlClose=HtmlCloseIndex(lines,i+1,htmlTag.Name);
+                if(htmlClose<0)continue;
+                string htmlInner=HtmlInnerText(lines,i+1,htmlClose);
+                if(htmlTag.Name=="pre"){
+                    Add(doc,HtmlCodeParagraph(htmlInner,size,dark),lines,start,htmlClose,"htmlpre");i=htmlClose;continue;
+                }
+                if(htmlTag.Name=="blockquote"){
+                    Add(doc,QuoteSection(htmlInner,size,family,foreground,dark,file,imageLabel),lines,start,htmlClose,"htmlquote");i=htmlClose;continue;
+                }
+                int htmlAlign=HtmlAlignValue(htmlTag,line);
+                FlowDocument htmlChild=Parse(htmlInner,size,family,foreground,dark,file,imageLabel);
+                if(htmlAlign!=0){
+                    var aligned=new Section();
+                    MoveBlocks(htmlChild,aligned.Blocks);
+                    ApplyHtmlAlignment(aligned,htmlAlign==2?TextAlignment.Right:TextAlignment.Center);
+                    Add(doc,aligned,lines,start,htmlClose,"htmlalign");i=htmlClose;continue;
+                }
+                if(htmlTag.Name=="details"){
+                    var group=new Section();
+                    MoveBlocks(htmlChild,group.Blocks);
+                    Add(doc,group,lines,start,htmlClose,"htmldetails");
+                }else{
+                    if(htmlTag.Name=="ol")NumberHtmlItems(htmlChild);
+                    MoveBlocks(htmlChild,doc.Blocks);
+                }
+                i=htmlClose;continue;
+            }
+            InlineHtml.Tag htmlOpen=HtmlSingleLine(line);
+            if(htmlOpen!=null){
+                string htmlBody=line.Substring(htmlOpen.End,htmlOpen.CloseStart-htmlOpen.End);
+                string htmlName=htmlOpen.Name;
+                Paragraph htmlParagraph=null;
+                if(htmlName.Length==2&&htmlName[0]=='h'&&htmlName[1]>='1'&&htmlName[1]<='6'){
+                    int htmlLevel=htmlName[1]-'0';
+                    htmlParagraph=Para(htmlBody,size,dark,file,imageLabel);
+                    htmlParagraph.FontSize=size*HeadingScale(htmlLevel);
+                    htmlParagraph.FontWeight=FontWeights.Bold;
+                    htmlParagraph.LineHeight=Double.NaN;
+                    htmlParagraph.Margin=new Thickness(0,htmlLevel==1?8:18,0,10);
+                }else if(htmlName=="pre"){
+                    htmlParagraph=HtmlCodeParagraph(htmlBody,size,dark);
+                }else if(htmlName=="li"){
+                    htmlParagraph=Para(htmlBody,size,dark,file,imageLabel);
+                    InsertFirst(htmlParagraph,new Run("•  "){Tag="marker"});
+                    htmlParagraph.Margin=new Thickness(18,2,0,4);
+                }else if(htmlName=="dt"){
+                    htmlParagraph=Para(htmlBody,size,dark,file,imageLabel);
+                    htmlParagraph.FontWeight=FontWeights.Bold;
+                }else if(htmlName=="dd"){
+                    htmlParagraph=Para(htmlBody,size,dark,file,imageLabel);
+                    htmlParagraph.Margin=new Thickness(24,0,0,4);
+                }else if(htmlName=="summary"){
+                    htmlParagraph=Para(htmlBody,size,dark,file,imageLabel);
+                    htmlParagraph.FontWeight=FontWeights.Bold;
+                    InsertFirst(htmlParagraph,new Run("▸  "){Tag="marker",Foreground=MutedInk(dark)});
+                    htmlParagraph.Margin=new Thickness(0,6,0,4);
+                }else if(htmlName=="figcaption"){
+                    htmlParagraph=Para(htmlBody,size,dark,file,imageLabel);
+                    htmlParagraph.FontSize=size*.9;
+                    htmlParagraph.Foreground=MutedInk(dark);
+                    htmlParagraph.TextAlignment=TextAlignment.Center;
+                    htmlParagraph.Margin=new Thickness(0,2,0,8);
+                }else{
+                    htmlParagraph=Para(htmlBody,size,dark,file,imageLabel);
+                    int htmlAlign=HtmlAlignValue(htmlOpen,line);
+                    if(htmlAlign==1)htmlParagraph.TextAlignment=TextAlignment.Center;
+                    else if(htmlAlign==2)htmlParagraph.TextAlignment=TextAlignment.Right;
+                }
+                Add(doc,htmlParagraph,lines,start,i,"html:"+htmlName);continue;
+            }
             if(String.IsNullOrWhiteSpace(line)){var blank=Para("",size,dark,file,imageLabel);int indent=line.Replace("\t","    ").Length;if(indent>0)blank.Margin=new Thickness(indent*size*.5,0,0,0);Add(doc,blank,lines,start,i,indent>0?"unlisted-indent:"+indent:"blank");continue;}
+            // A lone "[TOC]": paper gets a plain indented heading list (the live Basic view draws
+            // its box; print has no click targets). The list is the outline's scan, capped at 200.
+            if(MarkdownPlainText.TocLine(line)){
+                if(tocEntries==null)tocEntries=MainWindow.ScanTocEntries(text);
+                for(int t=0;t<tocEntries.Count;t++){
+                    MarkdownLivePreview.TocEntry entry=tocEntries[t];
+                    int tocLevel=Math.Max(1,Math.Min(6,entry.Level));
+                    var tocParagraph=new Paragraph(new Run(entry.Title??"")){FontSize=size*.95,Margin=new Thickness((tocLevel-1)*18,0,0,2)};
+                    EmojiInlines(tocParagraph.Inlines);
+                    Add(doc,tocParagraph,lines,start,i,"toc");
+                }
+                continue;
+            }
             string definitionId,definitionBody;bool note;if(TryDefinition(line,out definitionId,out definitionBody,out note)){if(note){while(i+1<lines.Length&&(lines[i+1].StartsWith("    ")||lines[i+1].StartsWith("\t"))){definitionBody+="\n"+lines[++i].TrimStart();}string noteId=definitionId;var paragraph=Para(definitionBody,size,dark,file,imageLabel);paragraph.FontSize=size*.9;paragraph.Foreground=MutedInk(dark);var markerRun=new Run(NoteNumber(noteId)+"."){Tag="marker",FontSize=size*.75,BaselineAlignment=BaselineAlignment.Superscript,Foreground=AccentInk(dark)};var marker=new Hyperlink {Foreground=AccentInk(dark),ToolTip="[^"+noteId+"]"};marker.Inlines.Add(markerRun);marker.Resources["FootnoteRef"]=noteId;if(paragraph.Inlines.FirstInline==null)paragraph.Inlines.Add(marker);else paragraph.Inlines.InsertBefore(paragraph.Inlines.FirstInline,marker);paragraph.Inlines.InsertAfter(marker,new Run(" "){Tag="marker"});Add(doc,paragraph,lines,start,i,"footnote:"+noteId);}else{var label=new TextBlock {Text=line,FontSize=size*.9,Foreground=MutedInk(dark),TextWrapping=TextWrapping.NoWrap};var paragraph=new Paragraph {Margin=new Thickness(0),LineHeight=Double.NaN};paragraph.Inlines.Add(new InlineUIContainer(label));Add(doc,paragraph,lines,start,i,"reference");}continue;}/* #1: a 0.1px hidden paragraph collapsed the whole RichTextBox layout (extent 0) in the app view */
             if(i+1<lines.Length&&MarkdownPlainText.TableStart(line,lines[i+1])) {
                 var table=new Table {CellSpacing=0,Margin=new Thickness(0,6,0,12)};var group=new TableRowGroup();table.RowGroups.Add(group);
@@ -283,7 +451,7 @@ public static partial class Markdown {
     static string[] FitCells(string[] cells,int count){if(cells.Length==count)return cells;var fit=new string[count];for(int i=0;i<count;i++)fit[i]=i<cells.Length?cells[i]:"";return fit;}
     static void AlignRow(TableRow row,string[] alignment){for(int i=0;i<row.Cells.Count&&i<alignment.Length;i++){string marker=alignment[i].Trim();TextAlignment value=marker.StartsWith(":")&&marker.EndsWith(":")?TextAlignment.Center:marker.EndsWith(":")?TextAlignment.Right:TextAlignment.Left;row.Cells[i].TextAlignment=value;/* N14: a colon marker is an explicit alignment; the paragraph keeps its own value so the writer can tell ":---" from a plain "---" */if(marker.StartsWith(":")||marker.EndsWith(":")){var paragraph=row.Cells[i].Blocks.FirstBlock as Paragraph;if(paragraph!=null)paragraph.TextAlignment=value;}}}
     static void AddRow(TableRowGroup group,string[] cells,bool header,double size,bool dark,string file,string imageLabel){var row=new TableRow();group.Rows.Add(row);foreach(string cell in cells){var c=new TableCell(Para(cell.Trim(),size,dark,file,imageLabel)){BorderBrush=dark?Brush(112,124,142):Brush(173,184,198),BorderThickness=new Thickness(.5),Padding=new Thickness(10,6,10,6)};if(header){c.FontWeight=FontWeights.Bold;c.Background=dark?Brush(68,77,92):Brush(225,231,238);}row.Cells.Add(c);}}
-    static Paragraph Para(string value,double size,bool dark,string file,string imageLabel){var p=new Paragraph{Margin=new Thickness(0),LineHeight=Double.NaN};Inline(p.Inlines,ExpandReferences(ProtectEscapes(value)),size,dark,file,imageLabel,0);return p;}
+    static Paragraph Para(string value,double size,bool dark,string file,string imageLabel){var p=new Paragraph{Margin=new Thickness(0),LineHeight=Double.NaN};Inline(p.Inlines,ExpandReferences(ProtectEscapes(value)),size,dark,file,imageLabel,0);EmojiInlines(p.Inlines);return p;}
     // #4: CommonMark backslash escapes. The rich HTML/RTF paste writes "\*", "\[", "\_" and "\\"
     // (HtmlPaste.SoftLiteral) and the live preview draws the escaped character
     // (MarkdownLivePreview.ParseInline hides the "\"), so the print, TXT and RTF paths read the same
@@ -349,7 +517,7 @@ public static partial class Markdown {
             if(value[value.Length-1]=='\\')value=value.Substring(0,value.Length-1);
             if(value.IndexOf("\\\n",StringComparison.Ordinal)>=0)value=value.Replace("\\\n","\n");
         }
-        int at=0,p=0,index=0;var matches=token.Matches(value);
+        int at=0,p=0,index=0;var matches=token.Matches(value);var html=InlineHtml.Parse(value);
         while(p<value.Length){
             while(index<matches.Count&&matches[index].Index<p)index++; // a match inside a link, image or span is read again by the recursion
             bool image;int labelStart,labelEnd,addressStart,addressEnd,end;
@@ -369,6 +537,14 @@ public static partial class Markdown {
                 at=end;p=end;continue;
             }
             if(value[p]=='<'){
+                InlineHtml.Tag tag;
+                if(html.TryGetValue(p,out tag)){
+                    if(p>at)dest.Add(new Run(RestoreEscapes(MarkdownPlainText.DecodeEntities(value.Substring(at,p-at)))));
+                    AddHtml(dest,value,tag,html,size,dark,file,imageLabel,depth);
+                    at=tag.CloseEnd;p=at;continue;
+                }
+                InlineHtml.Tag literal=InlineHtml.Read(value,p);
+                if(literal!=null){p=literal.End;continue;}
                 // An HTML comment that closes on this same line is markup and hides, exactly as in
                 // the live view; one that spans lines is not tracked here and stays literal.
                 int comment=MarkdownPlainText.CommentEnd(value,p);
@@ -403,10 +579,64 @@ public static partial class Markdown {
             } else if(m.Groups[5].Success){dest.Add(new Run(RestoreCodeEscapes(UnpadCode(m.Groups[5].Value))){FontFamily=InlineCodeFont(referenceContext==null?"Malgun Gothic":referenceContext.Family),Background=Brushes.Transparent});}
             else if(m.Groups[6].Success||m.Groups[7].Success){var b=new Bold {FontWeight=FontWeights.ExtraBold};Inline(b.Inlines,m.Groups[6].Success?m.Groups[6].Value:m.Groups[7].Value,size,dark,file,imageLabel,depth+1);dest.Add(b);}
             else if(m.Groups[8].Success){var s=new Span();Inline(s.Inlines,m.Groups[8].Value,size,dark,file,imageLabel,depth+1);StrikeRuns(s.Inlines);dest.Add(s);}
+            else if(m.Groups[11].Success){var s=new Span {Background=HighlightBrush(dark)};Inline(s.Inlines,m.Groups[11].Value,size,dark,file,imageLabel,depth+1);dest.Add(s);}
             else if(m.Groups[9].Success||m.Groups[10].Success){var s=new Italic();Inline(s.Inlines,m.Groups[9].Success?m.Groups[9].Value:m.Groups[10].Value,size,dark,file,imageLabel,depth+1);dest.Add(s);}
             else dest.Add(new LineBreak());
             p=at;
         }if(at<value.Length)dest.Add(new Run(RestoreEscapes(MarkdownPlainText.DecodeEntities(value.Substring(at)))));
+    }
+    static void AddHtml(InlineCollection dest,string value,InlineHtml.Tag tag,Dictionary<int,InlineHtml.Tag> html,double size,bool dark,string file,string imageLabel,int depth){
+        string name=tag.Name;
+        if(name=="picture"){
+            InlineHtml.Tag image=InlineHtml.PictureImage(html,tag);
+            if(image!=null)AddHtml(dest,value,image,html,size,dark,file,imageLabel,depth);
+            else dest.Add(new Run(RestoreEscapes(value.Substring(tag.Start,tag.CloseEnd-tag.Start))));
+            return;
+        }
+        if(name=="img"){
+            AddImage(dest,value,tag.Start,tag.End,InlineHtml.Attribute(value,tag,"alt"),InlineHtml.Attribute(value,tag,"src"),file,imageLabel,
+                InlineHtml.Dimension(value,tag,"width"),InlineHtml.Dimension(value,tag,"height"));return;
+        }
+        if(name=="br"){dest.Add(new LineBreak());return;}
+        if(name=="wbr"){dest.Add(new Run("​"));return;}
+        string content=value.Substring(tag.End,tag.CloseStart-tag.End);
+        if(name=="a"){AddLink(dest,content,InlineHtml.Attribute(value,tag,"href"),size,dark,file,imageLabel,depth);return;}
+        var span=new Span{Tag="html:"+name};double childSize=size;
+        MarkdownLivePreview.Style style=MarkdownLivePreview.HtmlStyle(name);
+        if((style&MarkdownLivePreview.Style.Bold)!=0)span.FontWeight=FontWeights.ExtraBold;
+        if((style&MarkdownLivePreview.Style.Italic)!=0)span.FontStyle=FontStyles.Italic;
+        if((style&MarkdownLivePreview.Style.Code)!=0){span.FontFamily=InlineCodeFont(referenceContext==null?"Malgun Gothic":referenceContext.Family);span.Background=dark?Brush(73,83,99):Brush(225,230,238);}
+        if((style&MarkdownLivePreview.Style.Highlight)!=0)span.Background=HighlightBrush(dark);
+        if(name=="sup"||name=="sub"){childSize=size*.75;span.FontSize=childSize;span.BaselineAlignment=name=="sup"?BaselineAlignment.Superscript:BaselineAlignment.Subscript;}
+        if(name=="small"){childSize=size*.85;span.FontSize=childSize;}
+        if(name=="u"||name=="ins")span.TextDecorations=TextDecorations.Underline;
+        if(name=="abbr"||name=="dfn"||name=="time"){
+            span.ToolTip=InlineHtml.Attribute(value,tag,name=="time"?"datetime":"title");
+            if(name!="time"){
+                var pen=new Pen(MutedInk(dark),1){DashStyle=DashStyles.Dot};pen.Freeze();
+                var decorations=new TextDecorationCollection();decorations.Add(new TextDecoration(TextDecorationLocation.Underline,pen,0,TextDecorationUnit.FontRecommended,TextDecorationUnit.Pixel));
+                decorations.Freeze();span.TextDecorations=decorations;
+            }
+        }
+        if(name=="span"||name=="font"){
+            string attrs=value.Substring(tag.Start,tag.End-tag.Start);
+            var color=Regex.Match(attrs,@"(?:color\s*:\s*|\bcolor\s*=\s*[""']?)(#[a-fA-F0-9]{3,8}\b|[a-zA-Z]+)");
+            if(color.Success){try{span.Foreground=new SolidColorBrush((Color)ColorConverter.ConvertFromString(color.Groups[1].Value));}catch{}}
+            var fs=Regex.Match(attrs,@"font-size\s*:\s*(\d+(?:\.\d+)?)\s*(px|pt|em|%)?",RegexOptions.IgnoreCase);
+            double n;if(fs.Success&&Double.TryParse(fs.Groups[1].Value,System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture,out n)){
+                string unit=fs.Groups[2].Value.ToLowerInvariant();childSize=Math.Max(6,Math.Min(120,unit=="em"?n*size:unit=="%"?n*size/100:unit=="pt"?n*96/72:n));span.FontSize=childSize;
+            }
+        }
+        if(InlineHtml.Code(name))span.Inlines.Add(new Run(RestoreEscapes(MarkdownPlainText.DecodeEntities(content))));
+        else Inline(span.Inlines,content,childSize,dark,file,imageLabel,depth+1);
+        if((style&MarkdownLivePreview.Style.Strike)!=0)StrikeRuns(span.Inlines);
+        if(name=="q"){if(span.Inlines.FirstInline==null)span.Inlines.Add(new Run("“"));else span.Inlines.InsertBefore(span.Inlines.FirstInline,new Run("“"));span.Inlines.Add(new Run("”"));}
+        if(name=="kbd"){
+            var text=new TextBlock{FontSize=size,Foreground=dark?Brushes.White:Brush(32,33,36)};text.Inlines.Add(span);
+            var border=new Border{Child=text,BorderBrush=dark?Brush(125,135,150):Brush(186,193,202),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(3),Background=span.Background,Padding=new Thickness(1,0,1,0)};
+            dest.Add(new InlineUIContainer(border){Tag="html:kbd"});return;
+        }
+        dest.Add(span);
     }
     // A link "[label](target)" or image "![alt](target)" at p. The closing ")" comes from
     // MarkdownPlainText.TargetEnd, the TXT renderer's and the live preview's scan: a balanced
@@ -461,9 +691,9 @@ public static partial class Markdown {
     // "![a](img_(1).png "t")" opens "img_(1).png"; a failed load keeps the "[이미지: alt]" Run.
     // The reference percent-encodes '#', '?' and '%' (MarkdownCommands.ImageReference), and the
     // decoded path is escaped again for the Uri, so a name holding them opens under its own name.
-    static void AddImage(InlineCollection dest,string value,int start,int end,string alt,string address,string file,string imageLabel){
+    static void AddImage(InlineCollection dest,string value,int start,int end,string alt,string address,string file,string imageLabel,double requestedWidth=0,double requestedHeight=0){
         string raw=value.Substring(start,end-start);
-        try{string location=Uri.UnescapeDataString(RestoreCodeEscapes(address));Uri uri=ImageUri(location,file);if(!uri.IsFile&&uri.Scheme!="https"&&uri.Scheme!="http")throw new IOException("Unsupported image URI");var bitmap=new BitmapImage();bitmap.BeginInit();bitmap.CacheOption=uri.IsFile?BitmapCacheOption.OnLoad:BitmapCacheOption.Default;bitmap.UriSource=uri;bitmap.DecodePixelWidth=ImageDecodeWidth(uri);bitmap.EndInit();var image=new Image {Source=bitmap,Width=bitmap.Width,Stretch=Stretch.Uniform,StretchDirection=System.Windows.Controls.StretchDirection.DownOnly,MaxWidth=700,MaxHeight=700,ToolTip=RestoreEscapes(alt)};/* No RichTextBox surface exists in this build (InlineCodeBackground.cs:5), so the old ActualWidth FindAncestor binding never resolved and MaxWidth came back as no limit. 700 is the width a surface without a page gets (the RTF copy); the print path binds MaxWidth to the page's printable column in InlineCodeBackground.RestorePrintBackground. */dest.Add(new InlineUIContainer(image){Tag="image:"+RestoreCodeEscapes(raw)});}
+        try{string location=Uri.UnescapeDataString(RestoreCodeEscapes(address));Uri uri=ImageUri(location,file);if(!uri.IsFile&&uri.Scheme!="https"&&uri.Scheme!="http")throw new IOException("Unsupported image URI");var bitmap=new BitmapImage();bitmap.BeginInit();bitmap.CacheOption=uri.IsFile?BitmapCacheOption.OnLoad:BitmapCacheOption.Default;bitmap.UriSource=uri;bitmap.DecodePixelWidth=ImageDecodeWidth(uri);bitmap.EndInit();var image=new Image {Source=bitmap,Width=bitmap.Width,Stretch=Stretch.Uniform,StretchDirection=System.Windows.Controls.StretchDirection.DownOnly,MaxWidth=700,MaxHeight=700,ToolTip=RestoreEscapes(alt)};if((requestedWidth>0||requestedHeight>0)&&bitmap.Width>0&&bitmap.Height>0){double w,h;InlineHtml.ImageSize(bitmap.Width,bitmap.Height,requestedWidth,requestedHeight,700,out w,out h);image.Width=w;image.Height=h;image.Stretch=Stretch.Fill;image.StretchDirection=System.Windows.Controls.StretchDirection.Both;}/* No RichTextBox surface exists in this build (InlineCodeBackground.cs:5), so the old ActualWidth FindAncestor binding never resolved and MaxWidth came back as no limit. 700 is the width a surface without a page gets (the RTF copy); the print path binds MaxWidth to the page's printable column in InlineCodeBackground.RestorePrintBackground. */dest.Add(new InlineUIContainer(image){Tag="image:"+RestoreCodeEscapes(raw)});}
         catch{dest.Add(new Run((imageLabel??"[이미지: ")+RestoreEscapes(alt)+"]"){Foreground=Brush(130,140,155),Tag="image:"+RestoreCodeEscapes(raw)});}
     }
     // The image target as a Uri: an http(s) address downloads, every other target is a file path
@@ -491,6 +721,9 @@ public static partial class Markdown {
     // helper, so print and TXT read one rule.
     internal static string UnpadCode(string value){return value.Length>=2&&value.StartsWith(" ")&&value.EndsWith(" ")&&value.Trim(' ').Length>0?value.Substring(1,value.Length-2):value;}
     static void StrikeRuns(InlineCollection inlines){foreach(Inline inline in inlines){if(inline is Run)inline.TextDecorations=TextDecorations.Strikethrough;else if(inline is Span)StrikeRuns(((Span)inline).Inlines);}}
+    // The ==highlight== background, the same pair the live preview's Palette carries (light #FFF1A8,
+    // dark #6B5A1A): text keeps its colour, only the box behind it changes.
+    static Brush HighlightBrush(bool dark){return dark?Brush(107,90,26):Brush(255,241,168);}
     static Brush MutedInk(bool dark){return dark?Brush(173,180,190):Brush(104,112,120);}
     static Brush AccentInk(bool dark){return dark?Brush(120,180,255):Brush(37,99,210);}
     // Set by --link-probe so a simulated click never opens a browser.
@@ -592,6 +825,12 @@ public partial class MainWindow {
 }
 public static class Program {
     [STAThread] public static int Main(string[] args) {
+        /* 2.4.0 memory study (user 2026-11-09): CPU drawing is the default (32-60 MB less, same typing
+           and scrolling speed); 보기 > GPU 가속 사용 turns hardware drawing back on. MDNOTE_SOFTWARE_RENDER
+           overrides it for benches and probes (1 = software, 0 = hardware); a probe run keeps hardware
+           unless the variable is set (IsSelfTest is not set yet at this point, so the helper recognises
+           the "--" entry points itself). */
+        System.Windows.Media.RenderOptions.ProcessRenderMode=ViewPreferences.StartupRenderMode(args);
         if(args.Length==2&&args[0]=="--livepreview-spike"){IsSelfTest=false;return LivePreviewSpike.RunWindow(args[1]);}
         if(args.Length==2&&args[0]=="--livepreview-bench"){IsSelfTest=true;return LivePreviewBench.Run(args[1]);}
         if(args.Length==2&&args[0]=="--longline-bench"){IsSelfTest=true;return LongLineBench.Run(args[1]);}
@@ -616,6 +855,7 @@ public static class Program {
         if(args.Length==2&&args[0]=="--clipboard-probe"){IsSelfTest=true;return MainWindow.VerifyClipboard(args[1]);}
         if(args.Length==2&&args[0]=="--history-cap-probe"){IsSelfTest=true;return MainWindow.VerifyHistoryCap(args[1]);}
         if(args.Length==2&&args[0]=="--undo-walk-probe"){IsSelfTest=true;return MainWindow.VerifyUndoWalk(args[1]);}
+        if(args.Length==2&&args[0]=="--memory-probe"){IsSelfTest=true;return MainWindow.VerifyMemory(args[1]);}
         if(args.Length==2&&args[0]=="--live-typing-probe"){IsSelfTest=true;return MainWindow.VerifyLiveTypingStability(args[1]);}
         if(args.Length==2&&args[0]=="--table-caret-probe"){IsSelfTest=true;return MainWindow.VerifyTableCaret(args[1]);}
         if(args.Length==2&&args[0]=="--settings-probe"){IsSelfTest=true;return MainWindow.RunSettingsMatrixProbe(args[1]);}

@@ -129,8 +129,9 @@ static class HtmlExportProbe {
         Has("font-color",html,"<span style=\"color:blue;\">파랑</span>");
         Has("entities-escapes",html,"©"," &amp; ","*이스케이프*");
         Lacks("escapes-not-italic",html,"<em>이스케이프</em>");
-        Has("br-token",html,"둘째 줄<br>\n줄바꿈");
-        Has("raw-html-escaped",html,"a&lt;b","&lt;u&gt;밑줄&lt;/u&gt;","&lt;script&gt;alert(1)&lt;/script&gt;");
+        Has("br-token",html,"둘째 줄<br>줄바꿈");
+        /* 2.4.0: GitHub-allowed inline tags (<u>, <sup>, <kbd>…) pass through; anything else stays escaped */
+        Has("raw-html-escaped",html,"a&lt;b","<u>밑줄</u>","&lt;script&gt;alert(1)&lt;/script&gt;");
         Lacks("comment-hidden",html,"숨김","<!--");
         Has("link-title",html,"<a href=\"https://example.com/a_(b)\" title=\"제목\">링크</a>");
         Has("autolink",html,"<a href=\"https://auto.example.com\">https://auto.example.com</a>","<a href=\"mailto:me@x.org\">me@x.org</a>");

@@ -13,6 +13,7 @@ using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using ICSharpCode.AvalonEdit.Document;
 
@@ -70,9 +71,9 @@ internal static class LivePreviewBench {
 
             diagnostics.Length=0;
             diagnostics.Append("scenario\tdoc\tstage\tparses\tparse_ms\tmeasured_cells\tmeasure_ms\trows\trow_ms\ttable_work_ms\tmarkers\tmarker_ms\n");
-            docs = BuildData(quick);
-            groups.Add(RunEditorScenario("plain", false, SelectDocs(docs, "TXT_12M", "MD_1_9M", "MD_12M")));
-            groups.Add(RunEditorScenario("live", true, SelectDocs(docs, "MD_1_9M", "MD_5M", "MD_12M", "MD_1_9M_CRLF", "STRESS_PARA", "STRESS_TABLE", "STRESS_CODE")));
+            docs = BuildData(quick, outDir);
+            groups.Add(RunEditorScenario("plain", false, SelectDocs(docs, "TXT_12M", "MD_1_9M", "MD_12M"), outDir));
+            groups.Add(RunEditorScenario("live", true, SelectDocs(docs, "MD_1_9M", "MD_5M", "MD_12M", "MD_1_9M_CRLF", "STRESS_PARA", "STRESS_TABLE", "STRESS_CODE", "STRESS_MEDIA"), outDir));
 
             for(int i = 0; i < docs.Count; i++) docs[i].Text = null;
         }catch(Exception ex){
@@ -117,7 +118,7 @@ internal static class LivePreviewBench {
 
     // ---------------------------------------------------------------- data
 
-    static List<DocData> BuildData(bool quick){
+    static List<DocData> BuildData(bool quick, string outDir){
         List<DocData> docs = new List<DocData>();
         int md19Target = ScaleSize(1900000, quick);
         int md5Target = ScaleSize(5000000, quick);
@@ -126,6 +127,8 @@ internal static class LivePreviewBench {
         int paragraphTarget = ScaleSize(200000, quick);
         int tableRows = ScaleCount(5000, quick);
         int codeLines = ScaleCount(100000, quick);
+        int mediaCount = quick ? 8 : 30;
+        int mediaSections = quick ? 10 : 36;
 
         string md19 = GenerateMarkdown(md19Target, 1001);
         docs.Add(MakeDoc("MD_1_9M", "markdown", 1900000, md19Target, md19, "LF",
@@ -153,6 +156,10 @@ internal static class LivePreviewBench {
         string code = GenerateStressCode(codeLines, 3003);
         docs.Add(MakeDoc("STRESS_CODE", "stress_code", 0, code.Length, code, "LF",
             "single fenced code block with " + codeLines.ToString(CultureInfo.InvariantCulture) + " lines", quick));
+        EnsureMediaImages(Path.Combine(outDir, "media"), mediaCount);
+        string media = GenerateStressMedia(mediaSections, mediaCount, 4001);
+        docs.Add(MakeDoc("STRESS_MEDIA", "stress_media", 0, media.Length, media, "LF",
+            "repeating sections of prose, a generated PNG image (media/imgN.png) and display/inline formulas", quick));
         return docs;
     }
 
@@ -434,9 +441,84 @@ internal static class LivePreviewBench {
         return sb.ToString();
     }
 
+    // ---------------------------------------------------------------- media
+
+    // STRESS_MEDIA draws these generated PNGs through the live preview's own image cache. The
+    // document names them relative to the bench editor's BaseDirectory, which RunEditorScenario
+    // sets to the output folder (ImageCache.Resolve joins a relative source with that folder).
+    static void EnsureMediaImages(string mediaDirectory, int count){
+        if(count <= 0) return;
+        Directory.CreateDirectory(mediaDirectory);
+        for(int i = 1; i <= count; i++){
+            string path = Path.Combine(mediaDirectory, "img" + i.ToString(CultureInfo.InvariantCulture) + ".png");
+            if(File.Exists(path)) continue;
+            WriteMediaImage(path, i);
+        }
+    }
+
+    // Alternating 2400x1600 and 1200x900: a gradient under random translucent shapes and lines,
+    // so the picture is not one flat fill the encoder would shrink to almost nothing.
+    static void WriteMediaImage(string path, int index){
+        int width = index % 2 == 1 ? 2400 : 1200;
+        int height = index % 2 == 1 ? 1600 : 900;
+        Random random = new Random(7000 + index);
+        DrawingVisual visual = new DrawingVisual();
+        using(DrawingContext dc = visual.RenderOpen()){
+            Color first = Color.FromRgb((byte)random.Next(256), (byte)random.Next(256), (byte)random.Next(256));
+            Color second = Color.FromRgb((byte)random.Next(256), (byte)random.Next(256), (byte)random.Next(256));
+            dc.DrawRectangle(new LinearGradientBrush(first, second, random.Next(360)), null, new Rect(0, 0, width, height));
+            int shapes = 24 + random.Next(24);
+            for(int i = 0; i < shapes; i++){
+                SolidColorBrush brush = new SolidColorBrush(Color.FromArgb((byte)(40 + random.Next(180)),
+                    (byte)random.Next(256), (byte)random.Next(256), (byte)random.Next(256)));
+                brush.Freeze();
+                double x = random.Next(width);
+                double y = random.Next(height);
+                double size = 40 + random.Next(width / 4);
+                if(random.Next(2) == 0){
+                    dc.DrawEllipse(brush, null, new Point(x, y), size, size * (0.3 + random.NextDouble()));
+                }else{
+                    dc.PushTransform(new RotateTransform(random.Next(360), x, y));
+                    dc.DrawRectangle(brush, null, new Rect(x, y, size, size * (0.2 + random.NextDouble())));
+                    dc.Pop();
+                }
+            }
+            Pen pen = new Pen(new SolidColorBrush(Color.FromArgb(160, 255, 255, 255)), 2 + random.Next(10));
+            pen.Freeze();
+            for(int i = 0; i < 12; i++){
+                dc.DrawLine(pen, new Point(random.Next(width), random.Next(height)), new Point(random.Next(width), random.Next(height)));
+            }
+        }
+        RenderTargetBitmap bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        PngBitmapEncoder encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using(FileStream stream = File.Create(path)) encoder.Save(stream);
+    }
+
+    // Seventeen lines per section, so 36 sections make a ~600-line document: heading, three
+    // prose paragraphs, one picture, a display block whose formula source is two lines (the sum
+    // and a matrix) and a paragraph with two inline formulas. Images repeat cyclically.
+    static string GenerateStressMedia(int sections, int imageCount, int seed){
+        StringBuilder sb = new StringBuilder(sections * 640 + 256);
+        Random random = new Random(seed);
+        for(int s = 0; s < sections; s++){
+            int image = s % imageCount + 1;
+            sb.Append("## 미디어 구역 ").Append(s + 1).Append(": 수식과 그림\n\n");
+            for(int p = 0; p < 3; p++) sb.Append(ProseLine(random)).Append("\n\n");
+            sb.Append("![그림 ").Append(image).Append("](media/img").Append(image).Append(".png)\n\n");
+            sb.Append("$$\n");
+            sb.Append("\\sum_{i=1}^{n} \\frac{a_i^2}{b_i} = \\int_0^1 f(x)\\,dx\n");
+            sb.Append("\\begin{pmatrix} x_{").Append(image).Append("} & y \\\\ z & w \\end{pmatrix}\n");
+            sb.Append("$$\n\n");
+            sb.Append("인라인 수식 $\\alpha^2 + \\beta^2 = \\gamma^2$ 와 $\\frac{m}{n} \\leq \\sqrt{k+1}$ 가 이 문단에 있습니다.\n\n");
+        }
+        return sb.ToString();
+    }
+
     // ------------------------------------------------------------ scenarios
 
-    static ScenarioGroup RunEditorScenario(string scenarioName, bool withPreview, List<DocData> docs){
+    static ScenarioGroup RunEditorScenario(string scenarioName, bool withPreview, List<DocData> docs, string baseDirectory){
         ScenarioGroup group = new ScenarioGroup();
         group.Name = scenarioName;
         SourceEditor editor = null;
@@ -452,6 +534,7 @@ internal static class LivePreviewBench {
                     options.LinePercent = 150.0;
                     options.Dark = false;
                     options.WordWrap = true;
+                    options.BaseDirectory = baseDirectory;
                     preview = LivePreviewSpike.Attach(editor, options);
                 }catch(Exception ex){
                     string message = "live preview attach failed: " + Describe(ex);
@@ -721,13 +804,44 @@ internal static class LivePreviewBench {
         Window window = new Window();
         window.Left = -20000;
         window.Top = 0;
-        window.Width = 1000;
-        window.Height = 800;
+        double width;
+        double height;
+        BenchWindowSize(out width, out height);
+        window.Width = width;
+        window.Height = height;
+        // On screen in a full run (VM only), so the compositor really presents every frame.
+        if(BenchFullscreen()){ Rect workArea = SystemParameters.WorkArea; window.Left = workArea.Left; window.Top = workArea.Top; }
         window.ShowInTaskbar = false;
         window.ShowActivated = false;
         window.WindowStartupLocation = WindowStartupLocation.Manual;
         window.Content = content;
         return window;
+    }
+
+    // A full run can ask for the primary screen's work area so the measured frame matches the
+    // 1440p / 4K resolution instead of the default 1000x800 window.
+    static bool BenchFullscreen(){
+        return String.Equals(Environment.GetEnvironmentVariable("MDNOTE_BENCH_FULLSCREEN"), "1", StringComparison.Ordinal);
+    }
+
+    static void BenchWindowSize(out double width, out double height){
+        width = 1000;
+        height = 800;
+        // MDNOTE_BENCH_SIZE=WxH: a large window kept off screen (the user's PC stays untouched).
+        string size = Environment.GetEnvironmentVariable("MDNOTE_BENCH_SIZE");
+        if(!String.IsNullOrEmpty(size)){
+            string[] parts = size.Split('x');
+            double w, h;
+            if(parts.Length == 2 && Double.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out w) && Double.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out h) && w >= 100 && h >= 100){ width = w; height = h; return; }
+        }
+        if(!BenchFullscreen()) return;
+        try{
+            Rect workArea = SystemParameters.WorkArea;
+            if(workArea.Width >= 1 && workArea.Height >= 1){
+                width = workArea.Width;
+                height = workArea.Height;
+            }
+        }catch(Exception){ }
     }
 
     static void FindLineStart(TextDocument document, int targetOffset, out int lineNumber, out int lineOffset){
@@ -896,6 +1010,10 @@ internal static class LivePreviewBench {
         json.IntegerProperty("primary_screen_height", environment.ScreenHeight);
         json.NumberProperty("primary_screen_dpi_x", environment.DpiX);
         json.NumberProperty("primary_screen_dpi_y", environment.DpiY);
+        json.NumberProperty("bench_window_width", environment.BenchWindowWidth);
+        json.NumberProperty("bench_window_height", environment.BenchWindowHeight);
+        json.BoolProperty("bench_window_fullscreen", environment.BenchWindowFullscreen);
+        json.StringProperty("process_render_mode", environment.ProcessRenderMode);
         json.StringProperty("exe_path", environment.ExePath);
         json.StringProperty("exe_sha256", environment.ExeSha256);
         json.StringProperty("run_timestamp", environment.Timestamp);
@@ -1005,6 +1123,9 @@ internal static class LivePreviewBench {
             sb.Append("- CPU: ").Append(environment.ProcessorCount).Append(" | OS: ").Append(environment.OsVersion);
             sb.Append(" | 64-bit: ").Append(environment.Is64Bit ? "true" : "false");
             sb.Append(" | DPI: ").Append(Format2(environment.DpiX)).Append('x').Append(Format2(environment.DpiY)).Append('\n');
+            sb.Append("- Bench window: ").Append(Format2(environment.BenchWindowWidth)).Append('x').Append(Format2(environment.BenchWindowHeight));
+            sb.Append(" | MDNOTE_BENCH_FULLSCREEN: ").Append(environment.BenchWindowFullscreen ? "1" : "not set");
+            sb.Append(" | process render mode: ").Append(environment.ProcessRenderMode).Append('\n');
             sb.Append("- Exe SHA-256: ").Append(environment.ExeSha256).Append('\n');
         }
         sb.Append("- Harness: ").Append(fatal == null ? "COMPLETE" : "HARNESS_FAILURE");
@@ -1159,6 +1280,15 @@ internal static class LivePreviewBench {
             }
         }catch{ }
         try{
+            BenchWindowSize(out environment.BenchWindowWidth, out environment.BenchWindowHeight);
+        }catch{ }
+        environment.BenchWindowFullscreen = BenchFullscreen();
+        try{
+            environment.ProcessRenderMode = System.Windows.Media.RenderOptions.ProcessRenderMode.ToString();
+        }catch(Exception ex){
+            environment.ProcessRenderMode = "unavailable: " + ex.GetType().Name;
+        }
+        try{
             environment.ExePath = Assembly.GetExecutingAssembly().Location;
             environment.ExeSha256 = ComputeSha256(environment.ExePath);
         }catch(Exception ex){
@@ -1303,6 +1433,10 @@ internal static class LivePreviewBench {
         internal int ScreenHeight;
         internal double DpiX;
         internal double DpiY;
+        internal double BenchWindowWidth;
+        internal double BenchWindowHeight;
+        internal bool BenchWindowFullscreen;
+        internal string ProcessRenderMode = "";
         internal string ExePath = "";
         internal string ExeSha256 = "";
         internal string Timestamp = "";
