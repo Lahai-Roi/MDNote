@@ -1702,7 +1702,9 @@ internal static class UiFixProbe {
                         Point screen=header.PointToScreen(new Point(header.ActualWidth/2,header.ActualHeight/2));
                         Point client=ToClient(popupSource.Handle,screen);
                         Win32.SendMessage(popupSource.Handle,0x0200,IntPtr.Zero,LParam(client));Pump(300);
+                        bool openAfterMove=header.IsSubmenuOpen;
                         Win32.SendMessage(popupSource.Handle,0x0201,(IntPtr)1,LParam(client));Pump(900);
+                        bool openAfterDown=header.IsSubmenuOpen;
                         Popup clickPopup=null;
                         try{clickPopup=header.Template==null?null:header.Template.FindName("PART_Popup",header) as Popup;}catch(Exception){}
                         var clickChild=clickPopup==null?null:clickPopup.Child as FrameworkElement;
@@ -1713,7 +1715,7 @@ internal static class UiFixProbe {
                         IntPtr capture=Win32.GetCapture();
                         Point up=ToClient(capture,screen);
                         Win32.SendMessage(capture,0x0202,IntPtr.Zero,LParam(up));Pump(1200);
-                        mouse="click="+client+" capture="+capture.ToInt64();
+                        mouse="click="+client+" capture="+capture.ToInt64()+" header=["+header.Header+"] move="+openAfterMove+" down="+openAfterDown+" popup="+popupSource.Handle.ToInt64()+" hover="+header.IsMouseOver+" menuShow="+SystemParameters.MenuShowDelay;
                     }
                     bool sameDocs=window.OpenDocumentCount==docsBefore;
                     bool sameWindows=Application.Current.Windows.Count==windowsBefore;

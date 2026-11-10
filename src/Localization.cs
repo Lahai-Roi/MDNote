@@ -421,13 +421,18 @@ public partial class MainWindow {
     /* Stateless lookup for a caller with no window: the second instance reports a failed file forward
        (DocumentActivation.Run) before any MainWindow exists. Same rules as T. */
     internal static string TranslatedText(string code,string key){int exact=Array.IndexOf(languageCodes,code)-1;string[] whole;if(exact>=0&&translations.TryGetValue(key,out whole))return whole[exact];/* a whole key first: "제목 단계 표시" must not become "Heading 단계 표시" */if(key.StartsWith("제목 ",StringComparison.Ordinal))return TranslatedText(code,"제목")+key.Substring(2).Replace("적용",TranslatedText(code,"적용"));if(key.Contains(" · ")){int split=key.IndexOf(" · ",StringComparison.Ordinal);return TranslatedText(code,key.Substring(0,split))+key.Substring(split);}int index=Array.IndexOf(languageCodes,code)-1;string[] values;return index>=0&&translations.TryGetValue(key,out values)?values[index]:key;}
-    internal static string SavedLanguage(){try{bool unreadable;return ViewPreferences.Load(PreferencesPath,out unreadable).Language;}catch(Exception){return "ko";}}
+    /* A probe never loads the user's settings file (LoadPreferences), so a window-less message read from
+       that file came out in whatever language the user last picked (VM uifix s4, 11-10). In a probe the
+       language the probe window last applied answers instead. */
+    static string probeLanguage;
+    internal static string SavedLanguage(){if(Program.IsSelfTest&&probeLanguage!=null)return probeLanguage;try{bool unreadable;return ViewPreferences.Load(PreferencesPath,out unreadable).Language;}catch(Exception){return "ko";}}
     void BuildLanguages(Menu menu,MenuItem help){
         var languages=new MenuItem {Header="언어"};menu.Items.Insert(menu.Items.IndexOf(help),languages);
         for(int i=0;i<languageCodes.Length;i++){string code=languageCodes[i];var item=new MenuItem {Header=languageNames[i],IsCheckable=true,Tag=code};item.Click+=delegate{language=code;ApplyLanguage();SavePreferences();};languages.Items.Add(item);languageItems.Add(item);}
         ApplyLanguage();
     }
     void ApplyLanguage(){
+        if(Program.IsSelfTest)probeLanguage=language;
         if(Array.IndexOf(languageCodes,language)<0)language="ko";FontFamily=Ui.ChromeFamily(language);Resources["ChromeFont"]=FontFamily;foreach(var chrome in new DependencyObject[]{root.Children[0],documentTabs,ribbonHost,tableToolsHost,searchHost,statusBar,saveMenu,headingMenu,colorPopup.Child})if(chrome!=null)Ui.ToolbarText(chrome,FontFamily);TranslateTree(root);if(colorPopup.Child!=null)TranslateTree(colorPopup.Child);TranslateTree(saveMenu);/* b58: the » lists are built once per width change; their items keep the old language until they are rebuilt, so translate them now (names and tooltips). */if(ribbonOverflowMenu!=null)TranslateTree(ribbonOverflowMenu);if(topOverflowMenu!=null)TranslateTree(topOverflowMenu);foreach(var document in documents){var header=document.Item.Header as StackPanel;if(header!=null&&header.Children.Count>1)((Button)header.Children[1]).ToolTip=T("탭 닫기 (Ctrl+W)");}UpdateEditCaption();editButton.ToolTip=EditToggleTip();preview.ToolTip=SourceToggleTip();if(outlineButton!=null)outlineButton.ToolTip=OutlineToggleTip();if(quickText!=null)quickText.ToolTip=TextToggleTip();SyncViewButtonWidths();/* b58: this one name follows the mode, not only the language (UpdateTools rewrites it on a mode change); re-apply it after the tree pass so a switch in either direction is right. */System.Windows.Automation.AutomationProperties.SetName(editButton,editing?T("수정 종료"):T("수정 시작"));if(sizes.Items.Count>0)sizes.Items[0]=T("크기");UpdateHeadingCaption();UpdateListCaption();UpdateTitle();UpdateLineMenu();foreach(var item in languageItems)item.IsChecked=Object.Equals(item.Tag,language);
     }
     void TranslateTree(DependencyObject element){
