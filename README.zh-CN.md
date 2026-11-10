@@ -21,8 +21,8 @@
 
 [下载最新版本 (Releases)](https://github.com/Lahai-Roi/MDNote/releases/latest)
 
-- `MDNote-Setup-2.3.0.exe`：安装程序。可在安装首个界面选择语言。
-- `MDNote-2.3.0-portable.zip`：免安装便携版。解压后直接运行 `MDNote.exe`。
+- 安装程序（`MDNote-Setup-<版本>.exe`）：在安装向导的第一个界面选择语言。
+- 免安装便携版（`MDNote-<版本>-portable.zip`）：解压后直接运行 `MDNote.exe`。
 - 需要 Windows 10/11 64 位与 .NET Framework 4.8（Windows 系统自带）。
 - 由于程序未包含数字签名，首次运行时 Windows 可能会弹出安全提示，点击 **更多信息 → 仍要运行** 即可。
 
@@ -77,7 +77,7 @@
 这是因为可执行文件没有数字签名。点击 **更多信息 → 仍要运行** 即可。
 
 **可以不安装直接使用吗？**
-可以。解压 `MDNote-2.3.0-portable.zip` 后运行 `MDNote.exe` 即可。
+可以。从最新版本（Releases）下载以 `-portable.zip` 结尾的文件，解压后运行 `MDNote.exe` 即可。
 
 **如何卸载？**
 安装版可在 Windows 设置的应用列表中卸载。如果安装文件夹中有您手动放入的文件，则只会保留这些文件。免安装便携版直接删除解压后的文件夹即可。

@@ -21,8 +21,8 @@
 
 [下載最新版本 (Releases)](https://github.com/Lahai-Roi/MDNote/releases/latest)
 
-- `MDNote-Setup-2.3.0.exe`：安裝檔。可在安裝的第一個畫面選擇語言。
-- `MDNote-2.3.0-portable.zip`：免安裝可攜版。解壓縮後直接執行 `MDNote.exe`。
+- 安裝程式（`MDNote-Setup-<版本>.exe`）：在安裝精靈的第一個畫面選擇語言。
+- 免安裝可攜版（`MDNote-<版本>-portable.zip`）：解壓縮後直接執行 `MDNote.exe`。
 - 需要 Windows 10/11 64 位元與 .NET Framework 4.8（Windows 內建）。
 - 由於執行檔沒有數位簽章，首次執行時 Windows 可能會跳出警告，請點選 **其他資訊 → 仍要執行**。
 
@@ -77,7 +77,7 @@
 這是因為執行檔沒有數位簽章。請點選 **其他資訊 → 仍要執行**。
 
 **可以不安裝直接使用嗎？**
-可以。解壓縮 `MDNote-2.3.0-portable.zip` 後執行 `MDNote.exe` 即可。
+可以。從最新版本（Releases）下載以 `-portable.zip` 結尾的檔案，解壓縮後執行 `MDNote.exe` 即可。
 
 **要如何解除安裝？**
 安裝版請從 Windows 設定的應用程式清單中移除。若安裝資料夾中有您自行放入的檔案，只會留下該檔案。免安裝可攜版只需將解壓縮的資料夾刪除即可。

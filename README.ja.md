@@ -21,8 +21,8 @@
 
 [最新版をダウンロード (Releases)](https://github.com/Lahai-Roi/MDNote/releases/latest)
 
-- `MDNote-Setup-2.3.0.exe`: インストーラーです。最初の画面で言語を選択します。
-- `MDNote-2.3.0-portable.zip`: インストール不要のポータブル版です。展開して `MDNote.exe` を実行してください。
+- インストーラー（`MDNote-Setup-<バージョン>.exe`）: セットアップの最初の画面で言語を選択します。
+- インストール不要のポータブル版（`MDNote-<バージョン>-portable.zip`）: 展開して `MDNote.exe` を実行してください。
 - Windows 10/11 64ビット、.NET Framework 4.8（Windowsに標準搭載）が必要です。
 - 実行ファイルにデジタル署名がないため、初回起動時にWindowsの警告が表示されることがあります。**詳細情報 → 実行** をクリックしてください。
 
@@ -45,7 +45,7 @@
 | | |
 |---|---|
 | ![ライブモード](screenshots/features/en-live.png)<br>**ライブモード**: カーソルのある行だけMarkdown記号が表示され、残りは書式通りに表示されます。 | ![表の編集](screenshots/features/en-table.png)<br>**表の編集**: セル内に直接入力でき、行・列の追加や配置はツールバーで行います。 |
-| ![アウトライン](screenshots/features/en-outline.png)<br>**アウトライン**: 見出し一覧をクリックしてその位置へすぐに移動します。 | ![検索・置換](screenshots/features/en-find.png)<br>**検索・置換**: 文書内の文字を検索し、一括で置換します。 |
+| ![目次](screenshots/features/en-outline.png)<br>**目次**: 見出し一覧をクリックしてその位置へすぐに移動します。 | ![検索・置換](screenshots/features/en-find.png)<br>**検索・置換**: 文書内の文字を検索し、一括で置換します。 |
 | ![TXTモード](screenshots/features/en-txt.png)<br>**TXTモード**: 行番号付きのメモ帳のようにプレーンテキストを書けます。 | ![言語選択](screenshots/features/en-lang.png)<br>**5言語**: メニュー・ヘルプ・サンプルが選択した言語に切り替わります。 |
 | ![アラートと書式](screenshots/features/en-github.png)<br>**アラートと書式**: GitHub のアラート、タイトルを付けられる Obsidian 形式のコールアウト、ハイライト・脚注・キー表示に対応しています。 | ![数式](screenshots/features/en-math.png)<br>**数式**: 文中の `$…$` と独立した行の `$$…$$` を数式として描画します。 |
 
@@ -77,7 +77,7 @@
 実行ファイルにデジタル署名がないためです。**詳細情報 → 実行** を押してください。
 
 **インストールせずに使えますか？**
-はい。`MDNote-2.3.0-portable.zip` を展開し、`MDNote.exe` を実行してください。
+はい。最新リリースから `-portable.zip` で終わるファイルをダウンロードして展開し、`MDNote.exe` を実行してください。
 
 **アンインストールするにはどうすればいいですか？**
 インストーラー版は、Windowsの設定のアプリ一覧からアンインストールします。インストールフォルダに手動で入れたファイルがある場合は、そのファイルだけが残ります。ポータブル版は、展開したフォルダを削除するだけです。

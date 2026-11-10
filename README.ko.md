@@ -20,8 +20,8 @@
 
 [최신 버전 내려받기(Releases)](https://github.com/Lahai-Roi/MDNote/releases/latest)
 
-- `MDNote-Setup-2.3.0.exe`: 설치 파일입니다. 설치 첫 화면에서 언어를 고릅니다.
-- `MDNote-2.3.0-portable.zip`: 설치 없이 쓰는 파일입니다. 압축을 풀고 `MDNote.exe`를 실행합니다.
+- 설치 파일(`MDNote-Setup-<버전>.exe`): 설치 첫 화면에서 언어를 고릅니다.
+- 설치 없이 쓰는 파일(`MDNote-<버전>-portable.zip`): 압축을 풀고 `MDNote.exe`를 실행합니다.
 - Windows 10/11 64비트, .NET Framework 4.8(Windows에 기본으로 들어 있음)이 필요합니다.
 - 실행 파일에 디지털 서명이 없어 처음 실행할 때 Windows가 경고를 띄울 수 있습니다. **추가 정보 → 실행**을 누르면 됩니다.
 
@@ -44,7 +44,7 @@
 | | |
 |---|---|
 | ![라이브 모드](screenshots/features/ko-live.png)<br>**라이브 모드**: 커서가 있는 줄만 Markdown 기호가 보이고, 나머지는 서식대로 보입니다. | ![표 편집](screenshots/features/ko-table.png)<br>**표 편집**: 칸 안에서 바로 쓰고, 행·열 추가와 정렬은 도구 줄로 합니다. |
-| ![아웃라인](screenshots/features/ko-outline.png)<br>**아웃라인**: 제목 목록을 눌러 그 위치로 바로 이동합니다. | ![찾기·바꾸기](screenshots/features/ko-find.png)<br>**찾기·바꾸기**: 문서 안 글자를 찾고 한꺼번에 바꿉니다. |
+| ![목차](screenshots/features/ko-outline.png)<br>**목차**: 제목 목록을 눌러 그 위치로 바로 이동합니다. | ![찾기·바꾸기](screenshots/features/ko-find.png)<br>**찾기·바꾸기**: 문서 안 글자를 찾고 한꺼번에 바꿉니다. |
 | ![TXT 모드](screenshots/features/ko-txt.png)<br>**TXT 모드**: 줄 번호가 보이는 메모장처럼 일반 텍스트를 씁니다. | ![언어 선택](screenshots/features/ko-lang.png)<br>**5개 언어**: 메뉴·도움말·예제가 고른 언어로 바뀝니다. |
 | ![알림 상자와 서식](screenshots/features/ko-github.png)<br>**알림 상자와 서식**: GitHub 알림 상자와 제목을 직접 정하는 Obsidian식 상자, 형광펜·각주·키 표시를 보여 줍니다. | ![수식](screenshots/features/ko-math.png)<br>**수식**: 문장 속 `$…$`와 따로 줄에 쓴 `$$…$$`를 수식으로 보여 줍니다. |
 
@@ -73,7 +73,7 @@
 실행 파일에 디지털 서명이 없어서 그렇습니다. **추가 정보 → 실행**을 누르면 됩니다.
 
 **설치하지 않고 쓸 수 있나요?**
-네. `MDNote-2.3.0-portable.zip`을 풀고 `MDNote.exe`를 실행하면 됩니다.
+네. 최신 릴리스에서 `-portable.zip`으로 끝나는 파일을 내려받아 풀고 `MDNote.exe`를 실행하면 됩니다.
 
 **지우려면 어떻게 하나요?**
 설치 버전은 Windows 설정의 앱 목록에서 제거합니다. 설치 폴더에 직접 넣은 파일이 있으면 그 파일만 남습니다. 무설치 버전은 압축을 푼 폴더를 지우면 됩니다.
