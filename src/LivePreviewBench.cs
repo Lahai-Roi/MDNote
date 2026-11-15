@@ -16,12 +16,23 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using ICSharpCode.AvalonEdit.Document;
+using ICSharpCode.AvalonEdit.Rendering;
 
 namespace MDNote {
 // RC9 live-preview measurement harness. All documents are generated in memory
 // from fixed seeds. No user file is read.
 internal static class LivePreviewBench {
     static readonly string Emoji = "\U0001F600";
+    // The mermaid scenario waits this long for the diagrams in view before it starts measuring.
+    const int MermaidWaitMilliseconds = 20000;
+    // The mermaid scenario's warm-up pass, one scroll over the whole document before the measured
+    // scroll: one viewport step waits at most this long for the diagrams in view, and the whole pass
+    // stops after the total. Whatever is still not drawn is recorded in the result.
+    const int MermaidWarmStepMilliseconds = 5000;
+    // Renders run one at a time on the engine thread, and all 24 blocks may each need up to a step
+    // bound, so the pass gets 150 s; that plus the settling wait, typing and the scroll still fits the
+    // document's 300 s watchdog, and the pass stops early as soon as every block is drawn.
+    const int MermaidWarmTotalMilliseconds = 150000;
     static Process process;
     static readonly StringBuilder diagnostics=new StringBuilder();
     static void BeginDiagnostics() {
@@ -74,6 +85,11 @@ internal static class LivePreviewBench {
             docs = BuildData(quick, outDir);
             groups.Add(RunEditorScenario("plain", false, SelectDocs(docs, "TXT_12M", "MD_1_9M", "MD_12M"), outDir));
             groups.Add(RunEditorScenario("live", true, SelectDocs(docs, "MD_1_9M", "MD_5M", "MD_12M", "MD_1_9M_CRLF", "STRESS_PARA", "STRESS_TABLE", "STRESS_CODE", "STRESS_MEDIA"), outDir));
+            // A ```mermaid block only becomes a picture with the live preview attached, so the mermaid
+            // document gets its own group with a fresh editor and window (like "plain" and "live"). The
+            // group is selected like the others: every run measures every group; the folder name "-quick"
+            // scales the generated sizes. MDNOTE_HIDE_MARKERS=1 makes this group the basic view.
+            groups.Add(RunEditorScenario("mermaid", true, SelectDocs(docs, "MERMAID"), outDir));
 
             for(int i = 0; i < docs.Count; i++) docs[i].Text = null;
         }catch(Exception ex){
@@ -129,6 +145,8 @@ internal static class LivePreviewBench {
         int codeLines = ScaleCount(100000, quick);
         int mediaCount = quick ? 8 : 30;
         int mediaSections = quick ? 10 : 36;
+        int mermaidBlocks = quick ? 6 : 24;
+        int mermaidLines = quick ? 400 : 1500;
 
         string md19 = GenerateMarkdown(md19Target, 1001);
         docs.Add(MakeDoc("MD_1_9M", "markdown", 1900000, md19Target, md19, "LF",
@@ -160,7 +178,23 @@ internal static class LivePreviewBench {
         string media = GenerateStressMedia(mediaSections, mediaCount, 4001);
         docs.Add(MakeDoc("STRESS_MEDIA", "stress_media", 0, media.Length, media, "LF",
             "repeating sections of prose, a generated PNG image (media/imgN.png) and display/inline formulas", quick));
+        string mermaid = GenerateMermaid(mermaidLines, mermaidBlocks, 5001);
+        docs.Add(MakeDoc("MERMAID", "mermaid", 0, mermaid.Length, mermaid, "LF",
+            NewlineCount(mermaid).ToString(CultureInfo.InvariantCulture) + " lines, " + FenceCount(mermaid).ToString(CultureInfo.InvariantCulture)
+                + " ```mermaid blocks (flowchart, sequence, pie, gantt, mindmap) between prose, lists and one table", quick));
         return docs;
+    }
+
+    // "```mermaid" openers in a generated document (the description string is built from this).
+    static int FenceCount(string text){
+        int count = 0;
+        const string opener = "```mermaid\n";
+        int at = text.IndexOf(opener, StringComparison.Ordinal);
+        while(at >= 0){
+            count++;
+            at = text.IndexOf(opener, at + opener.Length, StringComparison.Ordinal);
+        }
+        return count;
     }
 
     static int ScaleSize(long value, bool quick){
@@ -516,6 +550,157 @@ internal static class LivePreviewBench {
         return sb.ToString();
     }
 
+    // ---------------------------------------------------------------- mermaid
+
+    // The mermaid scenario: a generated document of about `lines` lines with `blocks` ```mermaid
+    // blocks (eight flowcharts of 10-15 Korean-labelled nodes, four sequence diagrams, four pies,
+    // four gantt charts and four mindmaps at full size) between prose paragraphs, lists and one
+    // table. The first block sits a few lines down so it is inside the opening view: the bench waits
+    // for the diagrams in view before it starts measuring. Every source is generated here; nothing
+    // is read from a file.
+    static string GenerateMermaid(int lines, int blocks, int seed){
+        Random random = new Random(seed);
+        int flow = Math.Max(1, blocks * 8 / 24);
+        int sequence = Math.Max(1, blocks / 6);
+        int pie = Math.Max(1, blocks / 6);
+        int gantt = Math.Max(1, blocks / 6);
+        int mind = Math.Max(1, blocks / 6);
+        List<string> fences = new List<string>();
+        for(int i = 0; i < flow; i++) fences.Add(MermaidFence(MermaidFlowchart(random)));
+        for(int i = 0; i < sequence; i++) fences.Add(MermaidFence(MermaidSequence(random)));
+        for(int i = 0; i < pie; i++) fences.Add(MermaidFence(MermaidPie(random)));
+        for(int i = 0; i < gantt; i++) fences.Add(MermaidFence(MermaidGantt(random)));
+        for(int i = 0; i < mind; i++) fences.Add(MermaidFence(MermaidMindmap(random)));
+        while(fences.Count > blocks) fences.RemoveAt(fences.Count - 1);
+        while(fences.Count < blocks) fences.Add(MermaidFence(MermaidFlowchart(random)));
+        Shuffle(fences, random);
+        int fenceLines = 0;
+        for(int i = 0; i < fences.Count; i++) fenceLines += NewlineCount(fences[i]);
+        int gaps = fences.Count + 1;
+        // The opening gap stays inside the first viewport (a ~33-line window at 1000x800), so the
+        // diagrams the bench waits for before measuring are the first ones in the document.
+        int opening = 6;
+        int spare = lines - fenceLines - opening;
+        if(spare < gaps * 3) spare = gaps * 3;
+        int perGap = spare / gaps;
+        StringBuilder sb = new StringBuilder(lines * 64 + 4096);
+        AppendMermaidFiller(sb, random, opening, false);
+        for(int i = 0; i < fences.Count; i++){
+            sb.Append(fences[i]);
+            AppendMermaidFiller(sb, random, perGap, i == fences.Count / 2);
+        }
+        for(int guard = 0; guard < 200 && NewlineCount(sb) < lines; guard++) AppendMermaidFiller(sb, random, 4, false);
+        return sb.ToString();
+    }
+
+    static void AppendMermaidFiller(StringBuilder sb, Random random, int lines, bool withTable){
+        int written = 0;
+        // Prose paragraphs and bullet lists between the blocks; one pipe table in the middle gap.
+        if(withTable){ AppendTableBlock(sb, random); written += 4; }
+        while(written < lines - 1){
+            if(random.Next(100) < 74){
+                int parts = 1 + random.Next(3);
+                for(int i = 0; i < parts && written < lines - 1; i++){ sb.Append(ProseLine(random)).Append('\n'); written++; }
+                sb.Append('\n');
+                written++;
+            }else{
+                int items = 2 + random.Next(4);
+                for(int i = 0; i < items && written < lines - 1; i++){
+                    if(random.Next(100) < 25) sb.Append("  ");
+                    sb.Append("- ").Append(ProseLine(random)).Append('\n');
+                    written++;
+                }
+                sb.Append('\n');
+                written++;
+            }
+        }
+    }
+
+    static void Shuffle(List<string> items, Random random){
+        for(int i = items.Count - 1; i > 0; i--){
+            int j = random.Next(i + 1);
+            string swap = items[i];
+            items[i] = items[j];
+            items[j] = swap;
+        }
+    }
+
+    static int NewlineCount(string text){
+        int count = 0;
+        for(int i = 0; i < text.Length; i++) if(text[i] == '\n') count++;
+        return count;
+    }
+
+    static int NewlineCount(StringBuilder text){
+        int count = 0;
+        for(int i = 0; i < text.Length; i++) if(text[i] == '\n') count++;
+        return count;
+    }
+
+    static string MermaidFence(string source){
+        return "```mermaid\n" + source + "```\n\n";
+    }
+
+    // 10-15 nodes with Korean labels, a chain through all of them and two shorter crossing edges.
+    static string MermaidFlowchart(Random random){
+        int nodes = 10 + random.Next(6);
+        StringBuilder sb = new StringBuilder("flowchart TD\n");
+        for(int i = 0; i < nodes; i++)
+            sb.Append("  N").Append(i).Append('[').Append(KoreanWords[i % KoreanWords.Length]).Append(' ').Append(i + 1).Append("]\n");
+        for(int i = 0; i + 1 < nodes; i++) sb.Append("  N").Append(i).Append(" --> N").Append(i + 1).Append('\n');
+        sb.Append("  N").Append(nodes / 3).Append(" --> N").Append(nodes - 1).Append('\n');
+        sb.Append("  N0 --> N").Append(nodes / 2).Append('\n');
+        return sb.ToString();
+    }
+
+    static string MermaidSequence(Random random){
+        StringBuilder sb = new StringBuilder("sequenceDiagram\n  participant 사용자\n  participant 편집기\n  participant 엔진\n");
+        int steps = 4 + random.Next(3);
+        for(int i = 0; i < steps; i++){
+            string message = KoreanLines[random.Next(KoreanLines.Length)];
+            if(i % 3 == 0) sb.Append("  사용자->>편집기: ").Append(message).Append('\n');
+            else if(i % 3 == 1) sb.Append("  편집기->>엔진: ").Append(message).Append('\n');
+            else sb.Append("  엔진-->>사용자: ").Append(message).Append('\n');
+        }
+        return sb.ToString();
+    }
+
+    static string MermaidPie(Random random){
+        StringBuilder sb = new StringBuilder("pie title ");
+        sb.Append(KoreanWords[random.Next(KoreanWords.Length)]).Append(" 비율\n");
+        int slices = 3 + random.Next(3);
+        for(int i = 0; i < slices; i++)
+            sb.Append("  \"").Append(KoreanWords[random.Next(KoreanWords.Length)]).Append("\" : ").Append(5 + random.Next(60)).Append('\n');
+        return sb.ToString();
+    }
+
+    static string MermaidGantt(Random random){
+        StringBuilder sb = new StringBuilder("gantt\n  title ");
+        sb.Append(KoreanWords[random.Next(KoreanWords.Length)]).Append(" 일정\n  dateFormat YYYY-MM-DD\n");
+        int sections = 2 + random.Next(2);
+        int tasks = 0;
+        for(int s = 0; s < sections; s++){
+            sb.Append("  section ").Append(KoreanWords[random.Next(KoreanWords.Length)]).Append('\n');
+            int count = 2 + random.Next(2);
+            for(int t = 0; t < count; t++){
+                tasks++;
+                sb.Append("  작업").Append(tasks);
+                if(tasks == 1) sb.Append(" :g1, 2026-01-05, ").Append(3 + random.Next(6)).Append("d\n");
+                else sb.Append(" :g").Append(tasks).Append(", after g").Append(tasks - 1).Append(", ").Append(2 + random.Next(8)).Append("d\n");
+            }
+        }
+        return sb.ToString();
+    }
+
+    static string MermaidMindmap(Random random){
+        StringBuilder sb = new StringBuilder("mindmap\n  root((");
+        sb.Append(KoreanWords[random.Next(KoreanWords.Length)]).Append("))\n");
+        int branches = 3 + random.Next(3);
+        for(int b = 0; b < branches; b++)
+            sb.Append("    ").Append(KoreanWords[random.Next(KoreanWords.Length)]).Append('\n');
+        return sb.ToString();
+    }
+
     // ------------------------------------------------------------ scenarios
 
     static ScenarioGroup RunEditorScenario(string scenarioName, bool withPreview, List<DocData> docs, string baseDirectory){
@@ -580,6 +765,14 @@ internal static class LivePreviewBench {
         Stopwatch elapsed = Stopwatch.StartNew();
         Watchdog watchdog = new Watchdog(300000.0);
         TextTracker tracker = new TextTracker(doc.Text);
+        bool mermaid = doc.Kind == "mermaid";
+        // The load stopwatch times the mermaid scenario's first picture (document open included).
+        Stopwatch load = mermaid ? Stopwatch.StartNew() : null;
+        if(mermaid){
+            result.HasMermaid = true;
+            result.MermaidRendersBefore = MermaidEngine.DiagRenders;
+            result.MermaidStartsBefore = MermaidEngine.DiagEngineStarts;
+        }
         try{
             PumpIdleQuiet();
             result.MemoryBeforeOpen = CaptureMemory(false);
@@ -592,6 +785,12 @@ internal static class LivePreviewBench {
             if(!open.RenderSeen) throw new BenchmarkIncompleteException("open did not reach a rendered frame within 300000 ms");
             watchdog.Check("open");
             result.MemoryAfterOpen = CaptureMemory(false);
+            if(mermaid){
+                BeginDiagnostics();
+                WaitForMermaidPictures(editor, result, load);
+                EndDiagnostics(scenarioName,doc.Name,"mermaid-wait");
+            }
+            if(load != null) load.Stop();
 
             TimingResult jump = MeasureAction(delegate{ editor.ScrollToEnd(); }, DispatcherPriority.ContextIdle, 120000.0, editor.TextArea.TextView);
             result.JumpEndMs = jump.Ms;
@@ -604,6 +803,13 @@ internal static class LivePreviewBench {
             watchdog.Check("typing");
 
             RunCaretMoves(editor, result, watchdog);
+            // The mermaid scroll samples must measure scrolling over drawn diagrams, not code fences, so
+            // a warm-up pass draws every block in view first. The measured scroll below stays unchanged.
+            if(mermaid){
+                BeginDiagnostics();
+                WarmUpMermaidScroll(editor, result, watchdog);
+                EndDiagnostics(scenarioName,doc.Name,"mermaid-warm");
+            }
             BeginDiagnostics();
             RunScroll(editor, result, watchdog);
             EndDiagnostics(scenarioName,doc.Name,"scroll");
@@ -688,6 +894,178 @@ internal static class LivePreviewBench {
             }
             result.Positions.Add(metrics);
         }
+    }
+
+    // The mermaid scenario's settling wait: pumps the dispatcher (engine results arrive at Background
+    // priority) until every mermaid block in view (one whose opener has a visual line) shows its
+    // picture, or the deadline passes. Reports engine renders, the time from the document open until
+    // the first in-view picture was drawn, and the working set now (the "after pictures" value the
+    // report pairs with the before-open one).
+    static void WaitForMermaidPictures(SourceEditor editor, ScenarioResult result, Stopwatch load){
+        Stopwatch watch = Stopwatch.StartNew();
+        bool settled = false, firstSeen = false;
+        double firstPicture = -1;
+        while(true){
+            PumpIdleQuiet();
+            int blocks, folded, inView, shown;
+            CountMermaidInView(editor, out blocks, out folded, out inView, out shown);
+            result.MermaidBlockCount = blocks;
+            result.MermaidFoldCount = folded;
+            result.MermaidInView = inView;
+            result.MermaidShown = shown;
+            if(!firstSeen && shown > 0){
+                firstSeen = true;
+                if(load != null) firstPicture = load.Elapsed.TotalMilliseconds;
+            }
+            if(inView > 0 && shown >= inView){ settled = true; break; }
+            if(watch.ElapsedMilliseconds >= MermaidWaitMilliseconds) break;
+            // No further picture can arrive after the engine gave up; do not hold the bench for the deadline.
+            if(MermaidEngine.Unavailable) break;
+            Thread.Sleep(10);
+        }
+        result.MermaidSettled = settled;
+        result.MermaidWaitedMs = watch.Elapsed.TotalMilliseconds;
+        result.MermaidFirstPictureMs = firstPicture;
+        result.MermaidRenders = MermaidEngine.DiagRenders - result.MermaidRendersBefore;
+        result.MermaidEngineStarts = MermaidEngine.DiagEngineStarts - result.MermaidStartsBefore;
+        result.MermaidUnavailable = MermaidEngine.Unavailable;
+        result.MermaidStartupError = MermaidEngine.StartupError;
+        result.MermaidLastError = MermaidRender.LastError;
+        result.MermaidPictureMemory = CaptureMemory(false);
+        PumpIdleQuiet();
+    }
+
+    // The mermaid scenario only: scrolls from the top to the bottom in viewport-sized steps, waiting at
+    // each step until the diagrams in view are drawn (bounded per step and in total). The measured scroll
+    // that follows then runs over drawn, cached pictures instead of code fences. Ends at the top.
+    // Drawing a picture above the view changes the height under it, so a single pass can step over a
+    // block; the pass repeats on the now settled layout (up to three times) and stops as soon as every
+    // block the session built is folded under its picture. Extra passes are cheap: a step with nothing
+    // to draw returns at once.
+    static void WarmUpMermaidScroll(SourceEditor editor, ScenarioResult result, Watchdog watchdog){
+        Stopwatch watch = Stopwatch.StartNew();
+        // No block may stay unfolded because the caret sits inside it: the measured scroll starts with
+        // every diagram in its picture form.
+        try{ editor.Select(0, 0); }catch{ }
+        try{ editor.ApplyTemplate(); editor.UpdateLayout(); }catch{ }
+        // Typing above left edits behind, and the session rescans a touched block on a 300 ms idle timer.
+        // A step returns as soon as the lines in view are fine, which can be milliseconds apart, so pump
+        // for a little longer than that timer first; otherwise the pass could cross the document before
+        // any rescan runs and every block would stay a code fence.
+        Stopwatch settle = Stopwatch.StartNew();
+        while(settle.ElapsedMilliseconds < 400){
+            PumpIdleQuiet();
+            Thread.Sleep(10);
+        }
+        double viewport = editor.ViewportHeight;
+        if(viewport < 1) viewport = 1;
+        // Opener line number -> whether that block's picture was seen drawn. A block that missed its
+        // step bound is recorded as false here; a later step that draws it overrides it to true, so the
+        // count at the end is "in view at least once, never drawn".
+        Dictionary<int, bool> drawn = new Dictionary<int, bool>();
+        int rendersAtStart = MermaidEngine.DiagRenders;
+        int steps = 0, passes = 0;
+        bool cutShort = false;
+        int blocks = 0, folded = 0, inView = 0, shown = 0;
+        while(passes < 3){
+            passes++;
+            double offset = 0;
+            while(true){
+                watchdog.Check("mermaid warm-up");
+                if(watch.ElapsedMilliseconds >= MermaidWarmTotalMilliseconds){ cutShort = true; break; }
+                PumpIdleQuiet();
+                try{ editor.ScrollToVerticalOffset(offset); }catch{ }
+                WaitForMermaidStep(editor, drawn, watchdog);
+                steps++;
+                // No further picture can arrive once the engine gave up; do not walk the rest of the document.
+                if(MermaidEngine.Unavailable) break;
+                double extent = editor.ExtentHeight;
+                double maximum = extent - editor.ViewportHeight;
+                if(maximum < 0) maximum = 0;
+                if(offset >= maximum) break;
+                offset += viewport;
+                if(offset > maximum) offset = maximum;
+            }
+            // Back to the top: the existing scroll measurement starts there, over the drawn pictures.
+            try{ editor.ScrollToVerticalOffset(0); }catch{ }
+            PumpIdleQuiet();
+            CountMermaidInView(editor, drawn, out blocks, out folded, out inView, out shown);
+            if(cutShort || MermaidEngine.Unavailable) break;
+            // Every block the session built is folded under its picture: nothing is left for a pass.
+            if(blocks == 0 || folded >= blocks) break;
+            if(watch.ElapsedMilliseconds >= MermaidWarmTotalMilliseconds){ cutShort = true; break; }
+        }
+        result.MermaidWarmMs = watch.Elapsed.TotalMilliseconds;
+        result.MermaidWarmSteps = steps;
+        result.MermaidWarmPasses = passes;
+        result.MermaidWarmCutShort = cutShort;
+        // Renders during this pass, and the total since the document opened (the number that says every
+        // block has been drawn). Renders made while typing and moving the caret in between are in neither.
+        result.MermaidWarmRenders = MermaidEngine.DiagRenders - rendersAtStart;
+        result.MermaidWarmRendersTotal = MermaidEngine.DiagRenders - result.MermaidRendersBefore;
+        result.MermaidWarmBlocks = blocks;
+        result.MermaidWarmFolded = folded;
+        // In view at least once during the pass, never drawn: each such block failed its step bound.
+        int undrawn = 0;
+        foreach(bool seen in drawn.Values) if(!seen) undrawn++;
+        result.MermaidWarmUndrawn = undrawn;
+    }
+
+    // One warm-up step: pumps the dispatcher until every mermaid block in view shows its picture, the
+    // per-step bound passes, or the engine gave up. Every opener in view is recorded in `drawn` while the
+    // step runs (false = still not drawn), so a step that gives up leaves its blocks marked.
+    static void WaitForMermaidStep(SourceEditor editor, Dictionary<int, bool> drawn, Watchdog watchdog){
+        Stopwatch watch = Stopwatch.StartNew();
+        while(true){
+            watchdog.Check("mermaid warm-up step");
+            PumpIdleQuiet();
+            int blocks, folded, inView, shown;
+            CountMermaidInView(editor, drawn, out blocks, out folded, out inView, out shown);
+            if(inView == 0 || shown >= inView) return;
+            if(watch.ElapsedMilliseconds >= MermaidWarmStepMilliseconds || MermaidEngine.Unavailable) return;
+            Thread.Sleep(10);
+        }
+    }
+
+    // A mermaid block is "in view" when its opener line has a visual line on screen (a folded block's
+    // opener is drawn; the source lines under it are folded away). Shown = that visual line carries a
+    // MermaidElement, i.e. the block is drawn as its picture now.
+    static void CountMermaidInView(SourceEditor editor, out int blocks, out int folded, out int inView, out int shown){
+        CountMermaidInView(editor, null, out blocks, out folded, out inView, out shown);
+    }
+
+    // With `drawn` not null, every opener in view is recorded there by line number: true when its
+    // picture is drawn now, false when it is not (the warm-up's record of blocks that missed a step).
+    static void CountMermaidInView(SourceEditor editor, Dictionary<int, bool> drawn, out int blocks, out int folded, out int inView, out int shown){
+        blocks = folded = inView = shown = 0;
+        MarkdownLivePreview.Session session = MarkdownLivePreview.SessionFor(editor);
+        if(session == null) return;
+        blocks = session.MermaidBlockCount;
+        folded = session.MermaidFoldCount;
+        TextView view = editor.TextArea.TextView;
+        try{ view.EnsureVisualLines(); }catch(Exception){ return; }
+        if(!view.VisualLinesValid) return;
+        foreach(VisualLine visual in view.VisualLines){
+            if(visual == null || visual.IsDisposed) continue;
+            DocumentLine opener = visual.FirstDocumentLine;
+            string text = editor.Document.GetText(opener.Offset, opener.Length);
+            if(!MermaidRender.IsMermaidFence(text)) continue;
+            inView++;
+            bool isDrawn = HasMermaidElement(visual);
+            if(isDrawn) shown++;
+            if(drawn == null) continue;
+            // A block first seen undrawn and drawn later counts as drawn.
+            if(isDrawn || !drawn.ContainsKey(opener.LineNumber)) drawn[opener.LineNumber] = isDrawn;
+        }
+    }
+
+    static bool HasMermaidElement(VisualLine visual){
+        IList<VisualLineElement> elements = visual.Elements;
+        for(int i = 0; i < elements.Count; i++){
+            MermaidElement diagram = elements[i] as MermaidElement;
+            if(diagram != null && diagram.Picture != null) return true;
+        }
+        return false;
     }
 
     static void RunCaretMoves(SourceEditor editor, ScenarioResult result, Watchdog watchdog){
@@ -902,6 +1280,10 @@ internal static class LivePreviewBench {
         if(String.IsNullOrEmpty(text)) return false;
         string trimmed = text.TrimStart();
         if(trimmed.Length == 0) return false;
+        // An indented line is never picked: a caret at its start that takes an Enter has its new
+        // line's leading spaces removed (the product's own Enter rule), which this harness's simple
+        // tracker does not model - the check would fail on correct behaviour.
+        if(trimmed.Length != text.Length) return false;
         char first = trimmed[0];
         if(first == '#' || first == '>' || first == '|' || first == '`' || first == '~') return false;
         if(first == '-' || first == '*' || first == '+' || first == '_') return false;
@@ -1072,6 +1454,8 @@ internal static class LivePreviewBench {
         WriteMemory(json, result.MemoryAfterTyping);
         json.EndObject();
 
+        if(result.HasMermaid) WriteMermaidJson(json, result);
+
         json.Name("correctness");
         json.BeginObject();
         json.IntegerProperty("expected_text_length", result.ExpectedLength);
@@ -1085,6 +1469,41 @@ internal static class LivePreviewBench {
         json.IntegerProperty("enter_newline_chars", result.EnterCharsInserted);
         json.EndObject();
 
+        json.EndObject();
+    }
+
+    // The mermaid scenario's own block: what the settling wait saw, what the warm-up pass before the
+    // scroll samples reached, and the working set after the pictures were drawn. Other scenarios do not
+    // write this object at all.
+    static void WriteMermaidJson(JsonOut json, ScenarioResult result){
+        json.Name("mermaid");
+        json.BeginObject();
+        json.BoolProperty("settled", result.MermaidSettled);
+        json.NumberProperty("wait_ms", result.MermaidWaitedMs);
+        json.NumberProperty("first_picture_ms", result.MermaidFirstPictureMs);
+        json.IntegerProperty("engine_starts", result.MermaidEngineStarts);
+        json.IntegerProperty("engine_renders", result.MermaidRenders);
+        json.Name("warm_up");
+        json.BeginObject();
+        json.NumberProperty("ms", result.MermaidWarmMs);
+        json.IntegerProperty("steps", result.MermaidWarmSteps);
+        json.IntegerProperty("passes", result.MermaidWarmPasses);
+        json.IntegerProperty("engine_renders_total", result.MermaidWarmRendersTotal);
+        json.IntegerProperty("engine_renders_during_warm_up", result.MermaidWarmRenders);
+        json.IntegerProperty("block_count", result.MermaidWarmBlocks);
+        json.IntegerProperty("fold_count", result.MermaidWarmFolded);
+        json.IntegerProperty("undrawn_blocks", result.MermaidWarmUndrawn);
+        json.BoolProperty("cut_short", result.MermaidWarmCutShort);
+        json.EndObject();
+        json.BoolProperty("engine_unavailable", result.MermaidUnavailable);
+        json.StringProperty("engine_startup_error", result.MermaidStartupError);
+        json.StringProperty("last_error", result.MermaidLastError);
+        json.IntegerProperty("block_count", result.MermaidBlockCount);
+        json.IntegerProperty("fold_count", result.MermaidFoldCount);
+        json.IntegerProperty("in_view", result.MermaidInView);
+        json.IntegerProperty("shown", result.MermaidShown);
+        json.Name("after_pictures");
+        WriteMemory(json, result.MermaidPictureMemory);
         json.EndObject();
     }
 
@@ -1163,6 +1582,48 @@ internal static class LivePreviewBench {
         if(groups.Count == 0) sb.Append("| - | - | - | - | - | - | - | - | - | - | - |\n");
         sb.Append('\n');
 
+        // The mermaid scenario's own numbers (other scenarios write nothing here).
+        bool mermaidHeader = false;
+        for(int g = 0; g < groups.Count; g++){
+            for(int i = 0; i < groups[g].Results.Count; i++){
+                ScenarioResult result = groups[g].Results[i];
+                if(!result.HasMermaid) continue;
+                if(!mermaidHeader){
+                    sb.Append("## Mermaid scenario\n\n");
+                    string header = "| Scenario | Doc | Blocks (folded) | In view (shown) | Settled | Wait ms | First picture ms | Engine starts | Engine renders | Warm-up ms (steps) | Warm-up renders (pass/total) | Blocks (folded) after warm-up | Undrawn after warm-up | Cut short | Working set before load | Working set after pictures | View | Engine |\n";
+                    sb.Append(header);
+                    // Built from the header, and aligned like the old hand-written rule: numbers right,
+                    // "View"/"Engine" left. A column added to one row and not the other makes markdown
+                    // draw the rows as plain text, which a counted row avoids.
+                    sb.Append(TableRule(header, "llrllrrrrrrrrlrrll"));
+                    mermaidHeader = true;
+                }
+                sb.Append("| ").Append(result.Scenario);
+                sb.Append(" | ").Append(result.Doc);
+                sb.Append(" | ").Append(result.MermaidBlockCount).Append(" (").Append(result.MermaidFoldCount).Append(")");
+                sb.Append(" | ").Append(result.MermaidInView).Append(" (").Append(result.MermaidShown).Append(")");
+                sb.Append(" | ").Append(result.MermaidSettled ? "yes" : "no");
+                sb.Append(" | ").Append(FormatMs(result.MermaidWaitedMs));
+                sb.Append(" | ").Append(FormatMs(result.MermaidFirstPictureMs));
+                sb.Append(" | ").Append(result.MermaidEngineStarts);
+                sb.Append(" | ").Append(result.MermaidRenders);
+                sb.Append(" | ").Append(FormatMs(result.MermaidWarmMs)).Append(" (").Append(result.MermaidWarmSteps).Append(" steps, ").Append(result.MermaidWarmPasses).Append(" passes)");
+                sb.Append(" | ").Append(result.MermaidWarmRenders).Append(" (total ").Append(result.MermaidWarmRendersTotal).Append(")");
+                sb.Append(" | ").Append(result.MermaidWarmBlocks).Append(" (").Append(result.MermaidWarmFolded).Append(")");
+                sb.Append(" | ").Append(result.MermaidWarmUndrawn);
+                sb.Append(" | ").Append(result.MermaidWarmCutShort ? "yes" : "no");
+                sb.Append(" | ").Append(WorkingSetMb(result.MemoryBeforeOpen));
+                sb.Append(" | ").Append(WorkingSetMb(result.MermaidPictureMemory));
+                sb.Append(" | ").Append(HideMarkersInEffect() ? "basic (markers hidden)" : "live");
+                sb.Append(" | ").Append(result.MermaidUnavailable ? "unavailable: " + Shorten(result.MermaidStartupError, 120) : "ok");
+                sb.Append(" |\n");
+            }
+        }
+        if(mermaidHeader){
+            sb.Append('\n');
+            sb.Append("- Warm-up: before the scroll samples the bench scrolls the document in viewport steps and waits until the diagrams in view are drawn (5 s per step, 150 s total), then returns to the top. The Scroll p95 in the table above is therefore scrolling over drawn, cached pictures.\n\n");
+        }
+
         bool anyProblem = false;
         for(int g = 0; g < groups.Count; g++){
             for(int i = 0; i < groups[g].Results.Count; i++){
@@ -1187,6 +1648,26 @@ internal static class LivePreviewBench {
         sb.Append("- Windows are offscreen; insertions are synthetic AvalonEdit PerformTextInput calls.\n");
         sb.Append("- Memory values are raw process/GC values; the synthetic data set remains live during scenarios. Forced GC is only the labeled final diagnostic.\n");
         return sb.ToString();
+    }
+
+    // The "|---|" rule line of a markdown table, one cell per "|" of the header row (the mermaid table
+    // grows often, and a miscounted rule line makes the table render as plain text). `align` gives one
+    // character per column: 'r' right, 'c' centre, anything else (or a shorter string) plain. A markdown
+    // rule line "---:" also works without the leading dashes, so only the colon is added.
+    static string TableRule(string header, string align){
+        StringBuilder rule = new StringBuilder();
+        int pipes = 0;
+        for(int i = 0; i < header.Length; i++) if(header[i] == '|') pipes++;
+        int cells = pipes - 1;
+        if(cells < 1) return "";
+        for(int i = 0; i < cells; i++){
+            char a = align != null && i < align.Length ? align[i] : 'l';
+            if(a == 'r') rule.Append("---:|");
+            else if(a == 'c') rule.Append(":---:|");
+            else rule.Append("---|");
+        }
+        rule.Append('\n');
+        return rule.ToString();
     }
 
     static string StatTriple(ScenarioResult result, string statistic){
@@ -1215,6 +1696,17 @@ internal static class LivePreviewBench {
         MemorySnapshot memory = result.MemoryAfterTyping != null ? result.MemoryAfterTyping : result.MemoryAfterOpen;
         if(memory == null) return "-";
         return (memory.PrivateBytes / 1048576.0).ToString("0.0", CultureInfo.InvariantCulture);
+    }
+
+    static string WorkingSetMb(MemorySnapshot memory){
+        if(memory == null) return "-";
+        return (memory.WorkingSetBytes / 1048576.0).ToString("0.0", CultureInfo.InvariantCulture);
+    }
+
+    // The view the live group ran in: the bench's Settings has no HideMarkers seam of its own, so the
+    // self-test environment variable (Program.IsSelfTest is true for every bench) is the only switch.
+    static bool HideMarkersInEffect(){
+        return String.Equals(Environment.GetEnvironmentVariable("MDNOTE_HIDE_MARKERS"), "1", StringComparison.Ordinal);
     }
 
     static string FormatMs(double value){
@@ -1360,6 +1852,36 @@ internal static class LivePreviewBench {
         internal int MeasuredCharInserts;
         internal int MeasuredEnterInserts;
         internal long EnterCharsInserted;
+        // Mermaid scenario only (HasMermaid): the settling wait, the engine counters it saw, and the
+        // working set after the pictures were drawn (pairs with memory.before_open).
+        internal bool HasMermaid;
+        internal bool MermaidSettled;
+        internal double MermaidWaitedMs = -1;
+        internal double MermaidFirstPictureMs = -1;
+        internal int MermaidRendersBefore;
+        internal int MermaidStartsBefore;
+        internal int MermaidRenders;
+        internal int MermaidEngineStarts;
+        internal bool MermaidUnavailable;
+        internal string MermaidStartupError;
+        internal string MermaidLastError;
+        internal int MermaidBlockCount;
+        internal int MermaidFoldCount;
+        internal int MermaidInView;
+        internal int MermaidShown;
+        // The warm-up pass that draws every diagram before the mermaid scroll samples (WarmUpMermaidScroll):
+        // its time, engine renders, the session's block / fold counts at its end, and the in-view blocks
+        // that missed their step bound.
+        internal double MermaidWarmMs = -1;
+        internal int MermaidWarmSteps;
+        internal int MermaidWarmPasses;
+        internal int MermaidWarmRenders;
+        internal int MermaidWarmRendersTotal;
+        internal int MermaidWarmBlocks;
+        internal int MermaidWarmFolded;
+        internal int MermaidWarmUndrawn;
+        internal bool MermaidWarmCutShort;
+        internal MemorySnapshot MermaidPictureMemory;
     }
 
     sealed class PositionResult {

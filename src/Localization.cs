@@ -87,6 +87,9 @@ public partial class MainWindow {
            so only this phrase is looked up and the target is kept verbatim. */
         {"Ctrl+클릭하여 열기",new[]{"Ctrl+click to open","Ctrl+クリックで開く","Ctrl+单击打开","Ctrl+按一下開啟"}},
         {"클릭하여 열기",new[]{"Click to open","クリックで開く","单击打开","按一下開啟"}},
+        /* 2.5.0: the tooltip now reads "<target> (Ctrl+클릭)"; only the gesture is looked up. */
+        {"Ctrl+클릭",new[]{"Ctrl+click","Ctrl+クリック","Ctrl+单击","Ctrl+按一下"}},
+        {"클릭",new[]{"Click","クリック","单击","按一下"}},
 
         {"행 추가",new[]{"Add row","行を追加","添加行","新增列"}},
         {"행 제거",new[]{"Remove row","行を削除","删除行","移除列"}},

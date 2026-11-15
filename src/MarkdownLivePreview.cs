@@ -1607,6 +1607,8 @@ internal static partial class MarkdownLivePreview {
         internal string MathLatex;
         internal DocumentLine MathOpener;
         internal bool MathOne;
+        // An opening fence whose info word is "mermaid" (MermaidRender.cs draws the block as a diagram).
+        internal bool Mermaid;
         // The line holds at least one inline formula.
         internal bool MathInline;
         // A table row only: the inline formulas of the row the caret or a selection touches, as ",<start>,<start>,"
@@ -3283,6 +3285,7 @@ internal static partial class MarkdownLivePreview {
             Editor.TextArea.TextEntering += TablePipeTyping;
             Editor.TextArea.TextEntering += TableGapEntering;
             Editor.TextArea.TextEntering += HiddenFenceEntering;
+            Editor.TextArea.PreviewMouseLeftButtonDown += MermaidMouseDown;
             Editor.TextArea.PreviewMouseLeftButtonDown += FenceRowMouseDown;
             Editor.TextArea.PreviewMouseLeftButtonDown += MathEndMouseDown;
             Editor.TextArea.TextEntering += SetextRuleEntering;
@@ -4251,6 +4254,8 @@ internal static partial class MarkdownLivePreview {
                 DocumentLine mathOpener=caretMath.MathCount>0?caretDocumentLine:caretMath.MathOpener;
                 if(mathOpener!=null&&!mathOpener.IsDeleted)PrepareMath(mathOpener,false);
             }
+            // A mermaid block the caret entered or left unfolds / folds here; its lines join the redraw below.
+            if (mermaid != null) MermaidCaretMoved();
             // Publish a deferred grid only after its active row has been left. Quiet
             // typing is not permission to rewrap the row underneath an IME window.
             if (nextCaret!=oldCaretLine) {
@@ -4270,6 +4275,7 @@ internal static partial class MarkdownLivePreview {
                 bool changed=Active(number,oldCaretLine,oldStart,oldEnd)!=Active(number,nextCaret,nextStart,nextEnd);
                 LineInfo first=Info(line.FirstDocumentLine);
                 if (!changed && touchChanged && (number==oldTouchLine || number==mathTouchLine)) changed=true;
+                if (!changed && mermaid != null && MermaidFlipped(number)) changed=true;
                 if (!changed && (first.MathCount>0 || first.MathRemaining>0 || first.MathOne)) {
                     // A display formula is raw as a whole: every line of the block flips together.
                     int blockFirst, blockLast;
@@ -4328,7 +4334,8 @@ internal static partial class MarkdownLivePreview {
             // Resolve reveal-dependent wrapping before a caret/IME query can observe
             // the old height of a preceding line. Work stays within the changed viewport.
             foreach (DocumentLine line in changedLines) View.GetOrConstructVisualLine(line);
-            if (!above) return;
+            // A mermaid flip's anchor settle (MermaidAnchorSettle) is the last word on this move's scroll.
+            if (!above || mermaidAnchorWork != null) return;
             View.EnsureVisualLines();
             double after = View.GetVisualTopByDocumentLine(anchorNumber) - View.VerticalOffset;
             if (Math.Abs(after - before) <= 0.5) return;
@@ -5293,6 +5300,7 @@ internal static partial class MarkdownLivePreview {
             }
             if (info.FenceLine && !Raw(line)) {
                 int target=FenceCaretTarget(line,lastActiveLine<=line.LineNumber);
+                if (mermaid != null) target=MermaidCaretTarget(line,lastActiveLine<=line.LineNumber,caret.Offset,target);
                 if (target==caret.Offset) return;
                 hiddenCaretGuarded=true;
                 try {
@@ -8966,6 +8974,9 @@ internal static partial class MarkdownLivePreview {
             DocumentLine last = Document.GetLineByOffset(e.Offset + e.RemovalLength);
             PrepareReferences(first, last);
             PrepareMathSections(first, last);
+            // A whole-document replace is a load, not typing: its blocks may be scanned as they are laid out.
+            if (e.Offset != 0 || e.RemovalLength != Document.TextLength) MermaidEditing();
+            if (mermaid != null) MermaidChanging(first, last);
             // Only sections touching this edit need release. A newline elsewhere must not
             // walk every table the reader has visited; the height tree tracks shifted lines.
             if(first.PreviousLine!=null)PrepareDelimiter(first.PreviousLine,false);
@@ -9097,6 +9108,7 @@ internal static partial class MarkdownLivePreview {
             ClearCodeCopyHover();
             DocumentLine edited=Document.GetLineByNumber(number),previous=edited.PreviousLine;LineInfo preceding;
             HashSet<DocumentLine> mathDirty=MathInvalidate(edited);
+            if (mermaid != null) MermaidChanged(number, lastNumber);
             // Only the two next-line lookaheads (a table header's delimiter row and a setext
             // underline) can change on the preceding line. Without its own pipe or heading the
             // header flag is false either way, and an underline needs "=" / "-" first, so
@@ -9225,6 +9237,11 @@ internal static partial class MarkdownLivePreview {
             // outside a composition ran one DataBind pass plus a Rendering subscription for every
             // line that was re-laid out, which is once per typed character.
             if (compositionLive || Editor.ImeBusy) QueueComposition();
+            // A viewport that landed inside a mermaid block without laying out its opener (MermaidRender.cs):
+            // the walk and its guards live there, so a document whose top line is not fence code pays one
+            // cached parse here (and a document without a block pays the same).
+            MermaidSeeTop();
+            MermaidPreRender();
             // A command/paste can place the caret before the layout that exposes its row (H7).
             QueueCaretGuard();
         }
@@ -10075,10 +10092,13 @@ internal static partial class MarkdownLivePreview {
                     if (offset - line.Offset >= hint.Start && offset - line.Offset < hint.Start + hint.Length) return hint.Text;
                 return null;
             }
+            // 2.5.0 (user 11-15): the target first and the gesture after it, "<target> | Ctrl+클릭",
+            // for links and footnotes alike (was "Ctrl+클릭하여 열기 · <target>").
             bool readOnly = Options.ReadOnly || Editor.IsReadOnly;
-            string text = (readOnly ? "클릭하여 열기" : "Ctrl+클릭하여 열기") + " · " + LinkTipTarget(url);
+            string gesture = readOnly ? "클릭" : "Ctrl+클릭";
             Func<string,string> translate = Options.Translate;
-            return translate == null ? text : translate(text);
+            // " | " rather than brackets or "/": a URL already holds slashes and brackets (user 11-15).
+            return LinkTipTarget(url) + " | " + (translate == null ? gesture : translate(gesture));
         }
         string LinkTipTarget(string url) {
             if (url.StartsWith("#^",StringComparison.Ordinal)) {
@@ -10274,7 +10294,7 @@ internal static partial class MarkdownLivePreview {
         }
         void ShowLinkTip(string text) {
             if (linkTip==null) {
-                linkTip=new ToolTip { Placement=System.Windows.Controls.Primitives.PlacementMode.Mouse, PlacementTarget=View, StaysOpen=true, HasDropShadow=false, HorizontalOffset=14, VerticalOffset=18, MaxWidth=560 };
+                linkTip=new ToolTip { Placement=System.Windows.Controls.Primitives.PlacementMode.Mouse, PlacementTarget=View, StaysOpen=true, HasDropShadow=false, HorizontalOffset=4, VerticalOffset=2, MaxWidth=560 };/* 2.5.0 (user 11-15): was 14/18, read as far from the pointer */
                 linkTip.Content=new TextBlock { TextWrapping=TextWrapping.Wrap, MaxWidth=520 };
             }
             // A new link updates the open tooltip in place; the popup is not re-created, so the
@@ -10417,8 +10437,7 @@ internal static partial class MarkdownLivePreview {
             }
             string content=start<0?String.Empty:Document.GetText(start,end-start);
             bool copied;
-            if (content.Length==0) copied=ClipboardRetry.Try(delegate{System.Windows.Clipboard.SetDataObject(String.Empty,true);});
-            else copied=ClipboardRetry.TrySetText(content);
+            copied=ClipboardRetry.TrySetText(content);
             Func<string,string> translate=Options.Translate;
             Action<string> notice=Options.Notice;
             if (!copied) {
@@ -10549,6 +10568,8 @@ internal static partial class MarkdownLivePreview {
             Editor.TextArea.TextEntering -= TablePipeTyping;
             Editor.TextArea.TextEntering -= TableGapEntering;
             Editor.TextArea.TextEntering -= HiddenFenceEntering;
+            Editor.TextArea.PreviewMouseLeftButtonDown -= MermaidMouseDown;
+            MermaidDispose();
             Editor.TextArea.PreviewMouseLeftButtonDown -= FenceRowMouseDown;
             Editor.TextArea.PreviewMouseLeftButtonDown -= MathEndMouseDown;
             Editor.TextArea.TextEntering -= SetextRuleEntering;
@@ -10662,7 +10683,11 @@ internal static partial class MarkdownLivePreview {
         info.FenceLine = before.Fence == '\0' ? fenceLength >= 3 : fence == before.Fence && fenceLength >= before.FenceLength && tailBlank;
         info.Code = before.Fence != '\0' || info.FenceLine;
         if (info.Code) {
-            if (info.FenceLine) info.Hide(0, line.Length);
+            if (info.FenceLine) {
+                info.Hide(0, line.Length);
+                // Only an opening fence line is tested, on its own text.
+                if (before.Fence == '\0' && line.Length <= 64 && MermaidRender.IsMermaidFence(info.Text)) info.Mermaid = true;
+            }
             return info;
         }
         // Oversized lines remain editable native text; block state still propagates.
@@ -10877,7 +10902,7 @@ internal static partial class MarkdownLivePreview {
                 info.Hide(content, 2);
                 info.Hide(definitionNoteEnd, 1);
                 info.Hide(definitionColon, 1);
-                info.AddStyle(definitionNoteStart, definitionNoteEnd - definitionNoteStart, Style.Link | Style.Superscript, null);
+                info.AddStyle(definitionNoteStart, definitionNoteEnd - definitionNoteStart, Style.Link | Style.Superscript | Style.HtmlSup, null);/* 2.5.0 (user 11-10): the footnote number sits at the drawn <sup> height, not WPF's 2/3-ascent superscript */
                 info.AddStyle(definitionBody, text.Length - definitionBody, Style.Muted | Style.Small, null);
                 if (info.Links == null) info.Links = new List<LinkPart>();
                 string noteId = text.Substring(definitionNoteStart, definitionNoteEnd - definitionNoteStart);
@@ -11413,7 +11438,7 @@ internal static partial class MarkdownLivePreview {
                 if (note > i + 2 && (note + 1 >= text.Length || text[note + 1] != ':')) {
                     info.Hide(i, 2);
                     info.Hide(note, 1);
-                    info.AddStyle(i + 2, note - i - 2, Style.Link | Style.Superscript, null);
+                    info.AddStyle(i + 2, note - i - 2, Style.Link | Style.Superscript | Style.HtmlSup, null);/* 2.5.0: drawn at the <sup> height like the definition number */
                     if (info.Links == null) info.Links = new List<LinkPart>();
                     info.Links.Add(new LinkPart { Start=i, Length=note + 1 - i, Url="#^" + text.Substring(i + 2, note - i - 2) });
                     i = note + 1;
@@ -11909,6 +11934,8 @@ internal static partial class MarkdownLivePreview {
             info.Row = info.Table && !info.Delimiter && info.Cells != null && info.Cells.Count > 0 ? session.LayoutRow(info, raw) : null;
             // A display formula folds the lines under its opener while it is drawn, and unfolds them when it is source.
             if (info.MathCount > 0) session.PrepareMath(line, !raw);
+            // A mermaid block does the same once its diagram is ready (nothing runs without one).
+            if (info.Mermaid || session.MermaidBlockCount > 0) session.PrepareMermaid(line, info);
             // A line drawn as nothing at all: a table delimiter row, a setext underline, or a
             // reference definition line while the caret is elsewhere (no-reveal mode).
             bool hiddenLine = (info.Delimiter || info.SetextUnderline>0) && !raw;
@@ -12128,6 +12155,11 @@ internal static partial class MarkdownLivePreview {
             // stop of its own. Only the no-reveal mode takes part; the raw reveal keeps every
             // marker stop it has today.
             bool lead = session.Options.HideMarkers && replacement.Start < info.LeadEnd;
+            if (info.Mermaid && replacement.Kind == ReplacementKind.Hidden && replacement.Start == 0) {
+                // A drawn mermaid block: the opener's hidden fence text is the diagram's one caret stop.
+                MermaidPicture diagram = session.MermaidFoldedPicture(line);
+                if (diagram != null) return new MermaidElement(replacement.Length, diagram, session.MathAvailable);
+            }
             if (replacement.Kind == ReplacementKind.Hidden) return new InvisibleElement(replacement.Length, 0, lead, visualLine, replacement.Mark && session.Options.HeadingMarks ? session.HeadingShift(info.Heading) : 0, replacement.PadEm);
             if (replacement.Kind == ReplacementKind.LineBreak) return new BreakElement(replacement.Length);
             if (replacement.Kind == ReplacementKind.Spacer) return new MarkerElement(replacement.Length, replacement.Scaled ? replacement.Width * session.Options.FontSize : replacement.Width, null, false, false, lead);
@@ -13171,7 +13203,10 @@ internal static partial class MarkdownLivePreview {
             foreach (VisualLine line in textView.VisualLines) {
                 LineInfo info = session.Info(line.FirstDocumentLine);
                 double y = line.VisualTop - textView.VerticalOffset;
-                if (info.Code) drawingContext.DrawRectangle(session.Colors.Code, null, new Rect(0, y, width, line.Height));
+                if (info.Code) {
+                    // A drawn mermaid diagram sits on the page, not on the code block shade.
+                    if (!info.Mermaid || session.MermaidFoldedPicture(line.FirstDocumentLine) == null) drawingContext.DrawRectangle(session.Colors.Code, null, new Rect(0, y, width, line.Height));
+                }
                 // Front matter shares the code block's shade, lighter (60% of the same brush).
                 else if (info.FrontMatter) {
                     drawingContext.PushOpacity(0.6);

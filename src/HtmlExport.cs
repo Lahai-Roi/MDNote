@@ -69,6 +69,7 @@ internal static class HtmlExporter {
         "a{color:#2563d2}\n"+
         "pre{margin:.6em 0 1em;padding:14px;background:#f3f4f6;border:1px solid #d9dde3;border-radius:6px;overflow-x:auto;line-height:1.5}\n"+
         "pre.plain{white-space:pre-wrap;overflow-wrap:anywhere}\n"+
+        "figure.mermaid{margin:1em 0;text-align:center;--pele-surface-alt:"+MermaidRender.LightSurfaceAlt+"}figure.mermaid svg{max-width:100%;height:auto}\n"+
         "code{font-family:Consolas,\"Cascadia Mono\",\"Malgun Gothic\",monospace;font-size:.92em}\n"+
         "p code,li code,td code,th code{background:#eef0f3;padding:.1em .35em;border-radius:4px}\n"+
         "mark{background:#fff1a8;color:inherit}\n"+
@@ -111,6 +112,7 @@ internal static class HtmlExporter {
         if(plainText){
             body.Append("<pre class=\"plain\">");AppendEscaped(body,normalized,0,normalized.Length,false);body.Append("</pre>\n");
         }else{
+            MermaidOutput.BeginDocument();try{
             string[] lines=normalized.Split('\n');
             // YAML front matter is document metadata, not page content: drop it (the same shared
             // rule the live box and the outline use, so the page and the screen agree). The opener
@@ -132,6 +134,7 @@ internal static class HtmlExporter {
                 context.TocHeadings=scan.TocHeadings;
             }
             new BlockWriter(context,body).Render(lines,0);
+            }finally{MermaidOutput.EndDocument();}
         }
         string title=context.Title;
         if(String.IsNullOrEmpty(title)){
@@ -912,7 +915,29 @@ internal static class HtmlExporter {
                 char fenceMarker;int fenceCount;int fenceInfo;
                 if(FenceOpen(line,out fenceMarker,out fenceCount,out fenceInfo)){
                     Flush(s);CloseLists(s);
-                    string language=CodeLanguage(line.Substring(fenceInfo));
+                    string info=line.Substring(fenceInfo);
+                    string language=CodeLanguage(info);
+                    // A mermaid fence collects its lines first and becomes one figure; when the engine
+                    // cannot draw it the same lines are written as the code block it always was.
+                    if(MermaidOutput.IsMermaidInfo(info)){
+                        var code=new StringBuilder();
+                        bool codeFirst=true;
+                        while(++i<lines.Length&&!ClosingFence(lines[i],fenceMarker,fenceCount)){
+                            if(!codeFirst)code.Append('\n');
+                            codeFirst=false;
+                            code.Append(lines[i]);
+                        }
+                        double svgWidth,svgHeight;
+                        string svg=MermaidOutput.RenderSvg(code.ToString(),"Segoe UI",16,out svgWidth,out svgHeight);
+                        if(svg!=null)svg=MermaidOutput.SanitizeSvg(svg);
+                        if(svg!=null){sb.Append("<figure class=\"mermaid\">").Append(svg).Append("</figure>\n");continue;}
+                        sb.Append("<pre><code");
+                        if(language.Length>0)sb.Append(" class=\"language-").Append(language).Append('"');
+                        sb.Append('>');
+                        AppendEscaped(sb,code.ToString(),0,code.Length,false);
+                        sb.Append("</code></pre>\n");
+                        continue;
+                    }
                     sb.Append("<pre><code");
                     if(language.Length>0)sb.Append(" class=\"language-").Append(language).Append('"');
                     sb.Append('>');

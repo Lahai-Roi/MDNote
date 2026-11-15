@@ -30,7 +30,7 @@ A fast, lightweight Markdown and TXT editor for Windows—just like Notepad.
 
 - **Edit as formatted**: Symbols like `#` and `**` stay hidden while you write. Switch to **Live mode** or **Source** when you want to see them.
 - **Toolbar and table editing**: Insert headings, bold, text color, lists, code, links, images and tables with a click; type straight into table cells.
-- **GitHub formatting and math**: Alerts (GitHub and Obsidian style), highlights, footnotes, `[TOC]`, emoji and math (`$E=mc^2$`) are rendered right in the editor.
+- **GitHub formatting, math and flowcharts**: Alerts (GitHub and Obsidian style), highlights, footnotes, `[TOC]`, emoji, math (`$E=mc^2$`) and flowcharts (Mermaid) are rendered right in the editor, and included as graphics in print and HTML export.
 - **TXT mode**: Plain text with line numbers, just like Notepad.
 - **Tabs, windows and outline**: Open documents in tabs or windows, and jump through the heading list or the files in the same folder.
 - **Tidy images**: Pasted or dropped images are collected into a folder next to the document when you save.
@@ -48,6 +48,7 @@ A fast, lightweight Markdown and TXT editor for Windows—just like Notepad.
 | ![Outline](screenshots/features/en-outline.png)<br>**Outline**: Click a heading in the list to jump straight to that section. | ![Find & Replace](screenshots/features/en-find.png)<br>**Find & Replace**: Find text in the document and replace it all at once. |
 | ![TXT mode](screenshots/features/en-txt.png)<br>**TXT mode**: Write plain text with line numbers, just like Notepad. | ![Language Selection](screenshots/features/en-lang.png)<br>**5 Languages**: Menus, help guides, and sample documents switch to the selected language. |
 | ![Alerts and formatting](screenshots/features/en-github.png)<br>**Alerts and formatting**: GitHub alerts, Obsidian-style callouts with custom titles, highlights, footnotes and keyboard labels. | ![Math](screenshots/features/en-math.png)<br>**Math**: Inline `$…$` and display `$$…$$` are drawn as formulas. |
+| ![Flowcharts](screenshots/features/en-mermaid.png)<br>**Flowcharts (Mermaid)**: ```` ```mermaid ```` blocks are drawn as flowcharts, Gantt charts and more; click one to edit its source. | |
 
 ## How to Use
 
@@ -59,7 +60,7 @@ Two guides are available under the **Help** menu in the app:
 ## Limitations
 
 - Windows only (Windows 10/11 64-bit).
-- Flowcharts (Mermaid) are not rendered as graphics and are shown as plain text.
+- Flowcharts (Mermaid) are drawn by the engine built into Windows. Large diagrams over 20,000 characters or syntax the engine cannot draw are shown as plain text.
 - To save as a PDF, select 'Microsoft Print to PDF' in the Print menu.
 
 ## FAQ

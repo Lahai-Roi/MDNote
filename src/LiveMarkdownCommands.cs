@@ -1301,7 +1301,11 @@ public partial class MainWindow {
         e.DataObject.SetData(System.Windows.DataFormats.Text,unicode);
         if(!LivePreviewAttached)return;
         try{
-            var document=Markdown.Parse(markdown,fontSize,family,Brushes.Black,false,DocumentBasePath(),T("[이미지: "));
+            // RTF cannot carry the pictures and controls: formulas, diagrams, check boxes and keys go as text.
+            System.Windows.Documents.FlowDocument document;
+            Markdown.RichCopy=true;
+            try{document=Markdown.Parse(markdown,fontSize,family,Brushes.Black,false,DocumentBasePath(),T("[이미지: "));}
+            finally{Markdown.RichCopy=false;}
             using(var stream=new MemoryStream()){
                 new System.Windows.Documents.TextRange(document.ContentStart,document.ContentEnd).Save(stream,System.Windows.DataFormats.Rtf);
                 e.DataObject.SetData(System.Windows.DataFormats.Rtf,System.Text.Encoding.ASCII.GetString(stream.ToArray()));

@@ -74,9 +74,10 @@ public partial class MainWindow {
             bool refDefinitionStyle=refText.Length>0&&LinkProbeHasStyle(refInfo,refBodyAt,MarkdownLivePreview.Style.Muted|MarkdownLivePreview.Style.Small);
             VisualLine bodyVisual=live.source.TextArea.TextView.GetVisualLine(3),noteVisual=live.source.TextArea.TextView.GetVisualLine(5),refVisual=live.source.TextArea.TextView.GetVisualLine(7);
             VisualLineElement refElement=LinkProbeElement(bodyVisual,noteStart+2);
-            bool refVisualOk=refElement!=null&&refElement.TextRunProperties.BaselineAlignment==BaselineAlignment.Superscript&&LinkProbeNear(refElement.TextRunProperties.FontRenderingEmSize,live.fontSize*0.75)&&LinkProbeColor(refElement.TextRunProperties.ForegroundBrush)==LinkProbeColor(session.Colors.Link);
+            /* 2.5.0: footnote numbers are drawn like <sup> (HtmlSup: baseline run, ink drawn by the block renderer in the link colour) */
+            bool refVisualOk=refElement!=null&&refElement.TextRunProperties.BaselineAlignment==BaselineAlignment.Baseline&&LinkProbeNear(refElement.TextRunProperties.FontRenderingEmSize,live.fontSize*0.75)&&LinkProbeHasStyle(bodyInfo,noteStart+2,MarkdownLivePreview.Style.Link|MarkdownLivePreview.Style.HtmlSup);
             VisualLineElement markerElement=LinkProbeElement(noteVisual,noteIdAt);
-            bool markerVisualOk=markerElement!=null&&markerElement.TextRunProperties.BaselineAlignment==BaselineAlignment.Superscript&&LinkProbeNear(markerElement.TextRunProperties.FontRenderingEmSize,live.fontSize*0.75);
+            bool markerVisualOk=markerElement!=null&&markerElement.TextRunProperties.BaselineAlignment==BaselineAlignment.Baseline&&LinkProbeHasStyle(noteInfo,noteIdAt,MarkdownLivePreview.Style.HtmlSup)&&LinkProbeNear(markerElement.TextRunProperties.FontRenderingEmSize,live.fontSize*0.75);
             VisualLineElement noteBodyElement=LinkProbeElement(noteVisual,noteBodyAt);
             VisualLineElement refBodyElement=LinkProbeElement(refVisual,refBodyAt);
             bool mutedVisualOk=noteBodyElement!=null&&LinkProbeColor(noteBodyElement.TextRunProperties.ForegroundBrush)==LinkProbeColor(session.Colors.Muted)&&LinkProbeNear(noteBodyElement.TextRunProperties.FontRenderingEmSize,live.fontSize*0.9)&&refBodyElement!=null&&LinkProbeColor(refBodyElement.TextRunProperties.ForegroundBrush)==LinkProbeColor(session.Colors.Muted);
@@ -106,7 +107,7 @@ public partial class MainWindow {
             live.source.Select(live.source.Document.GetLineByNumber(2).Offset,0);LinkProbePump(live);
             var view=live.source.TextArea.TextView;
             bool editTip=session.UpdateLinkHover(bodyLine.Offset+inlineAt+1,false,false);
-            check("hover tooltip shows Ctrl+click and the url in edit mode",editTip&&session.LinkTipText=="Ctrl+클릭하여 열기 · "+LinkProbeInline,"tip="+LinkProbeShow(session.LinkTipText));
+            check("hover tooltip shows Ctrl+click and the url in edit mode",editTip&&session.LinkTipText==LinkProbeInline+" | Ctrl+클릭","tip="+LinkProbeShow(session.LinkTipText));
             bool plainCursor=view.Cursor!=System.Windows.Input.Cursors.Hand;
             session.UpdateLinkHover(bodyLine.Offset+inlineAt+1,true,false);
             bool handCursor=view.Cursor==System.Windows.Input.Cursors.Hand;
@@ -119,7 +120,7 @@ public partial class MainWindow {
             check("footnote reference hover shows its definition text",noteTip!=null&&noteTip.Contains("각주 정의 텍스트"),"tip="+LinkProbeShow(noteTip));
             session.UpdateLinkHover(noteLine.Offset+1,true,false);
             string markerTip=session.LinkTipText;
-            check("definition marker hover shows its reference",markerTip!=null&&markerTip.EndsWith(" · [^1]",StringComparison.Ordinal),"tip="+LinkProbeShow(markerTip));
+            check("definition marker hover shows its reference",markerTip=="[^1] | Ctrl+클릭","tip="+LinkProbeShow(markerTip));
             session.UpdateLinkHover(bodyLine.Offset+referenceAt+1,true,false);
             string referenceTip=session.LinkTipText;
             check("reference link hover shows its definition url",referenceTip!=null&&referenceTip.Contains(LinkProbeDocs),"tip="+LinkProbeShow(referenceTip));
@@ -142,7 +143,7 @@ public partial class MainWindow {
             check("live read plain click follows a footnote",readNote&&urls.Count==1&&urls[0]=="#^1","urls="+LinkProbeJoin(urls));
             // Read mode: plain click wording and the hand cursor with no modifier.
             bool readTip=session.UpdateLinkHover(bodyLine.Offset+inlineAt+1,false,true);
-            check("hover tooltip shows click-to-open and the url in read mode",readTip&&session.LinkTipText=="클릭하여 열기 · "+LinkProbeInline,"tip="+LinkProbeShow(session.LinkTipText));
+            check("hover tooltip shows click-to-open and the url in read mode",readTip&&session.LinkTipText==LinkProbeInline+" | 클릭","tip="+LinkProbeShow(session.LinkTipText));
             check("read mode shows the hand cursor over a link",live.source.TextArea.TextView.Cursor==System.Windows.Input.Cursors.Hand,"cursor="+live.source.TextArea.TextView.Cursor);
             session.UpdateLinkHover(noteLine.Offset+1,false,true);
             string readMarkerTip=session.LinkTipText;

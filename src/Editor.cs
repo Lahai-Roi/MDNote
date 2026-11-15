@@ -556,7 +556,9 @@ public partial class MainWindow : Window {
         double pending=PendingTypingSize();
         double pixels=pending>0?pending:LiveDrawnSize();
         string size=pixels.ToString("0.##",CultureInfo.InvariantCulture)+" px";
-        updatingTools=true;try{if(!sizes.Items.Contains(size))sizes.Items.Add(size);if(!Object.Equals(sizes.SelectedItem,size))sizes.SelectedItem=size;sizes.Text=size;sizeText=size;}finally{updatingTools=false;}
+        // 2.5.0 (user 11-15, photo: 34/17/36 px piled up under 48 px): a size that is not one of the choices
+        // (a heading, a code line, a span size) shows in the box only; it used to be added to the list for good.
+        updatingTools=true;try{if(sizes.Items.Contains(size)){if(!Object.Equals(sizes.SelectedItem,size))sizes.SelectedItem=size;}else if(sizes.SelectedIndex!=-1)sizes.SelectedIndex=-1;sizes.Text=size;sizeText=size;}finally{updatingTools=false;}
         FitSizeCaption();
     }
     /* The size box is sized for the menu's integer captions ("48 px"), but the live view can report

@@ -196,8 +196,43 @@ internal static class ClipboardRetry {
         text=result;
         return ok;
     }
+    /* 2.5.0 (user 11-15, Win+V on): plain text goes to the clipboard as real CF_UNICODETEXT data, not
+       through OLE. Clipboard.SetText registers an OLE data object and then flushes it; clipboard history
+       opens the clipboard the moment it changes and asks this thread to render that object, while this
+       thread waits (without pumping) to reopen the clipboard for the flush: both sides wait until
+       history times out, once per WPF retry, and the copy fails after a long freeze. Data set directly
+       needs no rendering, so the wait is only OpenClipboard's own, bounded by the attempts below. */
     internal static bool TrySetText(string text){
-        return Try(delegate{System.Windows.Clipboard.SetText(text);});
+        if(text==null)text=String.Empty;
+        IntPtr owner=IntPtr.Zero;
+        try{Window main=Application.Current==null?null:Application.Current.MainWindow;if(main!=null)owner=new System.Windows.Interop.WindowInteropHelper(main).Handle;}catch(InvalidOperationException){owner=IntPtr.Zero;}
+        for(int attempt=1;attempt<=Attempts;attempt++){
+            if(Native.OpenClipboard(owner)){
+                try{
+                    if(!Native.EmptyClipboard())return false;
+                    IntPtr memory=Native.GlobalAlloc(0x0002,(UIntPtr)((text.Length+1)*2));
+                    if(memory==IntPtr.Zero)return false;
+                    IntPtr target=Native.GlobalLock(memory);
+                    if(target==IntPtr.Zero){Native.GlobalFree(memory);return false;}
+                    try{System.Runtime.InteropServices.Marshal.Copy(text.ToCharArray(),0,target,text.Length);System.Runtime.InteropServices.Marshal.WriteInt16(target,text.Length*2,0);}
+                    finally{Native.GlobalUnlock(memory);}
+                    if(Native.SetClipboardData(13,memory)==IntPtr.Zero){Native.GlobalFree(memory);return false;}
+                    return true;
+                }finally{Native.CloseClipboard();}
+            }
+            if(attempt<Attempts)System.Threading.Thread.Sleep(DelayMilliseconds);
+        }
+        return false;
+    }
+    static class Native {
+        [System.Runtime.InteropServices.DllImport("user32.dll",SetLastError=true)] internal static extern bool OpenClipboard(IntPtr owner);
+        [System.Runtime.InteropServices.DllImport("user32.dll",SetLastError=true)] internal static extern bool EmptyClipboard();
+        [System.Runtime.InteropServices.DllImport("user32.dll",SetLastError=true)] internal static extern IntPtr SetClipboardData(uint format,IntPtr memory);
+        [System.Runtime.InteropServices.DllImport("user32.dll",SetLastError=true)] internal static extern bool CloseClipboard();
+        [System.Runtime.InteropServices.DllImport("kernel32.dll",SetLastError=true)] internal static extern IntPtr GlobalAlloc(uint flags,UIntPtr bytes);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll",SetLastError=true)] internal static extern IntPtr GlobalLock(IntPtr memory);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll",SetLastError=true)] internal static extern bool GlobalUnlock(IntPtr memory);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll",SetLastError=true)] internal static extern IntPtr GlobalFree(IntPtr memory);
     }
 }
 }

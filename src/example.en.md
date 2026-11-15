@@ -317,7 +317,32 @@ A quick route diagram to review with my friend.
 
 ---
 
-## 13. Post-Trip To-Do
+## 13. Kyoto Day Plan
+
+Change where to go depending on whether it rains.
+
+```mermaid
+flowchart TD
+  A[Hotel check-out] --> B[Osaka Station]
+  B --> C[Kyoto Station]
+  C --> D{Raining?}
+  D -->|Yes| E[Nishiki Market]
+  D -->|No| F[Fushimi Inari]
+  E --> G[Check in at the inn]
+  F --> G
+```
+
+---
+
+> **[Writing tip]** Write steps or branches in a ```` ```mermaid ```` code block to show them as a diagram.
+>
+> - `A[text] --> B[text]` draws boxes and an arrow, `{text}` draws a diamond for a branch, and `-->|Yes|` puts text on the arrow.
+> - The diagram is drawn shortly after you stop typing, and when you place the cursor on it or click the diagram, the original text appears so you can edit it.
+> - If the syntax is wrong, it stays as a code block. Sequence diagrams (`sequenceDiagram`), pie charts (`pie`), Gantt charts (`gantt`), and mindmaps (`mindmap`) are added the same way.
+
+---
+
+## 14. Post-Trip To-Do
 
 After getting back, settle up using card statements and receipts, and jot down favorite spots right in this file.
 

@@ -18,7 +18,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 | Exit | Alt+F4 | Close the current window only. Other open windows remain open. |
 
 - You can also open files by dragging them into the window or double-clicking them in File Explorer.
-- If you save an HTML file made with **Save as…** in the same folder as the document, the pictures still show. Formulas stay as plain text in the HTML.
+- If you save an HTML file made with **Save as…** in the same folder as the document, the pictures still show. Formulas stay as plain text in the HTML, and Mermaid diagrams are embedded as pictures.
 - If another program changes or deletes a file you have open, MDNote asks whether to reload it, or tells you the file is gone. When you save over a file that another program changed, it asks before overwriting.
 - Unsaved text is kept until you recover or delete it—MDNote asks whether to recover it on launch, or you can manage it anytime in **Recover documents…** (Recover selected, Delete selected, or Later).
 - In **Save as**, choose an encoding from UTF-8, UTF-8 (BOM), UTF-16 LE, UTF-16 BE, or ANSI, or keep the current encoding for documents opened in Shift JIS, GBK, Big5, Windows-1252, or UTF-32 LE/BE. ANSI uses the encoding for your Windows language: CP949 for Korean, GBK for Simplified Chinese, Big5 for Traditional Chinese, Shift JIS for Japanese, and Windows-1252 for English. Non-UTF-8 files are also read with this encoding when opened. If any characters cannot be represented in the selected encoding, MDNote prompts you to use UTF-8.
@@ -161,6 +161,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 - You can click checkboxes to toggle completion in both Read and editing views. Press **Ctrl+S** afterward to save the change to the file.
 - Selecting some cells in a table and deleting or typing keeps the pipe dividers (`|`) and table structure intact, clearing or replacing only the contents of the selected cells. However, selecting the entire table or pressing Ctrl+A and deleting removes the table itself like normal text.
 - `$E=mc^2$` inside a sentence, and `$$ … $$` on its own lines (also a ```` ```math ```` code block), are drawn as formulas. When the cursor is on one, the original text shows so you can edit it. This works inside table cells too. Text like `$5 and $10` stays normal text. There is no button for entering formulas.
+- A ```` ```mermaid ```` code block is drawn as a diagram (flowchart, sequence diagram, pie chart, Gantt, mindmap, class, state, etc.). It is drawn shortly after you stop typing, and when you place the cursor on it or click the diagram, the original text shows so you can edit it. If the syntax is wrong, it stays as a code block. In gitGraph, requirement, and xychart, non-English (non-ASCII) names must be wrapped in quotes to be drawn.
 
 The second row of a table (the `---` delimiter row) cannot be edited directly in the editing screen. Use the alignment buttons on the table toolbar (or the Source view) to change column alignment.
 
@@ -180,4 +181,5 @@ Outer `|` characters at the left and right edges of a table are optional. Typing
 
 ## 10. Known Limitations
 
+- Mermaid diagrams are drawn using an engine built into Windows. On Windows systems where this engine is not available, they stay as code blocks. Very large diagrams (over 20,000 characters or 400 lines of source text) also stay as code blocks.
 - **Alt+drag** rectangular (column) selection is not available in basic mode's editing screen. It is available in Live mode and in the ![Source](guide-btn-source.en.png) **Source** view.

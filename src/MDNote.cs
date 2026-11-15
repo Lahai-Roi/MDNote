@@ -15,6 +15,30 @@ using Forms = System.Windows.Forms;
 
 namespace MDNote {
 public static partial class Markdown {
+    // Rich copy (RTF) only: WPF's RTF writer drops UI containers, so every picture/control site emits its text instead.
+    [ThreadStatic] internal static bool RichCopy;
+    // The rule line of the RTF copy: an empty paragraph carrying the line as its bottom border.
+    // 2.5.0 (user 11-15, Word paste): WPF's RTF writer turns a "\n" inside a Run into a space, so a code block
+    // (and a mermaid source) arrived in Word as one line. Rich copy only: every "\n" becomes a LineBreak (\line).
+    static void RichCopyLineBreaks(Paragraph paragraph){
+        var runs=new System.Collections.Generic.List<Run>();CollectRuns(paragraph.Inlines,runs);
+        foreach(Run run in runs){
+            string text=run.Text;if(text.IndexOf('\n')<0)continue;
+            string[] parts=text.Split('\n');run.Text=parts[0];var siblings=run.SiblingInlines;Inline after=run;
+            for(int k=1;k<parts.Length;k++){var line=new LineBreak();siblings.InsertAfter(after,line);var next=new Run(parts[k]){Foreground=run.Foreground,FontWeight=run.FontWeight,FontStyle=run.FontStyle};siblings.InsertAfter(line,next);after=next;}
+        }
+    }
+    // RTF names a font by one string, so a WPF fallback list ("Consolas, Malgun Gothic") reached Word as an unknown
+    // font and fell back to the default; rich copy keeps the first family of every list.
+    static void RichCopyFonts(DependencyObject node){
+        var element=node as TextElement;
+        if(element!=null&&element.ReadLocalValue(TextElement.FontFamilyProperty)!=DependencyProperty.UnsetValue){string source=element.FontFamily.Source;int comma=source.IndexOf(',');if(comma>0)element.FontFamily=new FontFamily(source.Substring(0,comma).Trim());}
+        var document=node as FlowDocument;
+        if(document!=null){string source=document.FontFamily.Source;int comma=source.IndexOf(',');if(comma>0)document.FontFamily=new FontFamily(source.Substring(0,comma).Trim());}
+        foreach(object child in LogicalTreeHelper.GetChildren(node)){var next=child as DependencyObject;if(next!=null)RichCopyFonts(next);}
+    }
+    static void CollectRuns(InlineCollection inlines,System.Collections.Generic.List<Run> runs){foreach(Inline inline in inlines){var run=inline as Run;if(run!=null){runs.Add(run);continue;}var span=inline as Span;if(span!=null)CollectRuns(span.Inlines,runs);}}
+    static Paragraph RichCopyRule(bool dark){return new Paragraph {FontSize=2,LineHeight=Double.NaN,BorderBrush=dark?Brush(110,118,130):Brush(220,222,226),BorderThickness=new Thickness(0,0,0,1),Margin=new Thickness(0,10,0,10)};}
     internal static Action<string,int> DiagnosticStage=null;static void Stage(string name,int count){var observer=DiagnosticStage;if(observer!=null)observer(name,count);}
     // Links and images are not in this pattern: their target ends at MarkdownPlainText.TargetEnd
     // (balanced parentheses, an <angle> destination, a quoted title), the same scan the TXT
@@ -103,6 +127,7 @@ public static partial class Markdown {
         return new Paragraph(new Run(code)){FontFamily=new FontFamily("Consolas, Malgun Gothic"),FontSize=size*.9,Background=dark?Brush(55,61,73):Brush(235,238,242),BorderBrush=dark?Brush(91,103,120):Brush(173,184,198),BorderThickness=new Thickness(1),Padding=new Thickness(14),Margin=new Thickness(0,6,0,12)};
     }
     static FlowDocument ParseCore(string text,double size,string family,Brush foreground,bool dark,string file,string imageLabel) {
+        MermaidOutput.BeginDocument();try{
         var doc=new FlowDocument {FontFamily=new FontFamily(family),FontSize=size,Foreground=foreground,PagePadding=new Thickness(18,24,0,24),ColumnWidth=100000};
         string[] lines=text.Replace("\r\n","\n").Replace('\r','\n').Split('\n');
         // The [TOC] heading list, scanned once per document from the outline's own rule.
@@ -112,6 +137,7 @@ public static partial class Markdown {
             if(i%500==0)Stage("parse-lines",i);int start=i;string line=lines[i];
             int mathLast;string mathSource;
             if(TryDisplayMath(lines,i,out mathLast,out mathSource)&&MathRender.Check(mathSource)){
+                if(RichCopy){Add(doc,new Paragraph(new Run(String.Join("\n",lines,start,mathLast-start+1))){TextAlignment=TextAlignment.Center,LineHeight=Double.NaN,Margin=new Thickness(0,8,0,12)},lines,start,mathLast,"math");i=mathLast;continue;}
                 double mathAscent,mathDescent;
                 FrameworkElement mathPicture=MathRender.CreatePicture(mathSource,true,size,MathInk(dark),family,out mathAscent,out mathDescent);
                 if(mathPicture!=null){mathPicture.HorizontalAlignment=HorizontalAlignment.Center;Add(doc,new BlockUIContainer(mathPicture){Margin=new Thickness(0,8,0,12)},lines,start,mathLast,"math");i=mathLast;continue;}
@@ -120,14 +146,15 @@ public static partial class Markdown {
             if(fence.Success && !(fence.Groups[1].Value[0]=='`'&&fence.Groups[2].Value.Contains("`"))) {
                 char marker=fence.Groups[1].Value[0];int count=fence.Groups[1].Value.Length;var code=new StringBuilder();bool firstCodeLine=true;
                 while(++i<lines.Length&&!Regex.IsMatch(lines[i],@"^\s{0,3}"+Regex.Escape(new string(marker,count))+marker+@"*\s*$")){if(!firstCodeLine)code.Append('\n');firstCodeLine=false;code.Append(lines[i]);}
-                var p=new Paragraph(new Run(code.ToString())){FontFamily=new FontFamily("Consolas, Malgun Gothic"),FontSize=size*.9,Background=dark?Brush(55,61,73):Brush(235,238,242),BorderBrush=dark?Brush(91,103,120):Brush(173,184,198),BorderThickness=new Thickness(1),Padding=new Thickness(14),Margin=new Thickness(0,6,0,12)};DecorateCode(p,fence.Groups[2].Value.Trim(),dark);Add(doc,p,lines,start,i,"code:"+fence.Groups[2].Value.Trim());continue;
+                if(!RichCopy&&MermaidOutput.IsMermaidInfo(fence.Groups[2].Value)){FrameworkElement mermaidPicture=MermaidOutput.CreatePicture(code.ToString(),family,size,dark);if(mermaidPicture!=null){mermaidPicture.HorizontalAlignment=HorizontalAlignment.Center;Add(doc,new BlockUIContainer(mermaidPicture){Margin=new Thickness(0,8,0,12)},lines,start,i,"mermaid");continue;}}
+                var p=new Paragraph(new Run(code.ToString())){FontFamily=new FontFamily("Consolas, Malgun Gothic"),FontSize=size*.9,Background=dark?Brush(55,61,73):Brush(235,238,242),BorderBrush=dark?Brush(91,103,120):Brush(173,184,198),BorderThickness=new Thickness(1),Padding=new Thickness(14),Margin=new Thickness(0,6,0,12)};DecorateCode(p,fence.Groups[2].Value.Trim(),dark);if(RichCopy){RichCopyLineBreaks(p);p.FontFamily=new FontFamily("Consolas");/* RTF writes the WPF fallback list as one font name Word cannot find */}Add(doc,p,lines,start,i,"code:"+fence.Groups[2].Value.Trim());continue;
             }
             // GitHub-allowed block HTML: tag-only containers keep their content (a centered
             // group, a quote, a details group, a pre body), single-line elements become their
             // heading/rule/list/description paragraph, and an unmatched opener draws nothing.
             InlineHtml.Tag htmlTag=HtmlTagLine(line);
             if(htmlTag!=null){
-                if(htmlTag.Name=="hr"&&!htmlTag.Closing){Add(doc,new BlockUIContainer(new System.Windows.Controls.Border {Height=1,Background=dark?Brush(110,118,130):Brush(220,222,226),Margin=new Thickness(0,10,0,10)}),lines,start,i,"htmlhr");continue;}
+                if(htmlTag.Name=="hr"&&!htmlTag.Closing){if(RichCopy){Add(doc,RichCopyRule(dark),lines,start,i,"htmlhr");continue;}Add(doc,new BlockUIContainer(new System.Windows.Controls.Border {Height=1,Background=dark?Brush(110,118,130):Brush(220,222,226),Margin=new Thickness(0,10,0,10)}),lines,start,i,"htmlhr");continue;}
                 if(htmlTag.Closing)continue;
                 int htmlClose=HtmlCloseIndex(lines,i+1,htmlTag.Name);
                 if(htmlClose<0)continue;
@@ -213,7 +240,7 @@ public static partial class Markdown {
                 }
                 continue;
             }
-            string definitionId,definitionBody;bool note;if(TryDefinition(line,out definitionId,out definitionBody,out note)){if(note){while(i+1<lines.Length&&(lines[i+1].StartsWith("    ")||lines[i+1].StartsWith("\t"))){definitionBody+="\n"+lines[++i].TrimStart();}string noteId=definitionId;var paragraph=Para(definitionBody,size,dark,file,imageLabel);paragraph.FontSize=size*.9;paragraph.Foreground=MutedInk(dark);var markerRun=new Run(NoteNumber(noteId)+"."){Tag="marker",FontSize=size*.75,BaselineAlignment=BaselineAlignment.Superscript,Foreground=AccentInk(dark)};var marker=new Hyperlink {Foreground=AccentInk(dark),ToolTip="[^"+noteId+"]"};marker.Inlines.Add(markerRun);marker.Resources["FootnoteRef"]=noteId;if(paragraph.Inlines.FirstInline==null)paragraph.Inlines.Add(marker);else paragraph.Inlines.InsertBefore(paragraph.Inlines.FirstInline,marker);paragraph.Inlines.InsertAfter(marker,new Run(" "){Tag="marker"});Add(doc,paragraph,lines,start,i,"footnote:"+noteId);}else{var label=new TextBlock {Text=line,FontSize=size*.9,Foreground=MutedInk(dark),TextWrapping=TextWrapping.NoWrap};var paragraph=new Paragraph {Margin=new Thickness(0),LineHeight=Double.NaN};paragraph.Inlines.Add(new InlineUIContainer(label));Add(doc,paragraph,lines,start,i,"reference");}continue;}/* #1: a 0.1px hidden paragraph collapsed the whole RichTextBox layout (extent 0) in the app view */
+            string definitionId,definitionBody;bool note;if(TryDefinition(line,out definitionId,out definitionBody,out note)){if(note){while(i+1<lines.Length&&(lines[i+1].StartsWith("    ")||lines[i+1].StartsWith("\t"))){definitionBody+="\n"+lines[++i].TrimStart();}string noteId=definitionId;var paragraph=Para(definitionBody,size,dark,file,imageLabel);paragraph.FontSize=size*.9;paragraph.Foreground=MutedInk(dark);var markerRun=new Run(NoteNumber(noteId)+"."){Tag="marker",FontSize=size*.75,BaselineAlignment=BaselineAlignment.Superscript,Foreground=AccentInk(dark)};var marker=new Hyperlink {Foreground=AccentInk(dark),ToolTip="[^"+noteId+"]"};marker.Inlines.Add(markerRun);marker.Resources["FootnoteRef"]=noteId;if(paragraph.Inlines.FirstInline==null)paragraph.Inlines.Add(marker);else paragraph.Inlines.InsertBefore(paragraph.Inlines.FirstInline,marker);paragraph.Inlines.InsertAfter(marker,new Run(" "){Tag="marker"});Add(doc,paragraph,lines,start,i,"footnote:"+noteId);}else{var label=new TextBlock {Text=line,FontSize=size*.9,Foreground=MutedInk(dark),TextWrapping=TextWrapping.NoWrap};var paragraph=new Paragraph {Margin=new Thickness(0),LineHeight=Double.NaN};if(RichCopy)paragraph.Inlines.Add(new Run(line){FontSize=size*.9,Foreground=MutedInk(dark)});else paragraph.Inlines.Add(new InlineUIContainer(label));Add(doc,paragraph,lines,start,i,"reference");}continue;}/* #1: a 0.1px hidden paragraph collapsed the whole RichTextBox layout (extent 0) in the app view */
             if(i+1<lines.Length&&MarkdownPlainText.TableStart(line,lines[i+1])) {
                 var table=new Table {CellSpacing=0,Margin=new Thickness(0,6,0,12)};var group=new TableRowGroup();table.RowGroups.Add(group);
                 string[] headers=Cells(line);for(int c=0;c<headers.Length;c++)table.Columns.Add(new TableColumn());
@@ -230,13 +257,14 @@ public static partial class Markdown {
             // live preview (MarkdownLivePreview.SetextUnderlineLevel) and the TXT converter. A
             // single "-" is a list marker being typed, not an underline.
             if(i+1<lines.Length&&!Regex.IsMatch(line,@"^[ \t]*(?:[-+*]|\d+[.)])[ \t]")&&Regex.IsMatch(lines[i+1],@"^[ \t]{0,3}(=+|-{2,})[ \t]*$")){var p=Para(line,size,dark,file,imageLabel);int level=lines[i+1].Trim()[0]=='='?1:2;p.FontSize=size*(level==1?2:1.6);p.FontWeight=FontWeights.Bold;p.LineHeight=Double.NaN;i++;Add(doc,p,lines,start,i,"h:"+level);continue;}
-            if(Regex.IsMatch(line,@"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")){Add(doc,new BlockUIContainer(new System.Windows.Controls.Border {Height=1,Background=dark?Brush(110,118,130):Brush(220,222,226),Margin=new Thickness(0,10,0,10)}),lines,start,i,"rule");continue;}
+            if(Regex.IsMatch(line,@"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")){if(RichCopy){Add(doc,RichCopyRule(dark),lines,start,i,"rule");continue;}Add(doc,new BlockUIContainer(new System.Windows.Controls.Border {Height=1,Background=dark?Brush(110,118,130):Brush(220,222,226),Margin=new Thickness(0,10,0,10)}),lines,start,i,"rule");continue;}
             var quote=Regex.Match(line,@"^[ \t]*>[ \t]?(.*)$");
             if(quote.Success){var body=new StringBuilder(quote.Groups[1].Value);var lazy=new HtmlExporter.LazyQuote();lazy.Line(quote.Groups[1].Value);while(i+1<lines.Length){var next=Regex.Match(lines[i+1],@"^[ \t]*>[ \t]?(.*)$");if(next.Success){i++;body.Append('\n').Append(next.Groups[1].Value);lazy.Line(next.Groups[1].Value);}else if(lazy.Continues(lines,i+1)){i++;body.Append('\n').Append(lines[i].TrimStart(' ','\t'));}else break;}var section=QuoteSection(body.ToString(),size,family,foreground,dark,file,imageLabel);Add(doc,section,lines,start,i,"quote");continue;}
             var list=Regex.Match(line,@"^([ \t]*)(?:([-+*])|(\d+)[.)])[ \t]+(.*)$");
             if(list.Success){string body=list.Groups[4].Value;string prefix=list.Groups[1].Value+(list.Groups[3].Success?list.Groups[3].Value+". ":"- ");string bullet=list.Groups[3].Success?prefix:"•  ";var check=Regex.Match(body,@"^\[([ xX])\][ \t]*(.*)$");bool task=check.Success;if(check.Success){bullet=check.Groups[1].Value==" "?"☐  ":"☑  ";prefix+="["+(check.Groups[1].Value==" "?" ":"x")+"] ";body=check.Groups[2].Value;}int itemHeadingLevel;string itemHeadingBody;if(MarkdownPlainText.AtxHeading(body,out itemHeadingLevel,out itemHeadingBody)){var itemParagraph=Para(itemHeadingBody,size,dark,file,imageLabel);itemParagraph.FontSize=size*HeadingScale(itemHeadingLevel);itemParagraph.FontWeight=FontWeights.Bold;itemParagraph.LineHeight=Double.NaN;itemParagraph.Margin=new Thickness(0,itemHeadingLevel==1?8:18,0,10);if(task)InsertFirst(itemParagraph,TaskBox(itemParagraph,check.Groups[1].Value!=" "));Add(doc,itemParagraph,lines,start,i,"list:"+prefix);continue;}var itemQuote=Regex.Match(body,@"^>[ \t]?(.*)$");if(itemQuote.Success){var itemSection=QuoteSection(itemQuote.Groups[1].Value,size,family,foreground,dark,file,imageLabel);if(task){var itemFirst=itemSection.Blocks.FirstBlock as Paragraph;if(itemFirst!=null)InsertFirst(itemFirst,TaskBox(itemFirst,check.Groups[1].Value!=" ",QuoteTaskBoxWidth));}Add(doc,itemSection,lines,start,i,"listquote:"+prefix);continue;}var p=Para(body,size,dark,file,imageLabel);Inline marker;if(check.Success)marker=TaskBox(p,check.Groups[1].Value!=" ");else marker=new Run(bullet){Tag="marker"};InsertFirst(p,marker);p.Margin=new Thickness(12+Math.Min(100,list.Groups[1].Length*5),2,0,4);Add(doc,p,lines,start,i,"list:"+prefix);continue;}
             Add(doc,Para(line,size,dark,file,imageLabel),lines,start,i,"");
         }Stage("nest-start",lines.Length);NestLists(doc,new ParseContext {Size=size,Family=family,Foreground=foreground,Dark=dark,File=file,ImageLabel=imageLabel});Stage("parse-complete",lines.Length);return doc;
+        }finally{MermaidOutput.EndDocument();}
     }
     // Printing only: a list's marker slot sits in its margin, so list content starts at the item
     // text x and FlowDocument draws the marker left of it (the live projection's own rule).
@@ -403,7 +431,7 @@ public static partial class Markdown {
     const double QuoteTaskBoxWidth=16;
     const double QuoteTaskBoxGap=6;
     static Inline TaskBox(Paragraph paragraph,bool done){return TaskBox(paragraph,done,0);}
-    static Inline TaskBox(Paragraph paragraph,bool done,double width){var box=new CheckBox {IsChecked=done,VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(0,0,QuoteTaskBoxGap,0),ToolTip=new ToolTip {Content="체크/해제 | 저장 필요",Padding=new Thickness(6,3,6,3),MinHeight=0,Height=Double.NaN}};if(width>0)box.Width=width;var marker=new InlineUIContainer(box){Tag="marker",BaselineAlignment=BaselineAlignment.Center};box.ToolTipOpening+=delegate{var owner=Window.GetWindow(box) as MainWindow;if(owner!=null)((ToolTip)box.ToolTip).Content=new TextBlock {Text=owner.TaskTooltip(),FontSize=12,LineHeight=Double.NaN,LineStackingStrategy=LineStackingStrategy.MaxHeight,Margin=new Thickness(0)};};return marker;}
+    static Inline TaskBox(Paragraph paragraph,bool done,double width){if(RichCopy)return new Run(done?"☑ ":"☐ "){Tag="marker"};var box=new CheckBox {IsChecked=done,VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(0,0,QuoteTaskBoxGap,0),ToolTip=new ToolTip {Content="체크/해제 | 저장 필요",Padding=new Thickness(6,3,6,3),MinHeight=0,Height=Double.NaN}};if(width>0)box.Width=width;var marker=new InlineUIContainer(box){Tag="marker",BaselineAlignment=BaselineAlignment.Center};box.ToolTipOpening+=delegate{var owner=Window.GetWindow(box) as MainWindow;if(owner!=null)((ToolTip)box.ToolTip).Content=new TextBlock {Text=owner.TaskTooltip(),FontSize=12,LineHeight=Double.NaN,LineStackingStrategy=LineStackingStrategy.MaxHeight,Margin=new Thickness(0)};};return marker;}
     static void InsertFirst(Paragraph paragraph,Inline inline){if(paragraph.Inlines.FirstInline==null)paragraph.Inlines.Add(inline);else paragraph.Inlines.InsertBefore(paragraph.Inlines.FirstInline,inline);}
     // A GitHub alert / Obsidian callout is a quote whose first line is "[!TYPE]" (MarkdownPlainText.AlertMarker):
     // the section gets a 4 px bar in the type's colour and a title paragraph (icon plus the text after the
@@ -432,7 +460,7 @@ public static partial class Markdown {
         Geometry dots=AlertIcons.Dots(kind);
         if(dots!=null)canvas.Children.Add(new System.Windows.Shapes.Path {Data=dots,Fill=color});
         var box=new Viewbox {Width=Math.Round(size*.85),Height=Math.Round(size*.85),Child=canvas,Margin=new Thickness(0,0,6,0)};
-        InsertFirst(title,new InlineUIContainer(box) {Tag="marker",BaselineAlignment=BaselineAlignment.Center});
+        if(!RichCopy)InsertFirst(title,new InlineUIContainer(box) {Tag="marker",BaselineAlignment=BaselineAlignment.Center}); // the icon has no text form; the RTF writer dropped it anyway
         MarkdownWriter.Track(title,"alert:"+source,source);
         return title;
     }
@@ -480,6 +508,7 @@ public static partial class Markdown {
     static bool AddMathPicture(InlineCollection dest,string value,int at,int open,int close,double size,bool dark){
         string source=RestoreCodeEscapes(value.Substring(open+1,close-open-1));
         if(!MathRender.Check(source))return false;
+        if(RichCopy){if(open>at)dest.Add(new Run(RestoreEscapes(MarkdownPlainText.DecodeEntities(value.Substring(at,open-at)))));dest.Add(new Run(RestoreCodeEscapes(value.Substring(open,close-open+1))){Tag="math"});return true;}
         double ascent,descent;
         FrameworkElement picture=MathRender.CreatePicture(source,false,size,MathInk(dark),referenceContext==null?"Malgun Gothic":referenceContext.Family,out ascent,out descent);
         if(picture==null)return false;
@@ -632,6 +661,7 @@ public static partial class Markdown {
         if((style&MarkdownLivePreview.Style.Strike)!=0)StrikeRuns(span.Inlines);
         if(name=="q"){if(span.Inlines.FirstInline==null)span.Inlines.Add(new Run("“"));else span.Inlines.InsertBefore(span.Inlines.FirstInline,new Run("“"));span.Inlines.Add(new Run("”"));}
         if(name=="kbd"){
+            if(RichCopy){span.FontFamily=new FontFamily("Consolas, Malgun Gothic");dest.Add(span);return;}
             var text=new TextBlock{FontSize=size,Foreground=dark?Brushes.White:Brush(32,33,36)};text.Inlines.Add(span);
             var border=new Border{Child=text,BorderBrush=dark?Brush(125,135,150):Brush(186,193,202),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(3),Background=span.Background,Padding=new Thickness(1,0,1,0)};
             dest.Add(new InlineUIContainer(border){Tag="html:kbd"});return;
@@ -881,6 +911,11 @@ public static class Program {
         if(args.Length==2&&args[0]=="--focusmode-probe"){IsSelfTest=true;return FocusModeProbe.Run(args[1]);}
         if(args.Length==2&&args[0]=="--search-regex-probe"){IsSelfTest=true;return SearchRegexProbe.Run(args[1]);}
         if(args.Length==2&&args[0]=="--math-probe"){IsSelfTest=true;return MathProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--mermaid-engine-probe"){IsSelfTest=true;return MermaidEngineProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--svg-wpf-probe"){IsSelfTest=true;return SvgToWpfProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--mermaid-output-probe"){IsSelfTest=true;return MermaidOutputProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--mermaid-live-probe"){IsSelfTest=true;return MermaidLiveProbe.Run(args[1]);}
+        if(args.Length==2&&args[0]=="--mermaid-undo-probe"){IsSelfTest=true;return MainWindow.VerifyMermaidUndo(args[1]);}
         if(args.Length==2&&args[0]=="--md2txt-probe"){IsSelfTest=true;return MainWindow.VerifyMarkdownPlainText(args[1]);}
         if(args.Length==2&&args[0]=="--commands-probe"){IsSelfTest=true;return MainWindow.VerifyMarkdownCommands(args[1]);}
         if(args.Length==2&&args[0]=="--structural-probe"){IsSelfTest=true;return MainWindow.VerifyStructuralInput(args[1]);}
