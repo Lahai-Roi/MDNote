@@ -85,6 +85,7 @@ internal static class LiveLayoutProbeRunner {
             CheckStructuralEdits();
             CheckTableShrink(directory);
             CheckSetextHeadings();
+            CheckDashUnderText();
             CheckFontTags();
         } catch (Exception ex) { Check("exception", false, ex.ToString()); }
         report.Append("TOTAL PASS=").Append(passes).Append(" FAIL=").Append(failures).Append('\n');
@@ -353,6 +354,199 @@ internal static class LiveLayoutProbeRunner {
             editor.TextArea.Caret.Line=7; Pump(editor);
             Check("setext underline folds again",!OwnVisualLine(view,2),"caret back on the body line");
         } finally { foreach(Window window in new Window[] {basicWindow,liveWindow}) if(window!=null) window.Close(); }
+    }
+
+    // Issue #4: drive TextEntering/TextEntered, not Document.Insert. Both views use the same
+    // parser, and the two-dash exemption is temporary: the saved/loaded Markdown stays setext.
+    static void CheckDashUnderText() {
+        foreach (bool basic in new bool[] {true,false}) foreach (string newline in new string[] {"\n","\r\n"}) {
+            string key="dash-under-text "+(basic?"basic ":"live ")+(newline=="\n"?"LF ":"CRLF ");
+            var editor=new SourceEditor {FontFamily=new FontFamily("Malgun Gothic"),FontSize=16,WordWrap=true};
+            var session=MarkdownLivePreview.Attach(editor,DashSettings(basic));
+            Window window=Host(editor,700);
+            try {
+                window.Show();
+                // a: the second dash, not the third, is the first possible setext promotion.
+                // Text input "\n" is rewritten to the editor's own newline, so the fixture holds it.
+                DashFixture(editor,"Title"+newline);
+                for (int i=1;i<=2;i++) {
+                    editor.TextArea.PerformTextInput("-");
+                    Check(key+"a immediate paragraph after dash "+i,DashParagraph(editor,session,1),editor.Text);
+                    Pump(editor);
+                    Check(key+"a paragraph after dash "+i,DashParagraph(editor,session,1),editor.Text);
+                }
+                Check(key+"a two dashes kept",editor.Text=="Title"+newline+"--",editor.Text);
+                editor.Select(editor.Document.TextLength-1,0);Pump(editor);
+                Check(key+"a same-line caret keeps exemption",DashParagraph(editor,session,1),editor.Text);
+                editor.Select(0,0);Pump(editor);
+                Check(key+"a leaving line restores setext",session.Info(editor.Document.GetLineByNumber(1)).Heading==2,editor.Text);
+
+                // b: no intermediate heading on any input; rewriting the third is one undo step.
+                DashFixture(editor,"Title"+newline);
+                bool headingSeen=false;
+                EventHandler<DocumentChangeEventArgs> observe=delegate {
+                    if (!DashParagraph(editor,session,1)) headingSeen=true;
+                };
+                editor.Document.Changed+=observe;
+                try {
+                    for (int i=1;i<=3;i++) {
+                        editor.TextArea.PerformTextInput("-");Pump(editor);
+                        Check(key+"b paragraph after dash "+i,DashParagraph(editor,session,1),editor.Text);
+                    }
+                } finally { editor.Document.Changed-=observe; }
+                var rule=session.Info(editor.Document.GetLineByNumber(2));
+                Check(key+"b three dashes become rule",editor.Text=="Title"+newline+"***"&&rule.Rule&&rule.SetextUnderline==0&&!headingSeen,
+                    editor.Text+" rule="+rule.Rule+" intermediateHeading="+headingSeen);
+                headingSeen=false;editor.Document.Changed+=observe;
+                try {
+                    // MDNote's undo is DocumentHistory.ApplySource (MainWindow), not AvalonEdit's
+                    // stack: replay what it writes back, with its Applying flag. Real undo: VM.
+                    DashHistory(editor,2,"--");
+                    Check(key+"b undo immediately rearms paragraph",editor.Text=="Title"+newline+"--"&&DashParagraph(editor,session,1),editor.Text);
+                    Pump(editor);
+                    Check(key+"b one undo returns two dashes without heading",editor.Text=="Title"+newline+"--"&&DashParagraph(editor,session,1),editor.Text);
+                    DashHistory(editor,2,"***");Pump(editor);
+                    Check(key+"b redo restores rule",editor.Text=="Title"+newline+"***"&&DashParagraph(editor,session,1)&&session.Info(editor.Document.GetLineByNumber(2)).Rule,editor.Text);
+                    Check(key+"b undo redo never exposes intermediate heading",!headingSeen,"intermediateHeading="+headingSeen);
+                } finally { editor.Document.Changed-=observe; }
+
+                // c: no dispatcher/layout pass between these keys; the fourth/fifth must be stars.
+                DashFixture(editor,"Title"+newline);
+                DashKeys(editor,"-----");Pump(editor);
+                Check(key+"c five fast dashes",editor.Text=="Title"+newline+"*****"&&DashParagraph(editor,session,1)&&session.Info(editor.Document.GetLineByNumber(2)).Rule,editor.Text);
+                editor.Select(editor.Document.GetLineByNumber(2).Offset+2,0);
+                DashKeys(editor,"-");Pump(editor);
+                Check(key+"c dash inside produced rule is a star",editor.Text=="Title"+newline+"******",editor.Text);
+                DashFixture(editor,"Title"+newline);
+                DashKeys(editor,"--- W");Pump(editor);
+                Check(key+"phrase restores dashes with text",editor.Text=="Title"+newline+"--- W"&&DashParagraph(editor,session,1),editor.Text);
+                DashFixture(editor,"Title"+newline);
+                DashKeys(editor,"-----  W");Pump(editor);
+                Check(key+"phrase keeps extended run and spaces",editor.Text=="Title"+newline+"-----  W",editor.Text);
+                DashFixture(editor,"Title"+newline);
+                DashKeys(editor,"--- ");Pump(editor);
+                editor.Select(0,0);editor.Select(editor.Document.TextLength,0);
+                DashKeys(editor,"W");Pump(editor);
+                Check(key+"phrase caret departure drops tracking",editor.Text=="Title"+newline+"*** W",editor.Text);
+
+                // d: no closer exists when the first two closing dashes are entered.
+                DashFixture(editor,"---"+newline+"key: v"+newline);
+                DashKeys(editor,"---");Pump(editor);
+                Check(key+"d YAML closer stays dashes",editor.Text=="---"+newline+"key: v"+newline+"---"&&session.IsFrontMatter(3)&&session.FrontMatterEnd==3,editor.Text);
+                // e/f/g/h: table delimiter, list, loaded file and the original opposite-order fix.
+                DashFixture(editor,"a | b"+newline);
+                // Only the dash-only prefix of a hand-typed delimiter is ours; once "|" makes the
+                // pair a table, the table input rules own the rest of the row.
+                DashKeys(editor,"---");Pump(editor);
+                Check(key+"e table delimiter stays dashes",editor.Text=="a | b"+newline+"---",editor.Text);
+                DashFixture(editor,"- a"+newline);
+                DashKeys(editor,"---");Pump(editor);
+                Check(key+"f list stays dashes",editor.Text=="- a"+newline+"---",editor.Text);
+                DashFixture(editor,"- a"+newline);
+                foreach (char c in "  ---") {
+                    editor.TextArea.PerformTextInput(c.ToString());Pump(editor);
+                    Check(key+"container item marker never becomes heading after "+editor.Document.TextLength,DashParagraph(editor,session,1),editor.Text);
+                }
+                // SetextText rejects the list marker line itself; indentation must not invent
+                // an item heading which this parser would never make in the first place.
+                Check(key+"container item marker follows parser",editor.Text=="- a"+newline+"  ---",editor.Text);
+                DashFixture(editor,"- a"+newline+"  body"+newline);
+                foreach (char c in "  ---") {
+                    editor.TextArea.PerformTextInput(c.ToString());Pump(editor);
+                    Check(key+"container item paragraph never becomes heading after "+editor.Document.TextLength,DashParagraph(editor,session,2),editor.Text);
+                }
+                Check(key+"container item paragraph becomes rule",editor.Text=="- a"+newline+"  body"+newline+"  ***"&&session.Info(editor.Document.GetLineByNumber(3)).Rule,editor.Text);
+                DashFixture(editor,"Title"+newline+"---");
+                var loaded=session.Info(editor.Document.GetLineByNumber(1));
+                Check(key+"g loaded dashes remain setext",loaded.Setext&&loaded.Heading==2&&editor.Text=="Title"+newline+"---",editor.Text);
+                DashFixture(editor,newline+"---",0);
+                DashKeys(editor,"Title");Pump(editor);
+                Check(key+"h text above existing rule",editor.Text=="Title"+newline+"***"&&DashParagraph(editor,session,1)&&session.Info(editor.Document.GetLineByNumber(2)).Rule,editor.Text);
+
+                // Context exclusions use the parser's own shapes, including an already-used
+                // equals underline (the before.Setext argument matters for that last case).
+                string[] prefixes={"```"+newline+"body"+newline,"```math"+newline+"x"+newline,
+                    "$$"+newline+"x"+newline,newline,"> quote"+newline,"# heading"+newline,
+                    "***"+newline,"[id]: target"+newline,"Title"+newline+"==="+newline,
+                    "---"+newline+"key: v"+newline};
+                string[] suffixes={"","",newline+"$$","","","","","","",newline+"---"};
+                string[] names={"fenced code","fenced math","display math","blank above","quote above","ATX above",
+                    "rule above","definition above","equals underline above","inside YAML"};
+                for (int i=0;i<prefixes.Length;i++) {
+                    DashFixture(editor,prefixes[i]+suffixes[i],prefixes[i].Length);
+                    DashKeys(editor,"---");Pump(editor);
+                    Check(key+"guard "+names[i],editor.Text==prefixes[i]+"---"+suffixes[i],editor.Text);
+                }
+                DashFixture(editor,"Title"+newline);
+                DashKeys(editor,"===");Pump(editor);
+                Check(key+"guard equals input untouched",editor.Text=="Title"+newline+"==="&&session.Info(editor.Document.GetLineByNumber(1)).Heading==1,editor.Text);
+                DashFixture(editor,"Title"+newline);
+                editor.TextArea.PerformTextInput("---");Pump(editor);
+                Check(key+"guard multi-character input untouched",editor.Text=="Title"+newline+"---"&&session.Info(editor.Document.GetLineByNumber(1)).Setext,editor.Text);
+                // The basic view folds a loaded underline (its selection snaps to the hidden run),
+                // so the raw selection case is the live view's.
+                if (!basic) {
+                    DashFixture(editor,"Title"+newline+"---");
+                    editor.Select(editor.Document.TextLength-1,1);DashKeys(editor,"-");Pump(editor);
+                    Check(key+"guard selected replacement untouched",editor.Text=="Title"+newline+"---",editor.Text);
+                }
+                DashFixture(editor,"Title"+newline);
+                session.Options.Busy=true;
+                try { DashKeys(editor,"---"); } finally { session.Options.Busy=false; }
+                Pump(editor);
+                Check(key+"guard busy untouched",editor.Text=="Title"+newline+"---",editor.Text);
+                DashFixture(editor,"Title"+newline);
+                session.Options.ReadOnly=true;
+                try { DashKeys(editor,"---"); } finally { session.Options.ReadOnly=false; }
+                Pump(editor);
+                Check(key+"guard read-only session untouched",editor.Text=="Title"+newline+"---",editor.Text);
+
+                // Spaces/tabs within the run and its original caret offset survive the rewrite.
+                DashFixture(editor,"Title"+newline);
+                DashKeys(editor,"  ---");Pump(editor);
+                Check(key+"spaces and caret preserved",editor.Text=="Title"+newline+"  ***"&&editor.CaretOffset==editor.Document.TextLength,editor.Text+" caret="+editor.CaretOffset);
+                DashFixture(editor,"Title"+newline+"    --");
+                DashKeys(editor,"-");Pump(editor);
+                Check(key+"guard four leading spaces",editor.Text=="Title"+newline+"    ---",editor.Text);
+
+                DashFixture(editor,"Title"+newline);DashKeys(editor,"--");Pump(editor);
+                DashKeys(editor," ");Pump(editor);
+                Check(key+"other edit drops exemption",session.Info(editor.Document.GetLineByNumber(1)).Setext,editor.Text);
+                DashFixture(editor,"Title"+newline);DashKeys(editor,"--");Pump(editor);
+                session.Update(DashSettings(!basic));Pump(editor);
+                Check(key+"mode switch drops exemption",session.Info(editor.Document.GetLineByNumber(1)).Setext,editor.Text);
+                session.Update(DashSettings(basic));
+                DashFixture(editor,"Title"+newline);DashKeys(editor,"--");Pump(editor);
+                var oldLine=editor.Document.GetLineByNumber(2);
+                session.Dispose();
+                Check(key+"dispose drops exemption",!session.DashTyping(oldLine),editor.Text);
+                session=MarkdownLivePreview.Attach(editor,DashSettings(basic));Pump(editor);
+                Check(key+"reattach reads actual setext",session.Info(editor.Document.GetLineByNumber(1)).Setext,editor.Text);
+                DashFixture(editor,"Title"+newline);DashKeys(editor,"--");Pump(editor);
+                oldLine=editor.Document.GetLineByNumber(2);
+                editor.Document=new TextDocument("Other"+newline+"---");
+                Check(key+"document swap disposes old exemption",session.IsDisposed&&!session.DashTyping(oldLine),"disposed="+session.IsDisposed);
+            } finally { session.Dispose();window.Close(); }
+        }
+    }
+    static MarkdownLivePreview.Settings DashSettings(bool basic) {
+        return new MarkdownLivePreview.Settings {FontSize=16,Family="Malgun Gothic",LinePercent=150,WordWrap=true,HideMarkers=basic};
+    }
+    static void DashFixture(SourceEditor editor,string text) { DashFixture(editor,text,text.Length); }
+    static void DashFixture(SourceEditor editor,string text,int offset) {
+        editor.Text=text;editor.Select(offset,0);editor.Document.UndoStack.ClearAll();Pump(editor);
+    }
+    static void DashHistory(SourceEditor editor,int number,string text) {
+        var line=editor.Document.GetLineByNumber(number);
+        DocumentHistory.Applying=true;
+        try { editor.Document.Replace(line.Offset,line.Length,text); } finally { DocumentHistory.Applying=false; }
+    }
+    static void DashKeys(SourceEditor editor,string keys) {
+        for (int i=0;i<keys.Length;i++) editor.TextArea.PerformTextInput(keys[i].ToString());
+    }
+    static bool DashParagraph(SourceEditor editor,MarkdownLivePreview.Session session,int number) {
+        var info=session.Info(editor.Document.GetLineByNumber(number));
+        return info.Heading==0&&!info.Setext;
     }
 
     // <font color=...> and <span style=...> share the basic view's rule (MDNote.cs:83,89-95):

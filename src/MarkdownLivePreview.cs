@@ -1555,6 +1555,9 @@ internal static partial class MarkdownLivePreview {
         // Setext: this line is a heading because the next line underlines it; the
         // underline line itself carries SetextUnderline (1/2) and stays folded.
         internal bool Setext;
+        // The parser reached its setext promotion gate and accepted this paragraph shape.
+        // Input rules reuse this answer, including all earlier code/math/HTML/container exits.
+        internal bool SetextCandidate;
         internal int SetextUnderline;
         // A "[id]: url" reference definition line: muted source, and in the no-reveal mode
         // folded to nothing unless the caret is on it (Session.HideReference).
@@ -3149,6 +3152,19 @@ internal static partial class MarkdownLivePreview {
         bool setextGapUpdate;
         string setextGapNewline;
         TextDocument setextGapDocument;
+        // Issue #4: the second typed dash must not promote the paragraph above it while the
+        // third is on its way. Only this document/line/version is exempt from setext lookahead.
+        TextDocument dashTypingDocument, dashRuleDocument;
+        ICSharpCode.AvalonEdit.Document.ITextSourceVersion dashTypingVersion;
+        int dashTypingLine, dashTypingCount, dashRuleOffset, dashRuleLine;
+        bool dashRuleUpdate, dashRuleInput, dashRuleChanging, dashRuleReplacing, dashUndoRule;
+        // A produced star rule can still become a dash phrase ("--- Wait"). Spaces and more
+        // typed dashes extend this exact line/version; a real text character restores the dashes.
+        TextDocument ruleTypingDocument;
+        ICSharpCode.AvalonEdit.Document.ITextSourceVersion ruleTypingVersion;
+        int ruleTypingLine, ruleTypingOffset;
+        string ruleTypingText;
+        bool ruleTypingInput, ruleTypingChanging;
         // A space typed on the outer edge of a hidden closing run stays OUTSIDE the pair (a space
         // right inside a closer is not right-flanking, so the pair would turn into literal text).
         // The next non-space input at that same spot takes the whitespace back inside with its own
@@ -3288,11 +3304,14 @@ internal static partial class MarkdownLivePreview {
             Editor.TextArea.PreviewMouseLeftButtonDown += MermaidMouseDown;
             Editor.TextArea.PreviewMouseLeftButtonDown += FenceRowMouseDown;
             Editor.TextArea.PreviewMouseLeftButtonDown += MathEndMouseDown;
+            Editor.TextArea.TextEntering += RuleTypingEntering;
+            Editor.TextArea.TextEntering += DashRuleEntering;
             Editor.TextArea.TextEntering += SetextRuleEntering;
             Editor.TextArea.TextEntering += FenceEnterEntering;
             Editor.PreviewKeyDown += FenceEnterKeyDown;
             Editor.TextArea.TextEntered += TableGapEntered;
             Editor.TextArea.TextEntered += HiddenCloseSpaceEntered;
+            Editor.TextArea.TextEntered += DashRuleEntered;
             Editor.TextArea.TextEntered += SetextRuleEntered;
             Editor.CaretGuardChangedForTable = CaretGuardChanged;
             Editor.CellClamp = ClampCommitOffset;
@@ -4108,6 +4127,7 @@ internal static partial class MarkdownLivePreview {
         internal void Update(Settings next) {
             if (next == null) throw new ArgumentNullException("next");
             if (disposed) return;
+            if (next.HideMarkers != markersWereHidden || next.ReadOnly != Options.ReadOnly) { ClearDashTyping();ClearRuleTyping(); }
             string nextImageLabel = ImageLabelOf(next);
             // The host calls this after every layout/mode change; identical settings must not
             // drop table widths or line caches (that would flash tables on each mode switch).
@@ -4185,6 +4205,8 @@ internal static partial class MarkdownLivePreview {
         }
         void ActiveChanged(object sender, EventArgs e) {
             if (disposed || Editor.Document != Document) return;
+            if (dashTypingDocument != null && Editor.TextArea.Caret.Line != dashTypingLine) ClearDashTyping();
+            if (ruleTypingDocument != null && Editor.TextArea.Caret.Line != ruleTypingLine) ClearRuleTyping();
             if (frozen) {
                 // A missed release must not leave the frozen reveal set behind. Only a
                 // real press unlocks here; BeginPress from tests has no pressed button.
@@ -7666,6 +7688,142 @@ internal static partial class MarkdownLivePreview {
             if (previous!=null && previous.DelimiterLength>0) return Document.GetText(previous.EndOffset,previous.DelimiterLength);
             return "\n";
         }
+        void RuleTypingEntering(object sender,TextCompositionEventArgs e) {
+            if (ruleTypingDocument==null) return;
+            ruleTypingInput=false;
+            if (disposed || e.Handled || Options.Busy || Options.ReadOnly || Editor.IsReadOnly || Editor.ImeBusy || compositionLive ||
+                Editor.Document!=Document || !Editor.TextArea.Selection.IsEmpty || e.Text==null || e.Text.Length!=1 ||
+                !Object.ReferenceEquals(ruleTypingDocument,Document) || !Object.ReferenceEquals(ruleTypingVersion,Document.Version)) { ClearRuleTyping();return; }
+            int offset=Editor.TextArea.Caret.Offset;
+            DocumentLine line=Document.GetLineByOffset(offset);
+            char marker;int count;
+            if (line.LineNumber!=ruleTypingLine || !DashRuleShape(line,out marker,out count) || marker!='*' || count<3) { ClearRuleTyping();return; }
+            if (e.Text==" " || e.Text=="\t" || e.Text=="-") {
+                ruleTypingInput=true;ruleTypingOffset=offset;ruleTypingText=e.Text=="-" ? "*" : e.Text;
+                // A later handler may consume this input and never raise TextEntered.
+                Editor.Dispatcher.BeginInvoke(DispatcherPriority.Input,new Action(delegate { ruleTypingInput=false; }));
+                return;
+            }
+            if (Char.IsWhiteSpace(e.Text[0])) { ClearRuleTyping();return; }
+            string text=Document.GetText(line.Offset,line.Length).Replace('*','-');
+            text=text.Insert(offset-line.Offset,e.Text);
+            ClearRuleTyping();
+            Document.BeginUpdate();
+            try { Document.Replace(line.Offset,line.Length,text);Editor.Select(offset+e.Text.Length,0);e.Handled=true; }
+            finally { Document.EndUpdate(); }
+        }
+        void ClearRuleTyping() {
+            ruleTypingDocument=null;ruleTypingVersion=null;ruleTypingLine=ruleTypingOffset=0;
+            ruleTypingText=null;ruleTypingInput=ruleTypingChanging=false;
+        }
+        // Only single, plain dash input participates. Paste/load and every other character leave
+        // the file's setext meaning alone. The two input events share one undo group, like Bug A.
+        void DashRuleEntering(object sender,TextCompositionEventArgs e) {
+            if (e.Text!="-") return;
+            if (disposed || e.Handled) return;
+            if (dashRuleUpdate) CloseDashRule();
+            if (Options.Busy || Options.ReadOnly || Editor.IsReadOnly || Editor.ImeBusy || compositionLive) return;
+            if (Editor.Document!=Document || !Editor.TextArea.Selection.IsEmpty) return;
+            int offset=Editor.TextArea.Caret.Offset;
+            if (offset<0 || offset>Document.TextLength) return;
+            DocumentLine line=Document.GetLineByOffset(offset);
+            int count;char marker;
+            if (!DashRuleShape(line,out marker,out count) || (marker=='-' ? count<1 : count<3)) return;
+            if (!DashRuleParagraph(line)) return;
+            dashRuleDocument=Document;dashRuleLine=line.LineNumber;dashRuleOffset=offset;
+            dashRuleUpdate=true;dashRuleInput=true;
+            if (marker=='-') {
+                dashTypingDocument=Document;dashTypingLine=line.LineNumber;dashTypingCount=count+1;dashTypingVersion=Document.Version;
+                InvalidateDashPair(line.LineNumber);
+            }
+            Document.BeginUpdate();
+            Editor.Dispatcher.BeginInvoke(DispatcherPriority.Input,new Action(CloseDashRule));
+            if (marker=='*') {
+                // Continue the rule we produced, even when several dashes arrive before a redraw.
+                // Inserting the replacement here consumes this input; TextEntered will not fire.
+                dashRuleInput=false;
+                try { Document.Insert(offset,"*");Editor.Select(offset+1,0);e.Handled=true; }
+                finally { CloseDashRule(); }
+            }
+        }
+        bool DashRuleShape(DocumentLine line,out char marker,out int count) {
+            marker='\0';count=0;
+            return line.Length<=ParseLimit && DashRuleShape(Document.GetText(line.Offset,line.Length),out marker,out count);
+        }
+        static bool DashRuleShape(string text,out char marker,out int count) {
+            marker='\0';count=0;
+            int lead=0;
+            while (lead<text.Length && text[lead]==' ') lead++;
+            if (lead>3) return false;
+            for (int i=lead;i<text.Length;i++) {
+                char c=text[i];
+                if (c==' ' || c=='\t') { if (marker=='\0' && c=='\t') return false;continue; }
+                if (c!='-' && c!='*') return false;
+                if (marker=='\0') marker=c;
+                if (c!=marker) return false;
+                count++;
+            }
+            return count>0;
+        }
+        bool DashRuleParagraph(DocumentLine line) {
+            DocumentLine previous=line.PreviousLine;
+            if (previous==null || previous.Length>ParseLimit) return false;
+            if (IsFrontMatter(line.LineNumber) || IsFrontMatter(previous.LineNumber)) return false;
+            // An opener with no closer yet has no recognised range, but typing its closing
+            // dash line must still be YAML, not a rule under the last key/value paragraph.
+            if (FrontMatterEnd==0 && IsFrontMatterOpener(Document)) return false;
+            LineInfo current=Info(line),above=Info(previous);
+            if (current.Code || current.Before.Fence!='\0' || current.Before.Math>0 || current.MathRemaining>0) return false;
+            return above.SetextCandidate && !above.Table && !HasTablePipe(above.Text);
+        }
+        void DashRuleEntered(object sender,TextCompositionEventArgs e) {
+            if (!dashRuleUpdate) return;
+            try {
+                if (e.Text!="-" || dashRuleInput || !Object.ReferenceEquals(Document,dashRuleDocument) || Editor.Document!=Document) return;
+                int at=Editor.TextArea.Caret.Offset;
+                if (at<0 || at>Document.TextLength) return;
+                DocumentLine line=Document.GetLineByOffset(at);
+                int count;char marker;
+                if (line.LineNumber!=dashRuleLine || !DashRuleShape(line,out marker,out count) || marker!='-' || !DashRuleParagraph(line)) return;
+                if (count<3) return;
+                string rule=Document.GetText(line.Offset,line.Length);
+                dashRuleReplacing=true;
+                try { Document.Replace(line.Offset,line.Length,rule.Replace('-','*')); }
+                finally { dashRuleReplacing=false; }
+                Editor.Select(at,0);
+                ClearDashTyping();
+                ruleTypingDocument=Document;ruleTypingLine=line.LineNumber;ruleTypingVersion=Document.Version;
+            } finally { CloseDashRule(); }
+        }
+        void CloseDashRule() {
+            if (!dashRuleUpdate) return;
+            bool uncommitted=dashRuleInput;
+            dashRuleUpdate=false;dashRuleInput=false;dashRuleChanging=false;dashRuleReplacing=false;
+            TextDocument document=dashRuleDocument;dashRuleDocument=null;
+            dashRuleOffset=dashRuleLine=0;
+            // A later handler can consume the input or move it elsewhere: never leave an
+            // uncommitted exemption behind when the safety dispatcher closes its update.
+            if (dashTypingDocument!=null && (uncommitted || document!=Document || Editor.Document!=Document ||
+                Editor.TextArea.Caret.Line!=dashTypingLine || !Object.ReferenceEquals(dashTypingVersion,Document.Version))) ClearDashTyping();
+            if (document!=null) document.EndUpdate();
+        }
+        internal bool DashTyping(DocumentLine line) {
+            return line!=null && !line.IsDeleted && dashTypingLine==line.LineNumber &&Object.ReferenceEquals(dashTypingDocument,Document) &&
+                (dashRuleChanging || Object.ReferenceEquals(dashTypingVersion,Document.Version)) &&
+                (dashTypingCount==2 || dashRuleUpdate || DocumentHistory.Applying);
+        }
+        void InvalidateDashPair(int number) {
+            if (disposed || number<1 || number>Document.LineCount) return;
+            DocumentLine line=Document.GetLineByNumber(number),previous=line.PreviousLine;
+            lines.Remove(line);
+            if (previous!=null) { PrepareDelimiter(previous,false);lines.Remove(previous);View.Redraw(previous.Offset,previous.TotalLength+line.Length); }
+            else View.Redraw(line.Offset,line.Length);
+        }
+        void ClearDashTyping() {
+            int number=dashTypingLine;
+            dashTypingDocument=null;dashTypingVersion=null;dashTypingLine=dashTypingCount=0;dashRuleChanging=dashUndoRule=false;
+            if (number>0) InvalidateDashPair(number);
+        }
         // Bug A: a typed character on the blank line directly above a dash underline ("---") turned
         // "text" + "---" into a setext heading, so the typed line took the heading scale and the
         // rule disappeared. Word and Notion keep the rule, so an empty line is written between the
@@ -7689,6 +7847,9 @@ internal static partial class MarkdownLivePreview {
             if (next==null || next.Length>ParseLimit || !SetextUnderlineStart(Document,next)) return;
             if (!SetextBlankLine(Document,line)) return;
             if (SetextUnderlineLevel(ShortText(Document,next))!=2) return;
+            // The older opposite-order rule must not rewrite a YAML closer either.
+            if (IsFrontMatter(line.LineNumber) || IsFrontMatter(next.LineNumber) ||
+                (FrontMatterEnd==0 && IsFrontMatterOpener(Document))) return;
             // Inside a fenced block "---" is code, not an underline.
             if (Info(line).Code) return;
             setextGapUpdate=true;setextGapNewline=LineNewline(line);setextGapDocument=Document;
@@ -8972,6 +9133,43 @@ internal static partial class MarkdownLivePreview {
             if (disposed) return;
             DocumentLine first = Document.GetLineByOffset(e.Offset);
             DocumentLine last = Document.GetLineByOffset(e.Offset + e.RemovalLength);
+            bool undoDash=false;
+            // Undo reverses the rewrite first (*** -> ---), then removes the third dash.
+            // Arm BEFORE mutation so even AvalonEdit's earlier Changed/layout handlers see no H2.
+            if (DocumentHistory.Applying && first==last && first.Length<=ParseLimit &&
+                e.InsertionLength<=ParseLimit && Editor.TextArea.Caret.Line==first.LineNumber && DashRuleParagraph(first)) {
+                string insert=e.InsertedText.Text;
+                if (insert.IndexOf('\r')<0 && insert.IndexOf('\n')<0) {
+                    string text=Document.GetText(first.Offset,first.Length).Remove(e.Offset-first.Offset,e.RemovalLength).Insert(e.Offset-first.Offset,insert);
+                    int count;char marker;
+                    if (DashRuleShape(text,out marker,out count) && count>=2) {
+                        if (marker=='-') {
+                            dashTypingDocument=Document;dashTypingLine=first.LineNumber;dashTypingCount=count;
+                            dashTypingVersion=Document.Version;dashRuleChanging=true;undoDash=true;
+                            InvalidateDashPair(first.LineNumber);
+                            Editor.Dispatcher.BeginInvoke(DispatcherPriority.Input,new Action(delegate {
+                                if (dashTypingDocument!=null && dashTypingCount!=2 && !dashRuleUpdate) ClearDashTyping();
+                            }));
+                        } else if (count>=3 && dashTypingDocument==Document && dashTypingLine==first.LineNumber) {
+                            // Redo now replaces the temporary --- with ***. Keep its exemption
+                            // until the replacement is in the buffer, not just until Changing.
+                            dashRuleChanging=true;dashUndoRule=true;undoDash=true;
+                        }
+                    }
+                }
+            }
+            if (dashTypingDocument!=null && !undoDash) {
+                bool typed=dashRuleUpdate && dashRuleInput && Object.ReferenceEquals(dashRuleDocument,Document) &&
+                    e.Offset==dashRuleOffset && e.RemovalLength==0 && e.InsertionLength==1 && e.InsertedText.Text=="-";
+                if (typed || dashRuleReplacing) { dashRuleInput=false;dashRuleChanging=true; }
+                else ClearDashTyping();
+            }
+            if (ruleTypingDocument!=null) {
+                bool typed=ruleTypingInput && Object.ReferenceEquals(ruleTypingDocument,Document) && e.Offset==ruleTypingOffset &&
+                    e.RemovalLength==0 && e.InsertionLength==1 && e.InsertedText.Text==ruleTypingText;
+                if (typed) { ruleTypingInput=false;ruleTypingChanging=true; }
+                else ClearRuleTyping();
+            }
             PrepareReferences(first, last);
             PrepareMathSections(first, last);
             // A whole-document replace is a load, not typing: its blocks may be scanned as they are laid out.
@@ -9019,6 +9217,7 @@ internal static partial class MarkdownLivePreview {
             }
         }
         void DocumentRebuilt() {
+            ClearDashTyping();ClearRuleTyping();
             ClearDelimiterSections();
             ClearReferenceSections();
             footnotes=null;footnotesVersion=null;
@@ -9036,6 +9235,9 @@ internal static partial class MarkdownLivePreview {
         bool resetCaretColumn;
         void DocumentChanged(object sender, DocumentChangeEventArgs e) {
             if (disposed) return;
+            if (dashRuleChanging) { dashTypingVersion=Document.Version;dashRuleChanging=false; }
+            if (dashUndoRule) ClearDashTyping();
+            if (ruleTypingChanging) { ruleTypingVersion=Document.Version;ruleTypingChanging=false; }
             // Any edit (typing, undo, paste) moves the text under the pointer; a link tooltip
             // must not keep describing the old offset.
             hoverOffset=-1;HideLinkTip();SetLinkCursor(false);
@@ -9113,7 +9315,7 @@ internal static partial class MarkdownLivePreview {
             // underline) can change on the preceding line. Without its own pipe or heading the
             // header flag is false either way, and an underline needs "=" / "-" first, so
             // ordinary typing skips both scans.
-            bool editedUnderline=SetextUnderlineStart(Document,edited)&&SetextUnderlineLevel(ShortText(Document,edited))>0;
+            bool editedUnderline=!DashTyping(edited)&&SetextUnderlineStart(Document,edited)&&SetextUnderlineLevel(ShortText(Document,edited))>0;
             if (previous!=null && lines.TryGetValue(previous,out preceding) && !preceding.Code && !preceding.Table &&
                 (preceding.Header || preceding.Setext || editedUnderline || HasTablePipe(preceding.Text))) {
                 bool header=HasTablePipe(preceding.Text)&&NextIsDelimiter(Document,previous);
@@ -10572,12 +10774,16 @@ internal static partial class MarkdownLivePreview {
             MermaidDispose();
             Editor.TextArea.PreviewMouseLeftButtonDown -= FenceRowMouseDown;
             Editor.TextArea.PreviewMouseLeftButtonDown -= MathEndMouseDown;
+            Editor.TextArea.TextEntering -= RuleTypingEntering;
+            Editor.TextArea.TextEntering -= DashRuleEntering;
             Editor.TextArea.TextEntering -= SetextRuleEntering;
             Editor.TextArea.TextEntering -= FenceEnterEntering;
             Editor.PreviewKeyDown -= FenceEnterKeyDown;
             Editor.TextArea.TextEntered -= TableGapEntered;
             Editor.TextArea.TextEntered -= HiddenCloseSpaceEntered;
+            Editor.TextArea.TextEntered -= DashRuleEntered;
             Editor.TextArea.TextEntered -= SetextRuleEntered;
+            CloseDashRule();ClearDashTyping();ClearRuleTyping();
             CloseSetextRule();
             editableFenceLine = null; editableFenceVersion = null;
             closeSpaceArm = closeSpacePending = false;
@@ -10847,7 +11053,7 @@ internal static partial class MarkdownLivePreview {
         // with no paragraph directly above stays a rule because Before().Setext is false.
         // The line is folded onto the heading above (PrepareDelimiter) and only its own
         // caret reveals the raw underline.
-        int setextUnderline = before.Setext && info.QuoteLevels == 0 ? SetextUnderlineLevel(text) : 0;
+        int setextUnderline = before.Setext && info.QuoteLevels == 0 && !session.DashTyping(line) ? SetextUnderlineLevel(text) : 0;
         if (setextUnderline > 0) {
             info.SetextUnderline = setextUnderline;
             info.Hide(0, text.Length);
@@ -10873,8 +11079,9 @@ internal static partial class MarkdownLivePreview {
         }
         // The paragraph line above an underline takes the heading scale; the underline's
         // own line carries no text style. The basic view uses the same 2x / 1.6x sizes.
-        if (info.Heading == 0 && info.QuoteLevels == 0 && SetextText(text, before.Setext)) {
-            int setext = NextSetextLevel(document, line);
+        info.SetextCandidate = info.Heading == 0 && info.QuoteLevels == 0 && SetextText(text, before.Setext);
+        if (info.SetextCandidate) {
+            int setext = session.DashTyping(line.NextLine) ? 0 : NextSetextLevel(document, line);
             if (setext > 0) { info.Setext = true; info.Heading = setext; }
         }
         // "  > text" under an item, indented to its content column, is a quote inside that item (the

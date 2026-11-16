@@ -489,7 +489,11 @@ internal sealed class DocumentHistory {
         if(last.TypedEnd<0||at!=last.TypedEnd)return null;
         bytes+=inserted.Length*2L;last.Inserted=last.Inserted.Insert(at-runStart,inserted);last.TypedEnd=at+inserted.Length;return last;
     }
-    internal bool ApplySource(bool forward,SourceEditor editor){
+    // True while an undo/redo writes its text back (the live preview's typed-"---" rule keeps its
+    // no-heading mark through that change instead of treating it as a new edit).
+    internal static bool Applying;
+    internal bool ApplySource(bool forward,SourceEditor editor){bool was=Applying;Applying=true;try{return ApplySourceCore(forward,editor);}finally{Applying=was;}}
+    bool ApplySourceCore(bool forward,SourceEditor editor){
         var from=forward?redo:undo;var to=forward?undo:redo;if(from.Count==0)return false;var edit=from[from.Count-1];if(edit.BeforeMode.HasValue||edit.AfterMode.HasValue)return false;
         if(edit.Parts==null){string expected=forward?edit.Removed:edit.Inserted;int length=expected.Length;string replacement=forward?edit.Inserted:edit.Removed;if(edit.At<0||edit.At>editor.Document.TextLength-length||editor.Document.GetText(edit.At,length)!=expected)throw new MismatchException("History does not match its source");editor.Document.Replace(edit.At,length,replacement);RestoreSourceSelection(editor,forward,edit,edit.At,edit.Removed.Length,edit.Inserted.Length);}
         else{
