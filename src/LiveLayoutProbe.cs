@@ -87,6 +87,12 @@ internal static class LiveLayoutProbeRunner {
             CheckSetextHeadings();
             CheckDashUnderText();
             CheckFontTags();
+            CheckCellShadeUniform();
+            CheckCellShadeMatchesLine();
+            CheckKbdOverHighlight();
+            CheckCellKbdNoWrap();
+            CheckCellKbdWrapLayout();
+            CheckCellKbdCases();
         } catch (Exception ex) { Check("exception", false, ex.ToString()); }
         report.Append("TOTAL PASS=").Append(passes).Append(" FAIL=").Append(failures).Append('\n');
         File.WriteAllText(Path.Combine(directory, "livelayout-probe.txt"), report.ToString(), new UTF8Encoding(false));
@@ -595,6 +601,831 @@ internal static class LiveLayoutProbeRunner {
                 "glyphs="+GlyphText(firstVisual));
         } finally { foreach(Window window in new Window[] {basicWindow,liveWindow}) if(window!=null) window.Close(); }
     }
+    static void CheckCellShadeUniform() {
+        const string fixture="| h1 | h2 |\n| --- | --- |\n| a`가나다`b | ==한글abc== |\n";
+        var editor=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+        editor.TextArea.TextView.LineHeight=double.NaN; editor.Text=fixture;
+        var session=MarkdownLivePreview.Attach(editor,new MarkdownLivePreview.Settings {FontSize=16,Family="Malgun Gothic",LinePercent=150,WordWrap=true});
+        Window window=Host(editor,700);
+        try {
+            window.Show(); editor.TextArea.Caret.Line=1; Pump(editor);
+            var rowLine=editor.Document.GetLineByNumber(3);
+            var row=session.Info(rowLine).Row;
+            bool ok=row!=null && row.Texts!=null && row.Texts.Length>=2 && row.Texts[0]!=null && row.Texts[1]!=null;
+            int codeRuns=0, highlightRuns=0;
+            bool codeNullBg=true, highlightNullBg=true;
+            if (ok) {
+                var codeCell=row.Texts[0];
+                int codePos=codeCell.Text.IndexOf("가나다",StringComparison.Ordinal);
+                if (codePos<0) ok=false;
+                else {
+                    int codeEnd=codePos+3;
+                    for (int p=0;p<codeCell.Text.Length;) {
+                        TextRun run=codeCell.GetTextRun(p);
+                        int len=Math.Max(1,run.Length);
+                        if (p<codeEnd && p+len>codePos) codeRuns++;
+                        p+=len;
+                    }
+                    for (int p=codePos;p<codeEnd;p++) if (codeCell.Properties[p]==null || codeCell.Properties[p].BackgroundBrush!=null) codeNullBg=false;
+                }
+                var highlightCell=row.Texts[1];
+                int hiPos=highlightCell.Text.IndexOf("한글abc",StringComparison.Ordinal);
+                if (hiPos<0) ok=false;
+                else {
+                    int hiEnd=hiPos+5;
+                    for (int p=0;p<highlightCell.Text.Length;) {
+                        TextRun run=highlightCell.GetTextRun(p);
+                        int len=Math.Max(1,run.Length);
+                        if (p<hiEnd && p+len>hiPos) highlightRuns++;
+                        p+=len;
+                    }
+                    for (int p=hiPos;p<hiEnd;p++) if (highlightCell.Properties[p]==null || highlightCell.Properties[p].BackgroundBrush!=null) highlightNullBg=false;
+                }
+            }
+            Check("cell-shade-uniform", ok && codeRuns==1 && highlightRuns==1 && codeNullBg && highlightNullBg,
+                "ok="+ok+" codeRuns="+codeRuns+" highlightRuns="+highlightRuns+" codeNullBg="+codeNullBg+" highlightNullBg="+highlightNullBg);
+
+            bool codePixels=false, highlightPixels=false;
+            string codeDetail="skipped", highlightDetail="skipped";
+            if (ok) {
+                var bitmap=Render(window);
+                int bmpW=bitmap.PixelWidth, bmpH=bitmap.PixelHeight, stride=bmpW*4;
+                byte[] pixels=new byte[bmpH*stride];
+                bitmap.CopyPixels(pixels, stride, 0);
+                var view=editor.TextArea.TextView;
+                var visual=view.GetVisualLine(3);
+                Point origin=view.TranslatePoint(new Point(0,0), editor);
+                codePixels=CheckCellSpanPixels(pixels, stride, bmpW, bmpH, view, visual, origin, row.Texts[0], "가나다", session.Colors.InlineCode, true, out codeDetail);
+                highlightPixels=CheckCellSpanPixels(pixels, stride, bmpW, bmpH, view, visual, origin, row.Texts[1], "한글abc", session.Colors.Highlight, true, out highlightDetail);
+            }
+            Check("cell-shade-pixels", codePixels && highlightPixels, "code=["+codeDetail+"] highlight=["+highlightDetail+"]");
+        } finally { session.Dispose(); window.Close(); }
+    }
+    static bool CheckCellSpanPixels(byte[] pixels, int stride, int bmpW, int bmpH, TextView view, VisualLine visual, Point origin,
+        MarkdownLivePreview.CellText cellText, string needle, Brush brush, bool rounded, out string detail) {
+        detail="missing";
+        if (visual==null || cellText==null || !(brush is SolidColorBrush)) { detail="no visual or brush"; return false; }
+        int pos=cellText.Text.IndexOf(needle, StringComparison.Ordinal);
+        if (pos<0) { detail="missing needle"; return false; }
+        int endPos=pos+needle.Length;
+        MarkdownLivePreview.TableRowElement rowElement=null;
+        foreach (VisualLineElement element in visual.Elements) {
+            rowElement=element as MarkdownLivePreview.TableRowElement;
+            if (rowElement!=null) break;
+        }
+        if (rowElement==null) { detail="no row element"; return false; }
+        MarkdownLivePreview.TableToken foundToken=null;
+        IList<MarkdownLivePreview.TableToken> tokens=rowElement.Tokens;
+        for (int t=0;t<tokens.Count;t++) {
+            var candidate=tokens[t];
+            if (Object.ReferenceEquals(candidate.Text, cellText) && pos>=candidate.TextStart && endPos<=candidate.TextStart+candidate.Length) {
+                foundToken=candidate; break;
+            }
+        }
+        if (foundToken==null) { detail="no token"; return false; }
+        int startCol=rowElement.VisualColumn+foundToken.Start+(pos-foundToken.TextStart);
+        int endCol=startCol+needle.Length;
+        TextLine textLine=visual.GetTextLine(startCol);
+        double left=visual.GetTextLineVisualXPosition(textLine, startCol)-view.HorizontalOffset;
+        double right=visual.GetTextLineVisualXPosition(textLine, endCol)-view.HorizontalOffset;
+        double top=visual.GetTextLineVisualYPosition(textLine, VisualYPosition.LineTop)-view.VerticalOffset;
+        double bottom=visual.GetTextLineVisualYPosition(textLine, VisualYPosition.LineBottom)-view.VerticalOffset;
+        Color c=((SolidColorBrush)brush).Color;
+        byte expR=(byte)((c.R*c.A+255*(255-c.A))/255);
+        byte expG=(byte)((c.G*c.A+255*(255-c.A))/255);
+        byte expB=(byte)((c.B*c.A+255*(255-c.A))/255);
+        int x0=Math.Max(0, (int)Math.Floor(origin.X+left)-1);
+        int x1=Math.Min(bmpW-1, (int)Math.Ceiling(origin.X+right)+1);
+        int y0=Math.Max(0, (int)Math.Floor(origin.Y+top)-1);
+        int y1=Math.Min(bmpH-1, (int)Math.Ceiling(origin.Y+bottom)+1);
+        int spanCols=x1-x0+1;
+        if (spanCols<=0 || y1<y0) { detail="empty bounds"; return false; }
+        int[] colTop=new int[spanCols];
+        int[] colBottom=new int[spanCols];
+        int firstCol=-1, lastCol=-1;
+        for (int i=0;i<spanCols;i++) {
+            int x=x0+i, cMin=-1, cMax=-1;
+            for (int y=y0;y<=y1;y++) {
+                int idx=y*stride+x*4;
+                if (Math.Abs(pixels[idx+2]-expR)<=4 && Math.Abs(pixels[idx+1]-expG)<=4 && Math.Abs(pixels[idx]-expB)<=4) {
+                    if (cMin<0) cMin=y;
+                    cMax=y;
+                }
+            }
+            colTop[i]=cMin; colBottom[i]=cMax;
+            if (cMin>=0) { if (firstCol<0) firstCol=i; lastCol=i; }
+        }
+        if (firstCol<0 || lastCol-firstCol+1<Math.Max(4, (int)Math.Floor(right-left)-3)) {
+            detail="coverage first="+firstCol+" last="+lastCol+" width="+N(right-left);
+            return false;
+        }
+        int gap=0, maxGap=0;
+        for (int i=firstCol;i<=lastCol;i++) {
+            if (colTop[i]<0) { gap++; if (gap>maxGap) maxGap=gap; }
+            else gap=0;
+        }
+        int inset=rounded ? 3 : 0;
+        int checkStart=firstCol+inset, checkEnd=lastCol-inset;
+        if (checkEnd<checkStart) { checkStart=firstCol; checkEnd=lastCol; }
+        int minTop=int.MaxValue, maxTop=-1, minBot=int.MaxValue, maxBot=-1;
+        for (int i=checkStart;i<=checkEnd;i++) {
+            if (colTop[i]<0) continue;
+            if (colTop[i]<minTop) minTop=colTop[i];
+            if (colTop[i]>maxTop) maxTop=colTop[i];
+            if (colBottom[i]<minBot) minBot=colBottom[i];
+            if (colBottom[i]>maxBot) maxBot=colBottom[i];
+        }
+        bool uniform=maxTop>=0 && maxTop-minTop<=2 && maxBot-minBot<=2;
+        detail="cols="+(lastCol-firstCol+1)+" gap="+maxGap+" top="+minTop+".."+maxTop+" bot="+minBot+".."+maxBot;
+        return maxGap<=1 && uniform;
+    }
+    static void CheckCellShadeMatchesLine() {
+        // No <kbd> here: a key may now wrap on its own line, which moved the measured space to a
+        // wrap end (unshaded). Band height is the point; kbd-over-highlight covers the key.
+        const string fixture="| 키 |\n| --- |\n| ==Press the key now== |\n\n==Press the key now==\n";
+        var editor=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+        editor.TextArea.TextView.LineHeight=double.NaN; editor.Text=fixture;
+        var session=MarkdownLivePreview.Attach(editor,new MarkdownLivePreview.Settings {FontSize=16,Family="Malgun Gothic",LinePercent=150,WordWrap=true});
+        Window window=Host(editor,136);
+        try {
+            window.Show(); editor.TextArea.Caret.Line=editor.Document.LineCount; Pump(editor);
+            var view=editor.TextArea.TextView;
+            var cellVisual=view.GetVisualLine(3);
+            for (int step=0;step<24 && (cellVisual==null || cellVisual.TextLines.Count!=2);step++) {
+                window.Width+=(cellVisual!=null && cellVisual.TextLines.Count>2) ? 4 : -4;
+                Pump(editor);
+                cellVisual=view.GetVisualLine(3);
+            }
+            var ordVisual=view.GetVisualLine(5);
+            var cellInfo=session.Info(editor.Document.GetLineByNumber(3));
+            var ordInfo=session.Info(editor.Document.GetLineByNumber(5));
+            bool ok=cellVisual!=null && cellVisual.TextLines.Count>=2 && ordVisual!=null && cellInfo.Row!=null && cellInfo.Row.Texts!=null && cellInfo.Row.Texts.Length>0 &&
+                session.Colors.Highlight is SolidColorBrush;
+            string detail="missing";
+            if (ok) {
+                var bitmap=Render(window);
+                int bmpW=bitmap.PixelWidth, bmpH=bitmap.PixelHeight, stride=bmpW*4;
+                byte[] pixels=new byte[bmpH*stride];
+                bitmap.CopyPixels(pixels, stride, 0);
+                Point origin=view.TranslatePoint(new Point(0,0), editor);
+                Color hc=((SolidColorBrush)session.Colors.Highlight).Color;
+                byte hiR=(byte)((hc.R*hc.A+255*(255-hc.A))/255), hiG=(byte)((hc.G*hc.A+255*(255-hc.A))/255), hiB=(byte)((hc.B*hc.A+255*(255-hc.A))/255);
+
+                int ordSpaceCol=ordVisual.GetVisualColumn(2+5), ordSpaceEnd=ordVisual.GetVisualColumn(2+6);
+                TextLine ordTl=ordVisual.GetTextLine(ordSpaceCol);
+                double ordX=origin.X+(ordVisual.GetTextLineVisualXPosition(ordTl,ordSpaceCol)+ordVisual.GetTextLineVisualXPosition(ordTl,ordSpaceEnd))*0.5-view.HorizontalOffset;
+                double ordLineTop=origin.Y+ordVisual.GetTextLineVisualYPosition(ordTl,VisualYPosition.LineTop)-view.VerticalOffset;
+                double ordLineBot=origin.Y+ordVisual.GetTextLineVisualYPosition(ordTl,VisualYPosition.LineBottom)-view.VerticalOffset;
+                double ordTextTop=origin.Y+ordVisual.GetTextLineVisualYPosition(ordTl,VisualYPosition.TextTop)-view.VerticalOffset;
+                int ordTop, ordBot;
+                ColumnHighlightBounds(pixels, stride, bmpW, bmpH, (int)Math.Round(ordX), (int)Math.Floor(ordLineTop)-2, (int)Math.Ceiling(ordLineBot)+2, hiR, hiG, hiB, out ordTop, out ordBot);
+
+                MarkdownLivePreview.TableRowElement rowElement=null;
+                foreach (VisualLineElement elem in cellVisual.Elements) { rowElement=elem as MarkdownLivePreview.TableRowElement; if (rowElement!=null) break; }
+                MarkdownLivePreview.TableToken token0=null, token1=null;
+                var cellText=cellInfo.Row.Texts[0];
+                if (rowElement!=null) {
+                    IList<MarkdownLivePreview.TableToken> tokens=rowElement.Tokens;
+                    for (int t=0;t<tokens.Count;t++) {
+                        var candidate=tokens[t];
+                        if (!Object.ReferenceEquals(candidate.Text, cellText)) continue;
+                        if (token0==null) token0=candidate; else if (token1==null) token1=candidate;
+                    }
+                }
+                int spaceIdx=cellText.Text.IndexOf(' '), nowIdx=cellText.Text.IndexOf("now", StringComparison.Ordinal);
+                if (token0!=null && token1!=null && spaceIdx>=token0.TextStart && spaceIdx<token0.TextStart+token0.Length && nowIdx>=token1.TextStart && nowIdx+3<=token1.TextStart+token1.Length) {
+                    int cCol0=rowElement.VisualColumn+token0.Start+(spaceIdx-token0.TextStart), cCol1=cCol0+1;
+                    TextLine cellTl0=cellVisual.GetTextLine(cCol0);
+                    double cellX=origin.X+(cellVisual.GetTextLineVisualXPosition(cellTl0,cCol0)+cellVisual.GetTextLineVisualXPosition(cellTl0,cCol1))*0.5-view.HorizontalOffset;
+                    double cellLineTop0=origin.Y+cellVisual.GetTextLineVisualYPosition(cellTl0,VisualYPosition.LineTop)-view.VerticalOffset;
+                    double cellLineBot0=origin.Y+cellVisual.GetTextLineVisualYPosition(cellTl0,VisualYPosition.LineBottom)-view.VerticalOffset;
+                    double cellTextTop0=origin.Y+cellVisual.GetTextLineVisualYPosition(cellTl0,VisualYPosition.TextTop)-view.VerticalOffset;
+                    double cellTextBot0=origin.Y+cellVisual.GetTextLineVisualYPosition(cellTl0,VisualYPosition.TextBottom)-view.VerticalOffset;
+                    int cellTop, cellBot;
+                    ColumnHighlightBounds(pixels, stride, bmpW, bmpH, (int)Math.Round(cellX), (int)Math.Floor(cellLineTop0)-2, (int)Math.Ceiling(cellLineBot0)+2, hiR, hiG, hiB, out cellTop, out cellBot);
+
+                    int wCol0=rowElement.VisualColumn+token1.Start+(nowIdx-token1.TextStart), wCol1=wCol0+3;
+                    TextLine cellTl1=cellVisual.GetTextLine(wCol0);
+                    double nowLeft=origin.X+cellVisual.GetTextLineVisualXPosition(cellTl1,wCol0)-view.HorizontalOffset;
+                    double nowRight=origin.X+cellVisual.GetTextLineVisualXPosition(cellTl1,wCol1)-view.HorizontalOffset;
+                    double cellLineBot1=origin.Y+cellVisual.GetTextLineVisualYPosition(cellTl1,VisualYPosition.LineBottom)-view.VerticalOffset;
+                    int nx0=Math.Max(0, (int)Math.Ceiling(nowLeft)+3), nx1=Math.Min(bmpW-1, (int)Math.Floor(nowRight)-3);
+                    int wrapBot=-1, gapRows=0, wrapTopHit=-1;
+                    if (nx1>=nx0 && cellTop>=0 && cellBot>=cellTop) {
+                        int yMax=Math.Min(bmpH-1, (int)Math.Ceiling(cellLineBot1)+2);
+                        for (int y=cellTop;y<=yMax;y++) {
+                            bool hit=false;
+                            for (int x=nx0;x<=nx1;x++) {
+                                int idx=y*stride+x*4;
+                                if (Math.Abs(pixels[idx+2]-hiR)<=4 && Math.Abs(pixels[idx+1]-hiG)<=4 && Math.Abs(pixels[idx]-hiB)<=4) { hit=true; break; }
+                            }
+                            if (hit) {
+                                if (wrapTopHit<0) wrapTopHit=y;
+                                else if (wrapBot>=0 && y>wrapBot+1) gapRows+=(y-wrapBot-1);
+                                wrapBot=y;
+                            }
+                        }
+                        if (wrapTopHit<0 || wrapTopHit>cellTop+1) gapRows++;
+                    }
+                    // The two wrapped lines merge into one outline whose inner corner at the end of
+                    // "now" is filleted (BackgroundGeometryBuilder, as on a wrapped ordinary line), so
+                    // the first line's own height is not measurable next to it. Measured instead:
+                    // the merged height over "now" = two ordinary bands, and the band's top offset
+                    // from the text top = the ordinary line's (same band around the same text).
+                    int ordH=ordTop>=0 ? ordBot-ordTop+1 : 0;
+                    int cellH=cellTop>=0 ? cellBot-cellTop+1 : 0;
+                    int mergedH=wrapTopHit>=0 && wrapBot>=wrapTopHit ? wrapBot-wrapTopHit+1 : 0;
+                    double ordOffset=ordTop-ordTextTop, cellOffset=cellTop-cellTextTop0;
+                    ok=ordH>0 && cellH>0 && mergedH>0 && Math.Abs(mergedH-2*ordH)<=1 && Math.Abs(cellOffset-ordOffset)<=1 &&
+                        gapRows==0 && cellTop<=Math.Ceiling(cellTextTop0) && cellBot>=Math.Floor(cellTextBot0);
+                    detail="ordH="+ordH+"("+N(ordOffset)+") cellH="+cellH+"("+N(cellOffset)+") mergedH="+mergedH+" gaps="+gapRows;
+                } else {
+                    ok=false; detail="tokens="+(token0!=null)+","+(token1!=null)+" lines="+cellVisual.TextLines.Count;
+                }
+            }
+            Check("cell-shade-matches-line", ok, detail);
+        } finally { session.Dispose(); window.Close(); }
+    }
+    static void ColumnHighlightBounds(byte[] pixels, int stride, int bmpW, int bmpH, int x, int y0, int y1, byte hiR, byte hiG, byte hiB, out int top, out int bot) {
+        top=-1; bot=-1;
+        if (x<0 || x>=bmpW) return;
+        y0=Math.Max(0, y0); y1=Math.Min(bmpH-1, y1);
+        for (int y=y0;y<=y1;y++) {
+            int idx=y*stride+x*4;
+            if (Math.Abs(pixels[idx+2]-hiR)<=4 && Math.Abs(pixels[idx+1]-hiG)<=4 && Math.Abs(pixels[idx]-hiB)<=4) {
+                if (top<0) top=y;
+                bot=y;
+            }
+        }
+    }
+    static void CheckKbdOverHighlight() {
+        const string fixture="==Press <kbd>Ctrl</kbd> now==\n\n| h1 | h2 |\n| --- | --- |\n| ==Press <kbd>Ctrl</kbd> now== | plain |\n\nend\n";
+        var editor=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+        editor.TextArea.TextView.LineHeight=double.NaN; editor.Text=fixture;
+        var session=MarkdownLivePreview.Attach(editor,new MarkdownLivePreview.Settings {FontSize=16,Family="Malgun Gothic",LinePercent=150,WordWrap=true});
+        Window window=Host(editor,700);
+        try {
+            window.Show(); editor.TextArea.Caret.Line=7; Pump(editor);
+            var bitmap=Render(window);
+            int bmpW=bitmap.PixelWidth, bmpH=bitmap.PixelHeight, stride=bmpW*4;
+            byte[] pixels=new byte[bmpH*stride];
+            bitmap.CopyPixels(pixels, stride, 0);
+            var view=editor.TextArea.TextView;
+            Point origin=view.TranslatePoint(new Point(0,0), editor);
+
+            string lineDetail="skipped", cellDetail="skipped";
+            bool lineOk=false, cellOk=false;
+
+            var lineVisual=view.GetVisualLine(1);
+            var lineInfo=session.Info(editor.Document.GetLineByNumber(1));
+            MarkdownLivePreview.StyledPart lineKey=default(MarkdownLivePreview.StyledPart);
+            bool hasLineKey=false;
+            foreach (var part in lineInfo.Styles) {
+                if ((part.Style & MarkdownLivePreview.Style.Keyboard)!=0 && part.Length>0) { lineKey=part; hasLineKey=true; break; }
+            }
+            if (lineVisual!=null && hasLineKey) {
+                int startCol=lineVisual.GetVisualColumn(lineKey.Start);
+                int endCol=lineVisual.GetVisualColumn(lineKey.Start+lineKey.Length);
+                double leadPad=0;
+                bool padded=false;
+                foreach (VisualLineElement candidate in lineVisual.Elements) {
+                    var hidden=candidate as MarkdownLivePreview.InvisibleElement;
+                    if (hidden==null || hidden.PadEm<=0) continue;
+                    if (hidden.RelativeTextOffset+hidden.DocumentLength==lineKey.Start || hidden.RelativeTextOffset==lineKey.Start+lineKey.Length) { padded=true; break; }
+                }
+                if (padded) {
+                    foreach (VisualLineElement elem in lineVisual.Elements) {
+                        if (elem.DocumentLength>0 && elem.RelativeTextOffset<=lineKey.Start && elem.RelativeTextOffset+elem.DocumentLength>lineKey.Start) {
+                            leadPad=elem.TextRunProperties.FontRenderingEmSize*0.35; break;
+                        }
+                    }
+                }
+                TextLine tl=lineVisual.GetTextLine(startCol);
+                double x1=lineVisual.GetTextLineVisualXPosition(tl, startCol)-view.HorizontalOffset;
+                double x2=lineVisual.GetTextLineVisualXPosition(tl, endCol)-view.HorizontalOffset;
+                double tTop=lineVisual.GetTextLineVisualYPosition(tl, VisualYPosition.TextTop)-view.VerticalOffset;
+                double tBot=lineVisual.GetTextLineVisualYPosition(tl, VisualYPosition.TextBottom)-view.VerticalOffset;
+                lineOk=CheckKbdBoxAndLeftHighlight(pixels, stride, bmpW, bmpH, origin.X+x1, origin.X+x2, origin.X+x1-leadPad-0.5, origin.Y+tTop, origin.Y+tBot,
+                    session.Colors.InlineCode, session.Colors.Highlight, out lineDetail);
+            }
+
+            var cellVisual=view.GetVisualLine(5);
+            var cellInfo=session.Info(editor.Document.GetLineByNumber(5));
+            MarkdownLivePreview.StyledPart cellKey=default(MarkdownLivePreview.StyledPart);
+            bool hasCellKey=false;
+            foreach (var part in cellInfo.Styles) {
+                if ((part.Style & MarkdownLivePreview.Style.Keyboard)!=0 && part.Length>0) { cellKey=part; hasCellKey=true; break; }
+            }
+            MarkdownLivePreview.TableRowElement rowElement=null;
+            if (cellVisual!=null) foreach (VisualLineElement elem in cellVisual.Elements) {
+                rowElement=elem as MarkdownLivePreview.TableRowElement;
+                if (rowElement!=null) break;
+            }
+            if (cellVisual!=null && hasCellKey && rowElement!=null && cellInfo.Row!=null && cellInfo.Row.Texts!=null && cellInfo.Row.Texts.Length>0 && cellInfo.Row.Texts[0]!=null) {
+                var cellText=cellInfo.Row.Texts[0];
+                int pos=cellText.Text.IndexOf("Ctrl", StringComparison.Ordinal);
+                MarkdownLivePreview.TableToken foundToken=null;
+                if (pos>=0) {
+                    IList<MarkdownLivePreview.TableToken> tokens=rowElement.Tokens;
+                    for (int t=0;t<tokens.Count;t++) {
+                        var candidate=tokens[t];
+                        if (Object.ReferenceEquals(candidate.Text, cellText) && pos>=candidate.TextStart && pos+4<=candidate.TextStart+candidate.Length) {
+                            foundToken=candidate; break;
+                        }
+                    }
+                }
+                if (foundToken!=null) {
+                    int startCol=rowElement.VisualColumn+foundToken.Start+(pos-foundToken.TextStart);
+                    int endCol=startCol+4;
+                    double leadPad=rowElement.KeyboardPad(cellKey.Start);
+                    TextLine tl=cellVisual.GetTextLine(startCol);
+                    double x1=cellVisual.GetTextLineVisualXPosition(tl, startCol)-view.HorizontalOffset;
+                    double x2=cellVisual.GetTextLineVisualXPosition(tl, endCol)-view.HorizontalOffset;
+                    double tTop=cellVisual.GetTextLineVisualYPosition(tl, VisualYPosition.TextTop)-view.VerticalOffset;
+                    double tBot=cellVisual.GetTextLineVisualYPosition(tl, VisualYPosition.TextBottom)-view.VerticalOffset;
+                    cellOk=CheckKbdBoxAndLeftHighlight(pixels, stride, bmpW, bmpH, origin.X+x1, origin.X+x2, origin.X+x1-leadPad-0.5, origin.Y+tTop, origin.Y+tBot,
+                        session.Colors.InlineCode, session.Colors.Highlight, out cellDetail);
+                }
+            }
+            Check("kbd-over-highlight", lineOk && cellOk, "line=["+lineDetail+"] cell=["+cellDetail+"]");
+        } finally { session.Dispose(); window.Close(); }
+    }
+    static void CheckCellKbdNoWrap() {
+        const string fixture="| 제목1 | 제목2 |\n|---|---|\n|  ==Press <kbd>Ctrl</kbd> now==|  |\n\n==Press <kbd>Ctrl</kbd> now==\n";
+        bool ok=true;
+        var details=new StringBuilder();
+        foreach (TextFormattingMode mode in new TextFormattingMode[] { TextFormattingMode.Ideal, TextFormattingMode.Display }) {
+            var editor=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+            editor.TextArea.TextView.LineHeight=double.NaN; editor.Text=fixture;
+            var session=MarkdownLivePreview.Attach(editor,new MarkdownLivePreview.Settings {FontSize=16,Family="Malgun Gothic",LinePercent=150,WordWrap=true});
+            Window window=Host(editor,900);
+            TextOptions.SetTextFormattingMode(window, mode);
+            try {
+                // The caret sits on the blank line 4: on line 5 it would show that line's source
+                // and the ordinary width would be the raw tags' (220 px instead of ~120).
+                window.Show(); editor.TextArea.Caret.Line=4; Pump(editor);
+                var view=editor.TextArea.TextView;
+                var cellVisual=view.GetVisualLine(3);
+                var ordVisual=view.GetVisualLine(5);
+                var cellInfo=session.Info(editor.Document.GetLineByNumber(3));
+                var row=cellInfo.Row;
+                double ordWidth=0;
+                if (ordVisual!=null && ordVisual.TextLines!=null && ordVisual.TextLines.Count>0) {
+                    TextLine tl=ordVisual.TextLines[0];
+                    int col0=ordVisual.GetVisualColumn(2);
+                    int col1=ordVisual.GetVisualColumn(27);
+                    ordWidth=ordVisual.GetTextLineVisualXPosition(tl,col1)-ordVisual.GetTextLineVisualXPosition(tl,col0);
+                }
+                int slices=row!=null && row.Slices!=null && row.Slices.Length>0 && row.Slices[0]!=null ? row.Slices[0].Count : 0;
+                int visualLines=cellVisual!=null && cellVisual.TextLines!=null ? cellVisual.TextLines.Count : 0;
+                double colTextWidth=row!=null && row.Widths!=null && row.Widths.Length>0 ? row.Widths[0]-row.Padding*2 : 0;
+                bool pass=slices==1 && visualLines==1 && ordWidth>0 && colTextWidth>=ordWidth-1;
+                ok &= pass;
+                if (details.Length>0) details.Append("; ");
+                details.Append(mode.ToString()).Append(":slices=").Append(slices).Append(",lines=").Append(visualLines)
+                    .Append(",colText=").Append(N(colTextWidth)).Append(",ord=").Append(N(ordWidth));
+            } finally { session.Dispose(); window.Close(); }
+        }
+        Check("cell-kbd-no-wrap", ok, details.ToString());
+    }
+    static void CheckCellKbdWrapLayout() {
+        const string snippet="==Press <kbd>Ctrl</kbd> now==";
+        var eight=new StringBuilder();
+        for (int i=0;i<8;i++) eight.Append(snippet);
+        string eightText=eight.ToString();
+        string directFixture="| 제목1 | 제목2 |\n|---|---|\n| "+eightText+" | "+eightText+" |\n\nend\n";
+        string seedFixture="| 제목1 | 제목2 |\n|---|---|\n| "+snippet+" | "+snippet+" |\n\nend\n";
+
+        string directDetail="missing", typingMidDetail="missing", typingEndDetail="missing";
+        bool directOk=false, typingMidOk=false, typingEndOk=false;
+
+        var editor1=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+        editor1.TextArea.TextView.LineHeight=double.NaN; editor1.Text=directFixture;
+        var session1=MarkdownLivePreview.Attach(editor1,new MarkdownLivePreview.Settings {FontSize=16,Family="Malgun Gothic",LinePercent=150,WordWrap=true,HideMarkers=true});
+        Window win1=Host(editor1,860);
+        TextOptions.SetTextFormattingMode(win1, TextFormattingMode.Display);
+        try {
+            win1.Show();
+            DocumentLine line3=editor1.Document.GetLineByNumber(3);
+            editor1.TextArea.Caret.Offset=line3.Offset+session1.Info(line3).Cells[0].End;
+            Pump(editor1);
+            directOk=CheckCellKbdWrapState(win1, editor1, session1, out directDetail);
+        } finally { session1.Dispose(); win1.Close(); }
+
+        var editor2=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+        editor2.TextArea.TextView.LineHeight=double.NaN; editor2.Text=seedFixture;
+        var session2=MarkdownLivePreview.Attach(editor2,new MarkdownLivePreview.Settings {FontSize=16,Family="Malgun Gothic",LinePercent=150,WordWrap=true,HideMarkers=true});
+        Window win2=Host(editor2,860);
+        TextOptions.SetTextFormattingMode(win2, TextFormattingMode.Display);
+        try {
+            win2.Show(); Pump(editor2);
+            // Simulate f002 -> f004 (paste 7 more copies into cell 2), then f005 -> f007 (paste into cell 1).
+            for (int i=0;i<7;i++) {
+                DocumentLine l3=editor2.Document.GetLineByNumber(3);
+                int at=l3.Offset+session2.Info(l3).Cells[1].End;
+                editor2.TextArea.Caret.Offset=at;
+                editor2.Document.Insert(at, snippet);
+                Pump(editor2);
+            }
+            for (int i=0;i<7;i++) {
+                DocumentLine l3=editor2.Document.GetLineByNumber(3);
+                int at=l3.Offset+session2.Info(l3).Cells[0].End;
+                editor2.TextArea.Caret.Offset=at;
+                editor2.Document.Insert(at, snippet);
+                Pump(editor2);
+                if (i==2) typingMidOk=CheckCellKbdWrapState(win2, editor2, session2, out typingMidDetail);
+            }
+            typingEndOk=CheckCellKbdWrapState(win2, editor2, session2, out typingEndDetail);
+        } finally { session2.Dispose(); win2.Close(); }
+
+        Check("cell-kbd-wrap-layout", directOk && typingMidOk && typingEndOk,
+            "direct=["+directDetail+"] mid=["+typingMidDetail+"] end=["+typingEndDetail+"]");
+    }
+    static bool IsProbeCjkBreakable(char c) {
+        return (c>=0x1100 && c<=0x11FF) || (c>=0x2E80 && c<=0x9FFF) ||
+            (c>=0xAC00 && c<=0xD7AF) || (c>=0xF900 && c<=0xFAFF) || (c>=0xFF00 && c<=0xFFEF);
+    }
+    // Computes the cell's longest unbreakable token width directly via TextFormatter (never reading
+    // TableLayout.Minima) so probes do not validate the table layout against itself.
+    static double IndependentCellMinimum(MarkdownLivePreview.Session session, MarkdownLivePreview.CellText cellText) {
+        if (cellText==null || cellText.Text.Length==0) return 0;
+        double minW=0;
+        var noWrap=new MarkdownLivePreview.CellParagraph(cellText.Default, 24, TextWrapping.NoWrap);
+        int segStart=0, savedEnd=cellText.FormatEnd;
+        try {
+            while (segStart<=cellText.Text.Length) {
+                int breakAt=cellText.NextBreak(segStart);
+                int segEnd=breakAt<0 ? cellText.Text.Length : breakAt;
+                if (segEnd>segStart) {
+                    cellText.FormatEnd=segEnd;
+                    using (TextLine full=session.Formatter.FormatLine(cellText, segStart, 32000, noWrap, null, new TextRunCache())) {
+                        int p=segStart;
+                        while (p<segEnd) {
+                            if (cellText.IsPad(p) && !cellText.IsClosePad(p)) {
+                                int ks, ke;
+                                if (cellText.FindKeyRange(p+1, out ks, out ke) && ks==p) {
+                                    int tokEnd=ke+1;
+                                    while (tokEnd<segEnd && !char.IsWhiteSpace(cellText.Text[tokEnd]) && !cellText.IsPad(tokEnd) && !IsProbeCjkBreakable(cellText.Text[tokEnd])) tokEnd++;
+                                    double kw=full.GetDistanceFromCharacterHit(new CharacterHit(tokEnd, 0))-full.GetDistanceFromCharacterHit(new CharacterHit(p, 0));
+                                    if (kw>minW) minW=kw;
+                                    p=tokEnd;
+                                    continue;
+                                }
+                            }
+                            char ch=cellText.Text[p];
+                            if (char.IsWhiteSpace(ch)) { p++; continue; }
+                            if (IsProbeCjkBreakable(ch)) {
+                                double cw=full.GetDistanceFromCharacterHit(new CharacterHit(p+1, 0))-full.GetDistanceFromCharacterHit(new CharacterHit(p, 0));
+                                if (cw>minW) minW=cw;
+                                p++;
+                                continue;
+                            }
+                            int start=p;
+                            while (p<segEnd && !char.IsWhiteSpace(cellText.Text[p]) && !IsProbeCjkBreakable(cellText.Text[p]) &&
+                                   !(cellText.IsPad(p) && !cellText.IsClosePad(p))) p++;
+                            double ww=full.GetDistanceFromCharacterHit(new CharacterHit(p, 0))-full.GetDistanceFromCharacterHit(new CharacterHit(start, 0));
+                            if (ww>minW) minW=ww;
+                        }
+                    }
+                }
+                if (breakAt<0) break;
+                segStart=breakAt+1;
+            }
+        } finally { cellText.FormatEnd=savedEnd; }
+        return minW;
+    }
+    static bool CheckCellKbdWrapState(Window window, SourceEditor editor, MarkdownLivePreview.Session session, out string detail) {
+        return CheckTableRowInvariants(window, editor, session, 3, 2, true, null, out detail);
+    }
+    static bool CheckTableRowInvariants(Window window, SourceEditor editor, MarkdownLivePreview.Session session,
+        int lineNumber, int expectedCols, bool checkMinWidths, int[] plainPixelColumns, out string detail) {
+        detail="missing";
+        var view=editor.TextArea.TextView;
+        var visual=view.GetVisualLine(lineNumber);
+        var info=session.Info(editor.Document.GetLineByNumber(lineNumber));
+        var row=info.Row;
+        if (visual==null || row==null || row.Slices==null || row.Slices.Length<expectedCols || row.Texts==null || row.Texts.Length<expectedCols) return false;
+        if (!MarkdownLivePreview.TableRowElement.RowAligned(visual, row)) { detail="unaligned visual="+visual.TextLines.Count+" phys="+row.PhysicalRows; return false; }
+
+        MarkdownLivePreview.TableRowElement rowElement=null;
+        foreach (VisualLineElement elem in visual.Elements) {
+            rowElement=elem as MarkdownLivePreview.TableRowElement;
+            if (rowElement!=null) break;
+        }
+        if (rowElement==null) { detail="no row element"; return false; }
+
+        // 1. No <kbd> key split across slices/TextLines when the key itself fits on one line,
+        // and no continuation slice holds only pads or whitespace.
+        int keySplits=0, blankSlices=0;
+        for (int c=0;c<expectedCols;c++) {
+            var cellText=row.Texts[c];
+            var slices=row.Slices[c];
+            if (cellText==null || slices==null) continue;
+            double colTextMax=Math.Max(1, row.Widths[c]-row.Padding*2-1);
+            int savedEnd=cellText.FormatEnd;
+            try {
+                for (int s=0;s<slices.Count;s++) {
+                    var slice=slices[s];
+                    if (slice.Length>0 && (s>0 || slices.Count>1)) {
+                        bool hasVisible=false;
+                        for (int k=slice.Start;k<slice.Start+slice.Length && k<cellText.Text.Length;k++) {
+                            if (!cellText.IsPad(k) && !char.IsWhiteSpace(cellText.Text[k])) { hasVisible=true; break; }
+                        }
+                        if (!hasVisible) blankSlices++;
+                    }
+                    if (s+1<slices.Count) {
+                        int ks, ke;
+                        if (cellText.FindKeyRange(slice.Start+slice.Length, out ks, out ke)) {
+                            int segStart=ks;
+                            while (segStart>0 && !cellText.IsBreak(segStart-1)) segStart--;
+                            int segBreak=cellText.NextBreak(ks);
+                            int segEnd=segBreak<0 ? cellText.Text.Length : segBreak;
+                            cellText.FormatEnd=segEnd;
+                            double keyW=0;
+                            using (TextLine full=session.Formatter.FormatLine(cellText, segStart, 32000,
+                                new MarkdownLivePreview.CellParagraph(cellText.Default, 24, TextWrapping.NoWrap), null, new TextRunCache())) {
+                                keyW=full.GetDistanceFromCharacterHit(new CharacterHit(ke+1, 0))-full.GetDistanceFromCharacterHit(new CharacterHit(ks, 0));
+                            }
+                            if (keyW<=colTextMax) keySplits++;
+                        }
+                    }
+                }
+            } finally { cellText.FormatEnd=savedEnd; }
+        }
+
+        // 2. Column text widths >= min(independently measured longest unbreakable width, what the view can pay).
+        bool minOk=true;
+        double worstCol=0, worstMin=0;
+        double[] indMins=new double[expectedCols];
+        for (int c=0;c<expectedCols;c++) indMins[c]=IndependentCellMinimum(session, row.Texts[c]);
+        double viewAvail=Math.Max(40, row.BaseWidth-4);
+        for (int c=0;c<expectedCols;c++) {
+            double otherMin=0;
+            for (int o=0;o<expectedCols;o++) if (o!=c) otherMin+=Math.Max(row.Padding*2+1, indMins[o]+row.Padding*2);
+            double viewCap=Math.Max(1, viewAvail-otherMin-row.Padding*2-1);
+            double expectedMin=Math.Min(indMins[c], viewCap);
+            double colText=row.Widths[c]-row.Padding*2;
+            if (checkMinWidths && colText<expectedMin-1) { minOk=false; worstCol=colText; worstMin=expectedMin; break; }
+            if (c==1 || (checkMinWidths && expectedMin>worstMin)) { worstCol=colText; worstMin=expectedMin; }
+        }
+
+        // 3. Every glyph run and shade char stays inside its own column boundaries, and no
+        // key pad/token box starts left of its own cell boundary.
+        int overflowRuns=0, badKeyBounds=0;
+        IList<MarkdownLivePreview.TableToken> tokens=rowElement.Tokens;
+        for (int t=0;t<tokens.Count;t++) {
+            var token=tokens[t];
+            if (token.Text==null || token.Length<=0) continue;
+            int cellIdx=-1;
+            for (int c=0;c<expectedCols;c++) { if (Object.ReferenceEquals(token.Text, row.Texts[c])) { cellIdx=c; break; } }
+            if (cellIdx<0) continue;
+            int c0=rowElement.VisualColumn+token.Start, c1=c0+token.Length;
+            TextLine tl=visual.GetTextLine(c0);
+            if (tl==null) continue;
+            double x0=visual.GetTextLineVisualXPosition(tl, c0);
+            double x1=visual.GetTextLineVisualXPosition(tl, c1);
+            if (x0<row.Boundaries[cellIdx]-0.5 || x1>row.Boundaries[cellIdx+1]+0.5) overflowRuns++;
+            IList<TextBounds> bounds=tl.GetTextBounds(c0, token.Length);
+            if (bounds!=null) {
+                for (int b=0;b<bounds.Count;b++) {
+                    TextBounds tb=bounds[b];
+                    if (tb.TextRunBounds!=null && tb.TextRunBounds.Count>0) {
+                        for (int r=0;r<tb.TextRunBounds.Count;r++) {
+                            Rect rect=tb.TextRunBounds[r].Rectangle;
+                            if (rect.Width<=0) continue;
+                            if (rect.Left<row.Boundaries[cellIdx]-0.5 || rect.Right>row.Boundaries[cellIdx+1]+0.5) overflowRuns++;
+                        }
+                    } else if (tb.Rectangle.Width>0) {
+                        Rect rect=tb.Rectangle;
+                        if (rect.Left<row.Boundaries[cellIdx]-0.5 || rect.Right>row.Boundaries[cellIdx+1]+0.5) overflowRuns++;
+                    }
+                }
+            }
+            for (int p=token.TextStart;p<token.TextStart+token.Length;p++) {
+                if (token.Text.IsPad(p) && !token.Text.IsClosePad(p)) {
+                    int col=rowElement.VisualColumn+token.Start+(p-token.TextStart);
+                    double padLeft=visual.GetTextLineVisualXPosition(tl, col)-0.5;
+                    if (padLeft<row.Boundaries[cellIdx]-1.0) badKeyBounds++;
+                }
+            }
+        }
+
+        // 4. Rendered pixels in every state: no key-box (InlineCode) or highlight pixels below any
+        // column's last physical row, in plain columns, or outside table boundaries.
+        int bleedPixels=0;
+        bool brushesOk=session.Colors.InlineCode is SolidColorBrush && session.Colors.Highlight is SolidColorBrush;
+        if (!brushesOk) {
+            bleedPixels=-1;
+        } else {
+            var bitmap=Render(window);
+            int bmpW=bitmap.PixelWidth, bmpH=bitmap.PixelHeight, stride=bmpW*4;
+            byte[] pixels=new byte[bmpH*stride];
+            bitmap.CopyPixels(pixels, stride, 0);
+            Point origin=view.TranslatePoint(new Point(0,0), editor);
+            Color bc=((SolidColorBrush)session.Colors.InlineCode).Color;
+            byte boxR=(byte)((bc.R*bc.A+255*(255-bc.A))/255), boxG=(byte)((bc.G*bc.A+255*(255-bc.A))/255), boxB=(byte)((bc.B*bc.A+255*(255-bc.A))/255);
+            Color hc=((SolidColorBrush)session.Colors.Highlight).Color;
+            byte hiR=(byte)((hc.R*hc.A+255*(255-hc.A))/255), hiG=(byte)((hc.G*hc.A+255*(255-hc.A))/255), hiB=(byte)((hc.B*hc.A+255*(255-hc.A))/255);
+
+            double rowTopY=origin.Y+visual.GetTextLineVisualYPosition(visual.TextLines[0], VisualYPosition.LineTop)-view.VerticalOffset;
+            double rowBotY=origin.Y+visual.GetTextLineVisualYPosition(visual.TextLines[visual.TextLines.Count-1], VisualYPosition.LineBottom)-view.VerticalOffset;
+            int ry0=Math.Max(0, (int)Math.Ceiling(rowTopY)+1), ry1=Math.Min(bmpH-1, (int)Math.Floor(rowBotY)-1);
+
+            for (int c=0;c<expectedCols;c++) {
+                int x0=Math.Max(0, (int)Math.Ceiling(origin.X+row.Boundaries[c]-view.HorizontalOffset)+2);
+                int x1=Math.Min(bmpW-1, (int)Math.Floor(origin.X+row.Boundaries[c+1]-view.HorizontalOffset)-2);
+                if (x1<x0) continue;
+                bool checkFull=plainPixelColumns!=null && Array.IndexOf(plainPixelColumns, c)>=0;
+                int startLine=checkFull ? 0 : row.Slices[c].Count;
+                if (startLine<visual.TextLines.Count) {
+                    double yTop=origin.Y+visual.GetTextLineVisualYPosition(visual.TextLines[startLine], VisualYPosition.LineTop)-view.VerticalOffset;
+                    int y0=Math.Max(0, (int)Math.Ceiling(yTop)+1);
+                    bleedPixels+=CountShadeOrBoxPixels(pixels, stride, x0, x1, y0, ry1, boxR, boxG, boxB, hiR, hiG, hiB);
+                }
+            }
+            int rightX0=Math.Max(0, (int)Math.Ceiling(origin.X+row.Boundaries[expectedCols]-view.HorizontalOffset)+2);
+            if (rightX0<bmpW) bleedPixels+=CountShadeOrBoxPixels(pixels, stride, rightX0, bmpW-1, ry0, ry1, boxR, boxG, boxB, hiR, hiG, hiB);
+            int leftX0=Math.Max(0, (int)Math.Ceiling(origin.X-view.HorizontalOffset));
+            int leftX1=Math.Min(bmpW-1, (int)Math.Floor(origin.X+row.Boundaries[0]-view.HorizontalOffset)-3);
+            if (leftX1>=leftX0) bleedPixels+=CountShadeOrBoxPixels(pixels, stride, leftX0, leftX1, ry0, ry1, boxR, boxG, boxB, hiR, hiG, hiB);
+        }
+
+        detail="splits="+keySplits+" blank="+blankSlices+" min="+N(worstCol)+"/"+N(worstMin)+
+            " ovf="+overflowRuns+" keyBounds="+badKeyBounds+" bleed="+bleedPixels;
+        return keySplits==0 && blankSlices==0 && minOk && overflowRuns==0 && badKeyBounds==0 && bleedPixels==0;
+    }
+    static int CountShadeOrBoxPixels(byte[] pixels, int stride, int x0, int x1, int y0, int y1,
+        byte boxR, byte boxG, byte boxB, byte hiR, byte hiG, byte hiB) {
+        int count=0;
+        for (int y=y0;y<=y1;y++) {
+            for (int x=x0;x<=x1;x++) {
+                int idx=y*stride+x*4;
+                byte r=pixels[idx+2], g=pixels[idx+1], b=pixels[idx];
+                if ((Math.Abs(r-boxR)<=4 && Math.Abs(g-boxG)<=4 && Math.Abs(b-boxB)<=4) ||
+                    (Math.Abs(r-hiR)<=4 && Math.Abs(g-hiG)<=4 && Math.Abs(b-hiB)<=4)) count++;
+            }
+        }
+        return count;
+    }
+    static void CheckCellKbdCases() {
+        var details=new StringBuilder();
+        bool allOk=true;
+
+        // 1. Oversized <kbd> key + 2. Space & Hangul inside <kbd> + 3. <kbd> at cell start +
+        // 4. Adjacent keys + 5. Key followed by <br> + 7. 3-column table.
+        string[] names=new string[] { "oversized", "space-hangul", "cell-start", "adjacent", "kbd-br", "three-col" };
+        string[] fixtures=new string[] {
+            "| col1 | col2 |\n|---|---|\n| ==<kbd>SuperLongOversizedKeyboardShortcutKeyNameThatCannotFit</kbd> end== | plain |\n\nend\n",
+            "| col1 | col2 |\n|---|---|\n| ==before <kbd>Page Up</kbd> <kbd>한/영</kbd> after== | plain |\n\nend\n",
+            "| col1 | col2 |\n|---|---|\n| <kbd>Ctrl</kbd> ==middle <kbd>Shift</kbd> <kbd>Alt</kbd>== | plain |\n\nend\n",
+            "| col1 | col2 |\n|---|---|\n| ==<kbd>Ctrl</kbd>+<kbd>C</kbd> <kbd>Alt</kbd><kbd>Tab</kbd>== | plain |\n\nend\n",
+            "| col1 | col2 |\n|---|---|\n| ==<kbd>Enter</kbd><br>next line<br><kbd>Esc</kbd>== | plain |\n\nend\n",
+            "| col1 | col2 | col3 |\n|---|---|---|\n| ==<kbd>Ctrl</kbd>+<kbd>Shift</kbd> wrap== | ==<kbd>한/영</kbd><br>two== | plain |\n\nend\n"
+        };
+        double[] widths=new double[] { 420, 320, 320, 260, 320, 420 };
+        int[] cols=new int[] { 2, 2, 2, 2, 2, 3 };
+        bool[] checkMin=new bool[] { false, true, true, true, true, true };
+        int[][] plainCols=new int[][] { new int[] { 1 }, new int[] { 1 }, new int[] { 1 }, new int[] { 1 }, new int[] { 1 }, new int[] { 2 } };
+        for (int i=0;i<fixtures.Length;i++) {
+            var editor=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+            editor.TextArea.TextView.LineHeight=double.NaN; editor.Text=fixtures[i];
+            var session=MarkdownLivePreview.Attach(editor, new MarkdownLivePreview.Settings { FontSize=16, Family="Malgun Gothic", LinePercent=150, WordWrap=true, HideMarkers=true });
+            Window win=Host(editor, widths[i]);
+            TextOptions.SetTextFormattingMode(win, TextFormattingMode.Display);
+            try {
+                win.Show(); editor.TextArea.Caret.Line=editor.Document.LineCount; Pump(editor);
+                string d;
+                bool ok=CheckTableRowInvariants(win, editor, session, 3, cols[i], checkMin[i], plainCols[i], out d);
+                if (i==4 && session.Info(editor.Document.GetLineByNumber(3)).Row!=null &&
+                    session.Info(editor.Document.GetLineByNumber(3)).Row.Slices[0].Count<3) { ok=false; d+=" slices<3"; }
+                if (!ok) allOk=false;
+                details.Append(names[i]).Append(ok ? "=PASS(" : "=FAIL(").Append(d).Append(") ");
+            } finally { session.Dispose(); win.Close(); }
+        }
+
+        // 6. Key followed by "." at a wrap stays with the key instead of orphan "." row.
+        {
+            const string dotFixture="| col1 | col2 |\n|---|---|\n| ==alpha beta <kbd>Shift</kbd>. gamma== | plain |\n\nend\n";
+            var editor=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+            editor.TextArea.TextView.LineHeight=double.NaN; editor.Text=dotFixture;
+            var session=MarkdownLivePreview.Attach(editor, new MarkdownLivePreview.Settings { FontSize=16, Family="Malgun Gothic", LinePercent=150, WordWrap=true, HideMarkers=true });
+            Window win=Host(editor, 340);
+            TextOptions.SetTextFormattingMode(win, TextFormattingMode.Display);
+            try {
+                win.Show(); editor.TextArea.Caret.Line=editor.Document.LineCount; Pump(editor);
+                var row=session.Info(editor.Document.GetLineByNumber(3)).Row;
+                for (int step=0;step<24 && (row==null || row.Slices[0].Count<2);step++) {
+                    win.Width-=6; Pump(editor);
+                    row=session.Info(editor.Document.GetLineByNumber(3)).Row;
+                }
+                string d;
+                bool ok=CheckTableRowInvariants(win, editor, session, 3, 2, true, new int[] { 1 }, out d);
+                bool dotOrphan=false;
+                if (row!=null && row.Slices[0].Count>=2) {
+                    var ct=row.Texts[0];
+                    for (int s=1;s<row.Slices[0].Count;s++) {
+                        int st=row.Slices[0][s].Start;
+                        if (st<ct.Text.Length && ct.Text[st]=='.') { dotOrphan=true; break; }
+                    }
+                } else { ok=false; d+=" noWrap"; }
+                if (dotOrphan) { ok=false; d+=" dotOrphan"; }
+                if (!ok) allOk=false;
+                details.Append("dot-wrap").Append(ok ? "=PASS(" : "=FAIL(").Append(d).Append(") ");
+            } finally { session.Dispose(); win.Close(); }
+        }
+
+        // 8. Item E undo: inserting a long key raises typed Minima and squeezes neighbour; Undo while
+        // caret remains inside the table restores Minima immediately (while b52 keeps Widths/Grow);
+        // moving the caret out lets TableIdle restore neighbour width within 1 px.
+        {
+            const string undoFixture="| col1 | col2 |\n|---|---|\n| short | ==Press <kbd>Ctrl</kbd> now== ==Press <kbd>Ctrl</kbd> now== ==Press <kbd>Ctrl</kbd> now== |\n\nend\n";
+            var editor=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+            editor.TextArea.TextView.LineHeight=double.NaN; editor.Text=undoFixture;
+            // SourceEditor disables AvalonEdit's UndoStack (SizeLimit=0) in favor of MainWindow DocumentHistory;
+            // re-enable UndoStack on this standalone editor so editor.Undo() actually reverts the insert.
+            editor.Document.UndoStack.SizeLimit=10;
+            var session=MarkdownLivePreview.Attach(editor, new MarkdownLivePreview.Settings { FontSize=16, Family="Malgun Gothic", LinePercent=150, WordWrap=true, HideMarkers=true });
+            Window win=Host(editor, 420);
+            TextOptions.SetTextFormattingMode(win, TextFormattingMode.Display);
+            try {
+                win.Show();
+                DocumentLine l3=editor.Document.GetLineByNumber(3);
+                int at=l3.Offset+session.Info(l3).Cells[0].End;
+                editor.TextArea.Caret.Offset=at;
+                Pump(editor);
+                var rowBefore=session.Info(editor.Document.GetLineByNumber(3)).Row;
+                var table=rowBefore!=null ? rowBefore.Table : null;
+                double col2Before=rowBefore!=null ? rowBefore.Widths[1] : 0;
+                double min0Before=table!=null ? table.Minima[0] : 0;
+                double min1Before=table!=null ? table.Minima[1] : 0;
+                editor.Document.Insert(at, " <kbd>VeryLongKeyboardTokenNameToSqueezeNeighbour</kbd>");
+                Pump(editor);
+                var rowSqueezed=session.Info(editor.Document.GetLineByNumber(3)).Row;
+                double col2Squeezed=rowSqueezed!=null ? rowSqueezed.Widths[1] : 0;
+                double min0Squeezed=table!=null ? table.Minima[0] : 0;
+                editor.Undo();
+                Pump(editor);
+                bool textRestored=editor.Document.Text==undoFixture;
+                bool caretInRow=editor.TextArea.Caret.Line==3;
+                double min0AfterUndo=table!=null ? table.Minima[0] : 0;
+                double min1AfterUndo=table!=null ? table.Minima[1] : 0;
+                string dUndo;
+                bool invUndoOk=CheckTableRowInvariants(win, editor, session, 3, 2, true, null, out dUndo);
+
+                editor.TextArea.Caret.Line=editor.Document.LineCount;
+                Pump(editor);
+                Settle(editor);
+                var rowSettled=session.Info(editor.Document.GetLineByNumber(3)).Row;
+                double col2Settled=rowSettled!=null ? rowSettled.Widths[1] : 0;
+                string dSettled;
+                bool invSettledOk=CheckTableRowInvariants(win, editor, session, 3, 2, true, null, out dSettled);
+
+                bool undoOk=textRestored && caretInRow && table!=null && rowBefore!=null &&
+                    min0Squeezed>min0Before+50 && col2Squeezed<col2Before-5 &&
+                    Math.Abs(min0AfterUndo-min0Before)<=1.0 && Math.Abs(min1AfterUndo-min1Before)<=1.0 &&
+                    Math.Abs(col2Settled-col2Before)<=1.0 && invUndoOk && invSettledOk;
+                if (!undoOk) allOk=false;
+                details.Append("undo-min=").Append(undoOk ? "PASS(" : "FAIL(")
+                    .Append("txt=").Append(textRestored).Append(" caret=").Append(caretInRow)
+                    .Append(" min0=").Append(N(min0Before)).Append("->").Append(N(min0Squeezed)).Append("->").Append(N(min0AfterUndo))
+                    .Append(" min1=").Append(N(min1Before)).Append("->").Append(N(min1AfterUndo))
+                    .Append(" w=").Append(N(col2Before)).Append("->").Append(N(col2Squeezed)).Append("->").Append(N(col2Settled))
+                    .Append(" invUndo=[").Append(dUndo).Append("] invSettle=[").Append(dSettled).Append("])");
+            } finally { session.Dispose(); win.Close(); }
+        }
+
+        Check("cell-kbd-cases", allOk, details.ToString());
+    }
+    static bool CheckKbdBoxAndLeftHighlight(byte[] pixels, int stride, int bmpW, int bmpH,
+        double keyLeft, double keyRight, double boxLeft, double bandTop, double bandBottom,
+        Brush boxBrush, Brush highlightBrush, out string detail) {
+        detail="invalid";
+        if (!(boxBrush is SolidColorBrush) || !(highlightBrush is SolidColorBrush)) { detail="no brush"; return false; }
+        Color bc=((SolidColorBrush)boxBrush).Color;
+        byte boxR=(byte)((bc.R*bc.A+255*(255-bc.A))/255), boxG=(byte)((bc.G*bc.A+255*(255-bc.A))/255), boxB=(byte)((bc.B*bc.A+255*(255-bc.A))/255);
+        Color hc=((SolidColorBrush)highlightBrush).Color;
+        byte hiR=(byte)((hc.R*hc.A+255*(255-hc.A))/255), hiG=(byte)((hc.G*hc.A+255*(255-hc.A))/255), hiB=(byte)((hc.B*hc.A+255*(255-hc.A))/255);
+        int midY=(int)Math.Round((bandTop+bandBottom)/2.0);
+        int my0=Math.Max(0, midY-2), my1=Math.Min(bmpH-1, midY+2);
+        int kx0=Math.Max(0, (int)Math.Ceiling(keyLeft)), kx1=Math.Min(bmpW-1, (int)Math.Floor(keyRight)-1);
+        int boxPixels=0;
+        for (int x=kx0;x<=kx1;x++) {
+            for (int y=my0;y<=my1;y++) {
+                int idx=y*stride+x*4;
+                if (Math.Abs(pixels[idx+2]-boxR)<=4 && Math.Abs(pixels[idx+1]-boxG)<=4 && Math.Abs(pixels[idx]-boxB)<=4) boxPixels++;
+            }
+        }
+        int lx0=Math.Max(0, (int)Math.Floor(boxLeft)-4), lx1=Math.Min(bmpW-1, (int)Math.Floor(boxLeft)-2);
+        int leftHighlightPixels=0;
+        for (int x=lx0;x<=lx1;x++) {
+            for (int y=my0;y<=my1;y++) {
+                int idx=y*stride+x*4;
+                if (Math.Abs(pixels[idx+2]-hiR)<=4 && Math.Abs(pixels[idx+1]-hiG)<=4 && Math.Abs(pixels[idx]-hiB)<=4) leftHighlightPixels++;
+            }
+        }
+        detail="boxFill="+boxPixels+" leftHi="+leftHighlightPixels;
+        return boxPixels>0 && leftHighlightPixels>0;
+    }
     static VisualLineElement VisualElement(VisualLine visual,int relativeOffset) {
         if (visual==null) return null;
         foreach (VisualLineElement element in visual.Elements)
@@ -857,7 +1688,8 @@ internal static class LiveLayoutProbeRunner {
         Point origin=transform.Transform(glyph.BaselineOrigin), right=transform.Transform(new Point(glyph.BaselineOrigin.X+advance,glyph.BaselineOrigin.Y));
         inks.Add(new Ink {Text=text,X=origin.X,Right=right.X,Y=origin.Y,Size=glyph.FontRenderingEmSize,Family=String.Join(",",glyph.GlyphTypeface.FamilyNames.Values)});
     }
-    static void Save(Window window,string path) { window.UpdateLayout(); var content=window.Content as FrameworkElement; var bitmap=new RenderTargetBitmap((int)Math.Ceiling(content.ActualWidth),(int)Math.Ceiling(content.ActualHeight),96,96,PixelFormats.Pbgra32); bitmap.Render(content); var encoder=new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap)); using(var stream=File.Create(path))encoder.Save(stream); }
+    static RenderTargetBitmap Render(Window window) { window.UpdateLayout(); var content=window.Content as FrameworkElement; var bitmap=new RenderTargetBitmap((int)Math.Ceiling(content.ActualWidth),(int)Math.Ceiling(content.ActualHeight),96,96,PixelFormats.Pbgra32); bitmap.Render(content); return bitmap; }
+    static void Save(Window window,string path) { var bitmap=Render(window); var encoder=new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap)); using(var stream=File.Create(path))encoder.Save(stream); }
     static void Check(string name,bool ok,string detail) { if(ok)passes++;else failures++; report.Append(ok?"PASS ":"FAIL ").Append(name).Append(": ").Append(detail).Append('\n'); }
     static string N(double value) { return value.ToString("0.##",CultureInfo.InvariantCulture); }
 }

@@ -396,6 +396,8 @@ internal static partial class MarkdownLivePreview {
     internal const double MinimumColumnWidth=140;
     // RowLayout's cell inset; Widths hold the TEXT width, TableWidths adds this padding.
     internal const double CellPadding=10.5;
+    // Vertical cell padding carried by the first/last physical row's TableSpaceRun fillers.
+    internal const double TableRowPad=6.5;
     // <kbd>'s box padding: .35 em of real layout space on each side (the hidden tag runs carry it
     // through InvisibleElement's gap), and the box widens to the text band for a one-letter key.
     internal const double KeyboardPadEm=.35;
@@ -1935,24 +1937,34 @@ internal static partial class MarkdownLivePreview {
     }
 
     internal sealed class GlyphMeasure {
-        readonly GlyphTypeface normal, bold;
+        readonly GlyphTypeface normal, bold, codeNormal, codeBold;
         readonly double size;
         readonly Dictionary<char, double> regular = new Dictionary<char, double>();
         readonly Dictionary<char, double> strong = new Dictionary<char, double>();
+        readonly Dictionary<char, double> codeRegular = new Dictionary<char, double>();
+        readonly Dictionary<char, double> codeStrong = new Dictionary<char, double>();
         internal GlyphMeasure(FontFamily family, double size) {
             this.size = size;
             new Typeface(family, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal).TryGetGlyphTypeface(out normal);
             new Typeface(family, FontStyles.Normal, FontWeights.Bold, FontStretches.Normal).TryGetGlyphTypeface(out bold);
+            var consolas = new FontFamily("Consolas");
+            if (!new Typeface(consolas, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal).TryGetGlyphTypeface(out codeNormal))
+                new Typeface(CodeFamily, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal).TryGetGlyphTypeface(out codeNormal);
+            if (!new Typeface(consolas, FontStyles.Normal, FontWeights.Bold, FontStretches.Normal).TryGetGlyphTypeface(out codeBold))
+                new Typeface(CodeFamily, FontStyles.Normal, FontWeights.Bold, FontStretches.Normal).TryGetGlyphTypeface(out codeBold);
         }
-        internal void Clear() { regular.Clear(); strong.Clear(); }
-        double Advance(char c, bool header) {
-            Dictionary<char, double> cache = header ? strong : regular;
+        internal void Clear() { regular.Clear(); strong.Clear(); codeRegular.Clear(); codeStrong.Clear(); }
+        double Advance(char c, bool header) { return Advance(c, header, false); }
+        double Advance(char c, bool boldFace, bool codeFace) {
+            Dictionary<char, double> cache = codeFace ? (boldFace ? codeStrong : codeRegular) : (boldFace ? strong : regular);
             double width;
             if (cache.TryGetValue(c, out width)) return width;
-            GlyphTypeface face = header ? bold : normal;
+            GlyphTypeface face = codeFace ? (boldFace ? codeBold : codeNormal) : (boldFace ? bold : normal);
+            GlyphTypeface fallback = codeFace ? (boldFace ? bold : normal) : null;
             ushort glyph;
             width = c == '\t' ? 2 : char.IsWhiteSpace(c) ? 0.35 : c >= 0x2E80 ? 1 : 0.6;
             if (face != null && face.CharacterToGlyphMap.TryGetValue(c, out glyph)) width = face.AdvanceWidths[glyph];
+            else if (fallback != null && fallback.CharacterToGlyphMap.TryGetValue(c, out glyph)) width = fallback.AdvanceWidths[glyph];
             if (cache.Count >= 4096) cache.Clear();
             cache[c] = width;
             return width;
@@ -1991,6 +2003,154 @@ internal static partial class MarkdownLivePreview {
             }
             return width * size;
         }
+        // Typing-path cell width and longest unbreakable token, matching CellText styles/faces and
+        // keeping <kbd>...</kbd> padding and key text together so GrowTypingColumn keeps O(edited cell).
+        internal void MeasureCell(MarkdownLivePreview.LineInfo info, MarkdownLivePreview.Cell cell, out double totalWidth, out double minWidth) {
+            MeasureCell(info, cell, null, false, out totalWidth, out minWidth);
+        }
+        internal void MeasureCell(MarkdownLivePreview.LineInfo info, MarkdownLivePreview.Cell cell, MarkdownLivePreview.Session session, bool raw, out double totalWidth, out double minWidth) {
+            totalWidth = 0; minWidth = 0;
+            int len = cell.End - cell.Start;
+            if (len <= 0) return;
+            string text = info.Text;
+            byte[] styleFlags = null; // bit 1 = bold, bit 2 = code
+            double[] charSizes = null;
+            List<MarkdownLivePreview.StyledPart> styles = info.Styles;
+            for (int i = 0; i < styles.Count; i++) {
+                MarkdownLivePreview.StyledPart part = styles[i];
+                int a = Math.Max(cell.Start, part.Start), b = Math.Min(cell.End, part.Start + part.Length);
+                if (b <= a) continue;
+                bool addBold = (part.Style & MarkdownLivePreview.Style.Bold) != 0;
+                bool addCode = (part.Style & MarkdownLivePreview.Style.Code) != 0;
+                if (addBold || addCode) {
+                    if (styleFlags == null) styleFlags = new byte[len];
+                    byte bit = (byte)((addBold ? 1 : 0) | (addCode ? 2 : 0));
+                    for (int p = a; p < b; p++) styleFlags[p - cell.Start] |= bit;
+                }
+                bool sized = part.Size > 0 || part.SizeEm > 0 ||
+                    (part.Style & (MarkdownLivePreview.Style.Small | MarkdownLivePreview.Style.HtmlSmall |
+                                   MarkdownLivePreview.Style.Superscript | MarkdownLivePreview.Style.Subscript)) != 0;
+                if (sized) {
+                    if (charSizes == null) {
+                        charSizes = new double[len];
+                        for (int k = 0; k < len; k++) charSizes[k] = size;
+                    }
+                    for (int p = a; p < b; p++) {
+                        int idx = p - cell.Start;
+                        double s = charSizes[idx];
+                        if (part.Size > 0) s = part.Size;
+                        else if (part.SizeEm > 0) s = Math.Max(6, Math.Min(120, size * part.SizeEm));
+                        if ((part.Style & MarkdownLivePreview.Style.Small) != 0) s = size * 0.9;
+                        if ((part.Style & MarkdownLivePreview.Style.HtmlSmall) != 0) s *= 0.85;
+                        if ((part.Style & (MarkdownLivePreview.Style.Superscript | MarkdownLivePreview.Style.Subscript)) != 0) s *= 0.75;
+                        if (s < 0.1) s = 0.1;
+                        if (s > 200) s = 200;
+                        charSizes[idx] = s;
+                    }
+                }
+            }
+            double lineWidth = 0, word = 0;
+            bool inKey = false;
+            int replacement = 0;
+            List<MarkdownLivePreview.Replacement> replacements = info.Replacements;
+            string touch = info.MathTouchKey;
+            for (int p = cell.Start; p < cell.End; ) {
+                int idx = p - cell.Start;
+                bool boldChar = info.Header || (styleFlags != null && (styleFlags[idx] & 1) != 0);
+                bool codeChar = styleFlags != null && (styleFlags[idx] & 2) != 0;
+                double charSize = charSizes != null ? charSizes[idx] : size;
+                if (!raw) {
+                    while (replacement < replacements.Count && replacements[replacement].Start + replacements[replacement].Length <= p) replacement++;
+                    if (replacement < replacements.Count && replacements[replacement].Start == p) {
+                        MarkdownLivePreview.Replacement item = replacements[replacement];
+                        if (item.Kind == MarkdownLivePreview.ReplacementKind.LineBreak) {
+                            if (lineWidth > totalWidth) totalWidth = lineWidth;
+                            if (word > minWidth) minWidth = word;
+                            lineWidth = 0; word = 0; inKey = false;
+                            p = Math.Min(cell.End, p + item.Length); continue;
+                        }
+                        if (item.Kind == MarkdownLivePreview.ReplacementKind.Hidden) {
+                            if (item.PadEm > 0) {
+                                bool closing = p + 1 < text.Length && text[p + 1] == '/';
+                                double pad = item.PadEm * charSize;
+                                if (!closing) {
+                                    if (word > minWidth) minWidth = word;
+                                    word = 0; inKey = true;
+                                }
+                                lineWidth += pad; word += pad;
+                                if (closing) {
+                                    if (word > minWidth) minWidth = word;
+                                    word = 0; inKey = false;
+                                }
+                            }
+                            p = Math.Min(cell.End, p + item.Length); continue;
+                        }
+                        if (item.Kind == MarkdownLivePreview.ReplacementKind.Glyph) {
+                            if (!string.IsNullOrEmpty(item.Label)) {
+                                for (int i = 0; i < item.Label.Length; i++) {
+                                    char gc = item.Label[i];
+                                    if (gc == '\u200B') {
+                                        if (!inKey) {
+                                            if (word > minWidth) minWidth = word;
+                                            word = 0;
+                                        }
+                                        continue;
+                                    }
+                                    double cw = Advance(gc, boldChar, codeChar) * charSize;
+                                    lineWidth += cw; word += cw;
+                                }
+                            }
+                            p = Math.Min(cell.End, p + item.Length); continue;
+                        }
+                        if (item.Kind == MarkdownLivePreview.ReplacementKind.Image) {
+                            double iw = item.ImageWidth > 0 ? Math.Min(item.ImageWidth, 700) : 24;
+                            lineWidth += iw;
+                            if (!inKey) {
+                                if (word > minWidth) minWidth = word;
+                                word = 0;
+                            } else word += iw;
+                            if (iw > minWidth) minWidth = iw;
+                            p = Math.Min(cell.End, p + item.Length); continue;
+                        }
+                        if (item.Kind == MarkdownLivePreview.ReplacementKind.Math && p + item.Length <= cell.End &&
+                            (touch == null || touch.IndexOf("," + item.Start.ToString(CultureInfo.InvariantCulture) + ",", StringComparison.Ordinal) < 0)) {
+                            double mw = session != null ? session.CellMathWidth(item.Source, charSize) : 0;
+                            if (mw > 0) {
+                                lineWidth += mw;
+                                if (!inKey) {
+                                    if (word > minWidth) minWidth = word;
+                                    word = 0;
+                                } else word += mw;
+                                if (mw > minWidth) minWidth = mw;
+                                p = Math.Min(cell.End, p + item.Length); continue;
+                            }
+                        }
+                    }
+                }
+                char c = text[p];
+                double advance = Advance(c, boldChar, codeChar) * charSize;
+                if (!inKey && char.IsWhiteSpace(c)) {
+                    lineWidth += advance;
+                    if (word > minWidth) minWidth = word;
+                    word = 0;
+                } else if (!inKey && IsBreakableCjk(c)) {
+                    lineWidth += advance;
+                    if (word > minWidth) minWidth = word;
+                    if (advance > minWidth) minWidth = advance;
+                    word = 0;
+                } else {
+                    lineWidth += advance;
+                    word += advance;
+                }
+                p++;
+            }
+            if (lineWidth > totalWidth) totalWidth = lineWidth;
+            if (word > minWidth) minWidth = word;
+        }
+        static bool IsBreakableCjk(char c) {
+            return (c >= 0x1100 && c <= 0x11FF) || (c >= 0x2E80 && c <= 0x9FFF) ||
+                (c >= 0xAC00 && c <= 0xD7AF) || (c >= 0xF900 && c <= 0xFAFF) || (c >= 0xFF00 && c <= 0xFFEF);
+        }
     }
     internal sealed class CellProperties : TextRunProperties {
         readonly Typeface face; readonly double size; readonly Brush ink;
@@ -2008,14 +2168,15 @@ internal static partial class MarkdownLivePreview {
         public override CultureInfo CultureInfo { get { return CultureInfo.CurrentCulture; } }
     }
     internal sealed class CellParagraph : TextParagraphProperties {
-        readonly TextRunProperties properties; readonly double height;
-        internal CellParagraph(TextRunProperties properties, double height) { this.properties=properties; this.height=height; }
+        readonly TextRunProperties properties; readonly double height; readonly TextWrapping wrapping;
+        internal CellParagraph(TextRunProperties properties, double height) : this(properties, height, TextWrapping.Wrap) { }
+        internal CellParagraph(TextRunProperties properties, double height, TextWrapping wrapping) { this.properties=properties; this.height=height; this.wrapping=wrapping; }
         public override FlowDirection FlowDirection { get { return FlowDirection.LeftToRight; } }
         public override TextAlignment TextAlignment { get { return TextAlignment.Left; } }
         public override double LineHeight { get { return height; } }
         public override bool FirstLineInParagraph { get { return true; } }
         public override TextRunProperties DefaultTextRunProperties { get { return properties; } }
-        public override TextWrapping TextWrapping { get { return TextWrapping.Wrap; } }
+        public override TextWrapping TextWrapping { get { return wrapping; } }
         public override TextMarkerProperties TextMarkerProperties { get { return null; } }
         public override double Indent { get { return 0; } }
     }
@@ -2026,6 +2187,9 @@ internal static partial class MarkdownLivePreview {
         internal readonly string Text;
         internal readonly int[] Map;
         internal readonly TextRunProperties[] Properties;
+        // Per-text-index background shade (0 = none, 1 = InlineCode, 2 = Highlight), painted by
+        // BlockRenderer per text line at uniform height instead of per-run BackgroundBrush.
+        internal readonly byte[] Shades;
         internal readonly TextRunProperties Default;
         internal readonly TextRunCache RunCache=new TextRunCache();
         internal readonly string Source;
@@ -2078,10 +2242,30 @@ internal static partial class MarkdownLivePreview {
         }
         internal bool IsPad(int index) { return Pads!=null && index>=0 && index<Pads.Length && Pads[index]; }
         internal bool IsClosePad(int index) { return PadClose!=null && index>=0 && index<PadClose.Length && PadClose[index]; }
-        internal TextRun PadRun(TextRunProperties properties) { return new CellPadRun(properties); }
+        internal bool FindKeyRange(int splitIndex, out int keyStart, out int keyEnd) {
+            keyStart = keyEnd = -1;
+            if (Pads == null || PadClose == null || splitIndex <= 0 || splitIndex >= Text.Length) return false;
+            int open = -1;
+            for (int p = splitIndex - 1; p >= 0; p--) {
+                if (!Pads[p]) continue;
+                if (PadClose[p]) return false;
+                open = p; break;
+            }
+            if (open < 0) return false;
+            int close = -1;
+            for (int p = Math.Max(splitIndex, open + 1); p < Pads.Length; p++) {
+                if (!Pads[p]) continue;
+                if (!PadClose[p]) return false;
+                close = p; break;
+            }
+            if (close < 0) return false;
+            keyStart = open; keyEnd = close;
+            return true;
+        }
+        internal TextRun PadRun(int index, TextRunProperties properties) { return new CellPadRun(properties, IsClosePad(index)); }
         internal CellText(CellText previous,LineInfo info,Cell cell) {
             Source=info.Text;SourceStart=cell.Start;SourceLength=cell.End-cell.Start;Plain=previous.Plain;
-            Default=previous.Default;Text=previous.Text;Properties=previous.Properties;Breaks=previous.Breaks;Pads=previous.Pads;PadClose=previous.PadClose;
+            Default=previous.Default;Text=previous.Text;Properties=previous.Properties;Shades=previous.Shades;Breaks=previous.Breaks;Pads=previous.Pads;PadClose=previous.PadClose;
             ImageSlots=previous.ImageSlots;ImageBitmaps=previous.ImageBitmaps;ImageWidths=previous.ImageWidths;ImageHeights=previous.ImageHeights;
             MathSlots=previous.MathSlots;MathVisuals=previous.MathVisuals;
             ContentWidth=previous.ContentWidth;
@@ -2124,39 +2308,110 @@ internal static partial class MarkdownLivePreview {
             var formulas=new List<int>(); var drawings=new List<MathVisual>();
             var sourceProperties=new TextRunProperties[cell.End-cell.Start];
             for (int i=0;i<sourceProperties.Length;i++) sourceProperties[i]=Default;
+            byte[] sourceShades=null;
+            bool[] keyChars=null;
             // Styles are bounded by MaxSpans, and built once per measured/visible row.
             foreach (StyledPart style in info.Styles) {
                 int a=Math.Max(cell.Start,style.Start), b=Math.Min(cell.End,style.Start+style.Length);
-                for (int p=a;p<b;p++) {
-                    var value=new VisualLineElementTextRunProperties(sourceProperties[p-cell.Start]); Typeface face=value.Typeface;
-                    value.SetTypeface(new Typeface((style.Style & Style.Code)!=0 ? CodeFamily : face.FontFamily,
-                        (style.Style & Style.Italic)!=0 ? FontStyles.Italic : face.Style,
-                        (style.Style & Style.Bold)!=0 ? FontWeights.ExtraBold : face.Weight, face.Stretch));
-                    if ((style.Style & Style.Link)!=0) value.SetForegroundBrush(session.Colors.Link);
-                    // A key's box is drawn by BlockRenderer (DrawKeyboardRange) and the text
-                    // layer paints a run's background above it, so the inline-code shade would
-                    // cover the box's own edges. MarkdownTransformer clears that shade on an
-                    // ordinary line the same way (a nested highlight stays); the revealed (raw)
-                    // row keeps the source look.
-                    if ((style.Style & Style.Code)!=0) {
-                        if ((style.Style & Style.Keyboard)!=0 && !raw) {
-                            if (Object.ReferenceEquals(value.BackgroundBrush, session.Colors.InlineCode)) value.SetBackgroundBrush(null);
-                        } else value.SetBackgroundBrush(session.Colors.InlineCode);
+                if (b<=a) continue;
+                bool code=(style.Style & Style.Code)!=0;
+                bool keyboard=(style.Style & Style.Keyboard)!=0;
+                bool highlight=(style.Style & Style.Highlight)!=0;
+                if (keyboard && !raw) {
+                    if (keyChars==null) keyChars=new bool[cell.End-cell.Start];
+                    for (int p=a;p<b;p++) keyChars[p-cell.Start]=true;
+                }
+                if (highlight || (code && (sourceShades!=null || !(keyboard && !raw)))) {
+                    if (sourceShades==null) sourceShades=new byte[cell.End-cell.Start];
+                    for (int p=a;p<b;p++) {
+                        int idx=p-cell.Start;
+                        if (code) {
+                            if (keyboard && !raw) {
+                                if (sourceShades[idx]==1) sourceShades[idx]=0;
+                            } else sourceShades[idx]=1;
+                        }
+                        if (highlight) sourceShades[idx]=2;
                     }
-                    if ((style.Style & Style.Highlight)!=0) value.SetBackgroundBrush(session.Colors.Highlight);
-                    if (style.Color!=null) value.SetForegroundBrush(style.Color);
-                    if (style.Size>0) value.SetFontRenderingEmSize(style.Size);
-                    else if (style.SizeEm>0) value.SetFontRenderingEmSize(Math.Max(6, Math.Min(120, session.Options.FontSize * style.SizeEm)));
-                    HtmlProperties(value, style.Style, session.Colors.Muted);
+                }
+                List<TextRunProperties> keys=null;
+                List<VisualLineElementTextRunProperties> derived=null;
+                TextRunProperties lastKey=null;
+                VisualLineElementTextRunProperties lastValue=null;
+                for (int p=a;p<b;p++) {
+                    TextRunProperties baseProps=sourceProperties[p-cell.Start];
+                    VisualLineElementTextRunProperties value=null;
+                    if (Object.ReferenceEquals(baseProps,lastKey)) {
+                        value=lastValue;
+                    } else {
+                        if (keys!=null) {
+                            for (int k=0;k<keys.Count;k++) {
+                                if (Object.ReferenceEquals(keys[k],baseProps)) { value=derived[k]; break; }
+                            }
+                        }
+                        if (value==null) {
+                            value=new VisualLineElementTextRunProperties(baseProps); Typeface face=value.Typeface;
+                            value.SetTypeface(new Typeface(code ? CodeFamily : face.FontFamily,
+                                (style.Style & Style.Italic)!=0 ? FontStyles.Italic : face.Style,
+                                (style.Style & Style.Bold)!=0 ? FontWeights.ExtraBold : face.Weight, face.Stretch));
+                            if ((style.Style & Style.Link)!=0) value.SetForegroundBrush(session.Colors.Link);
+                            if (style.Color!=null) value.SetForegroundBrush(style.Color);
+                            if (style.Size>0) SetLiveEmSize(value, style.Size);
+                            else if (style.SizeEm>0) SetLiveEmSize(value, Math.Max(6, Math.Min(120, session.Options.FontSize * style.SizeEm)));
+                            if ((style.Style & Style.Small)!=0) SetLiveEmSize(value, session.Options.FontSize * 0.9);
+                            HtmlProperties(value, style.Style, session.Colors.Muted);
+                            if (keys==null) { keys=new List<TextRunProperties>(4); derived=new List<VisualLineElementTextRunProperties>(4); }
+                            keys.Add(baseProps); derived.Add(value);
+                        }
+                        lastKey=baseProps; lastValue=value;
+                    }
                     sourceProperties[p-cell.Start]=value;
                 }
             }
+            if (sourceShades!=null && keyChars!=null) {
+                for (int idx=0;idx<sourceShades.Length;idx++) {
+                    if (keyChars[idx] && sourceShades[idx]==1) sourceShades[idx]=0;
+                }
+            }
+            byte imeShade=0;
+            if (!imeDone && session!=null) {
+                int styleAt=session.TableImeStyleAt(info,info.ImeAt);
+                bool imeKey=false;
+                for (int i=0;i<info.Styles.Count;i++) {
+                    StyledPart style=info.Styles[i];
+                    if (styleAt<style.Start || styleAt>style.Start+style.Length) continue;
+                    bool code=(style.Style & Style.Code)!=0;
+                    bool keyboard=(style.Style & Style.Keyboard)!=0;
+                    bool highlight=(style.Style & Style.Highlight)!=0;
+                    if (keyboard && !raw) imeKey=true;
+                    if (code) imeShade=1;
+                    if (highlight) imeShade=2;
+                }
+                if (imeKey && imeShade==1) imeShade=0;
+                if (session.Editor!=null && session.Editor.PendingImeStyle!=null) {
+                    ImePendingStyle pending=null;
+                    try { pending=session.Editor.PendingImeStyle(); } catch (Exception) { pending=null; }
+                    if (pending!=null) {
+                        if (pending.Code && !imeKey) imeShade=1;
+                        if (pending.Highlight) imeShade=2;
+                    }
+                }
+                int csStart, csEnd;
+                if (imeShade!=0 && session.TableCloseSpaceShadeRange(info,info.ImeAt,out csStart,out csEnd)) {
+                    int from=Math.Max(cell.Start,csStart), to=Math.Min(cell.End,csEnd);
+                    if (to>from) {
+                        if (sourceShades==null) sourceShades=new byte[cell.End-cell.Start];
+                        for (int p=from;p<to;p++) sourceShades[p-cell.Start]=imeShade;
+                    }
+                }
+            }
+            List<byte> shades=(sourceShades!=null || imeShade!=0) ? new List<byte>() : null;
             int replacement=0;
             var pads=new List<int>();var padCloses=new List<bool>();
             for (int p=cell.Start;p<cell.End;) {
                 if (!imeDone && p>=info.ImeAt) {
                     imeDone=true;imeStart=text.Length;
                     AppendIme(text,map,properties,info,p<cell.End ? sourceProperties[p-cell.Start] : Default,session);
+                    if (shades!=null) for (int i=0;i<ime.Length;i++) shades.Add(imeShade);
                 }
                 while (replacement<info.Replacements.Count && info.Replacements[replacement].Start+info.Replacements[replacement].Length<=p) replacement++;
                 if (!raw && replacement<info.Replacements.Count) {
@@ -2166,10 +2421,11 @@ internal static partial class MarkdownLivePreview {
                         // stays visible on the caret's own line because raw skips this branch.
                         breaks.Add(text.Length);
                         text.Append(BreakCharacter); map.Add(p); properties.Add(sourceProperties[p-cell.Start]);
+                        if (shades!=null) shades.Add(0);
                         p=Math.Min(cell.End,p+item.Length); continue;
                     }
                     if (item.Start==p && (item.Kind==ReplacementKind.Hidden || item.Kind==ReplacementKind.Glyph)) {
-                        if (item.Kind==ReplacementKind.Glyph) foreach (char c in item.Label) { text.Append(c); map.Add(p); properties.Add(sourceProperties[p-cell.Start]); }
+                        if (item.Kind==ReplacementKind.Glyph) foreach (char c in item.Label) { text.Append(c); map.Add(p); properties.Add(sourceProperties[p-cell.Start]); if (shades!=null) shades.Add(sourceShades==null ? (byte)0 : sourceShades[p-cell.Start]); }
                         else if (item.PadEm>0) {
                             // A <kbd> tag: one padding position beside the key. It reserves real
                             // layout width (CellPadRun) so the cell measures and wraps with the
@@ -2181,6 +2437,7 @@ internal static partial class MarkdownLivePreview {
                             text.Append(PadCharacter);
                             map.Add(closing ? p : Math.Min(cell.End,item.Start+item.Length));
                             properties.Add(sourceProperties[p-cell.Start]);
+                            if (shades!=null) shades.Add(sourceShades==null ? (byte)0 : sourceShades[p-cell.Start]);
                         }
                         p=Math.Min(cell.End,p+item.Length); continue;
                     }
@@ -2197,6 +2454,7 @@ internal static partial class MarkdownLivePreview {
                                     contentWidth > 0 ? contentWidth : 700, out width, out height);
                             images.Add(text.Length); bitmaps.Add(bitmap); widths.Add(width); heights.Add(height);
                             text.Append(ImageCharacter); map.Add(p); properties.Add(sourceProperties[p-cell.Start]);
+                            if (shades!=null) shades.Add(sourceShades==null ? (byte)0 : sourceShades[p-cell.Start]);
                             p=Math.Min(cell.End,p+item.Length); continue;
                         }
                     }
@@ -2209,18 +2467,23 @@ internal static partial class MarkdownLivePreview {
                         if (visual!=null) {
                             formulas.Add(text.Length); drawings.Add(visual);
                             text.Append(MathCharacter); map.Add(p); properties.Add(sourceProperties[p-cell.Start]);
+                            if (shades!=null) shades.Add(sourceShades==null ? (byte)0 : sourceShades[p-cell.Start]);
                             p=Math.Min(cell.End,p+item.Length); continue;
                         }
                     }
                 }
-                text.Append(info.Text[p]); map.Add(p); properties.Add(sourceProperties[p-cell.Start]); p++;
+                text.Append(info.Text[p]); map.Add(p); properties.Add(sourceProperties[p-cell.Start]);
+                if (shades!=null) shades.Add(sourceShades==null ? (byte)0 : sourceShades[p-cell.Start]);
+                p++;
             }
             if (!imeDone) {
                 imeDone=true;imeStart=text.Length;
                 AppendIme(text,map,properties,info,Default,session);
+                if (shades!=null) for (int i=0;i<ime.Length;i++) shades.Add(imeShade);
             }
             if (!String.IsNullOrEmpty(ime)) { ImeStart=imeStart;ImeLength=ime.Length; }
             map.Add(cell.End); Text=text.ToString(); Map=map.ToArray(); Properties=properties.ToArray(); FormatEnd=Text.Length;
+            if (shades!=null) Shades=shades.ToArray();
             if (breaks.Count>0) {
                 var marks=new bool[Text.Length];
                 foreach (int at in breaks) marks[at]=true;
@@ -2253,6 +2516,11 @@ internal static partial class MarkdownLivePreview {
         static void AppendIme(StringBuilder text,List<int> map,List<TextRunProperties> properties,LineInfo info,TextRunProperties next,Session session) {
             TextRunProperties basis=properties.Count>0 ? properties[properties.Count-1] : next;
             basis=ImeInlineStyle.WithPending(session.Editor,basis);
+            if (basis!=null && basis.BackgroundBrush!=null) {
+                var stripped=new VisualLineElementTextRunProperties(basis);
+                stripped.SetBackgroundBrush(null);
+                basis=stripped;
+            }
             TextRunProperties normal=new ImeInlineProps(basis,false),target=new ImeInlineProps(basis,true);
             string ime=info.ImeText;byte[] attrs=info.ImeAttrs;
             for (int i=0;i<ime.Length;i++) {
@@ -2265,7 +2533,7 @@ internal static partial class MarkdownLivePreview {
             // A break ends the text line after consuming its own position; the next text
             // line continues with the following run. Never draw the marker itself.
             if (IsBreak(index)) return new TextEndOfLine(1);
-            if (IsPad(index)) return PadRun(Properties[index]);
+            if (IsPad(index)) return PadRun(index,Properties[index]);
             if (IsImage(index)) return ImageRun(index,Properties[index]);
             if (IsMath(index)) return MathRun(index,Properties[index]);
             int end=index+1; while (end<Text.Length && end<FormatEnd && Properties[end]==Properties[index] && !IsBreak(end) && !IsImage(end) && !IsMath(end) && !IsPad(end)) end++;
@@ -2357,18 +2625,22 @@ internal static partial class MarkdownLivePreview {
     // A <kbd> tag's box padding inside a table cell: one cell text position with a fixed .35 em
     // advance and no ink, so the cell's own measurement and wrap include the space the box is
     // drawn in exactly as the hidden tag's InvisibleElement gap does on an ordinary line. The
-    // same size as the pad's own run properties (the tag position's font), never the line's.
+    // opening pad allows a break before itself (so a key moves whole to the next line) and
+    // restrains breaks into the key; the closing pad restrains breaks before itself and keeps
+    // following punctuation (like "." or ",") attached to the key.
     internal sealed class CellPadRun : TextEmbeddedObject {
         readonly TextRunProperties properties;
         readonly double width;
-        internal CellPadRun(TextRunProperties properties) {
+        readonly bool closing;
+        internal CellPadRun(TextRunProperties properties, bool closing) {
             this.properties=properties;
+            this.closing=closing;
             width=properties==null ? 0 : properties.FontRenderingEmSize*KeyboardPadEm;
         }
         public override int Length { get { return 1; } }
         public override TextRunProperties Properties { get { return properties; } }
         public override CharacterBufferReference CharacterBufferReference { get { return new CharacterBufferReference(); } }
-        public override LineBreakCondition BreakBefore { get { return LineBreakCondition.BreakRestrained; } }
+        public override LineBreakCondition BreakBefore { get { return closing ? LineBreakCondition.BreakRestrained : LineBreakCondition.BreakPossible; } }
         public override LineBreakCondition BreakAfter { get { return LineBreakCondition.BreakRestrained; } }
         public override bool HasFixedSize { get { return true; } }
         public override TextEmbeddedObjectMetrics Format(double remainingParagraphWidth) { return new TextEmbeddedObjectMetrics(width,0,0); }
@@ -2392,7 +2664,7 @@ internal static partial class MarkdownLivePreview {
         // Remember row identities, not a metric/string history of every typed prefix.
         // Rows beyond the bounded sample are measured once, after leaving the table.
         internal readonly HashSet<DocumentLine> HotRows=new HashSet<DocumentLine>();
-        internal double[] Widths = new double[Columns], Work, Minima = new double[Columns], WorkMinima;
+        internal double[] Widths = new double[Columns], Work, Minima = new double[Columns], WorkMinima, SampledMinima = new double[Columns];
         internal int[] Align = new int[Columns], WorkAlign;
         // b52: column widths grow while the caret types inside this table and only shrink in
         // the idle re-sample after the caret leaves it. A pure `Grow` value too, so a shrink
@@ -2446,6 +2718,7 @@ internal static partial class MarkdownLivePreview {
         internal readonly TableLayout Table;
         internal readonly int Version;
         internal readonly double ViewWidth;
+        internal readonly TextFormattingMode FormattingMode;
         // The table's left inset (a table under a list item) and the width the columns were
         // fitted to: the paragraph the formatter hands the row, not just the view's width, so
         // the row never re-wraps onto a second visual line.
@@ -2460,7 +2733,7 @@ internal static partial class MarkdownLivePreview {
         internal TableProjection Projection;
         internal RowLayout(LineInfo info, TableLayout table, Session session, bool raw) {
             Source=info.Text;MathKey=info.MathTouchKey;ImeKey=info.ImeKey;RowLayout previous=info.Row;
-            Table=table; Version=table.Version; ViewWidth=session.View.ActualWidth;
+            Table=table; Version=table.Version; ViewWidth=session.View.ActualWidth; FormattingMode=session.FormatterMode;
             Indent=Math.Max(0,info.TableIndent);
             BaseWidth=Math.Max(1,session.RowWidth()-Indent);
             int count=RowColumns(info,table,raw);
@@ -2489,7 +2762,7 @@ internal static partial class MarkdownLivePreview {
                         } else if (oldText.SourceLength==cell.End-cell.Start &&
                             String.CompareOrdinal(oldText.Source,oldText.SourceStart,info.Text,cell.Start,oldText.SourceLength)==0) {
                             Texts[c]=oldText.SourceStart==cell.Start ? oldText : new CellText(oldText,info,cell);
-                            if (previous.Widths[c]==Widths[c] || oldSlices.Count==1 && oldSlices[0].Width<=Widths[c]-Padding*2-1) {
+                            if (previous.FormattingMode==FormattingMode && (previous.Widths[c]==Widths[c] || oldSlices.Count==1 && oldSlices[0].Width<=Widths[c]-Padding*2-1)) {
                                 Slices[c]=oldSlices;PhysicalRows=Math.Max(PhysicalRows,oldSlices.Count);continue;
                             }
                         }
@@ -2548,7 +2821,7 @@ internal static partial class MarkdownLivePreview {
                 for (int c=0;c<row.Texts.Length;c++) if (r<row.Slices[c].Count) { CellSlice s=row.Slices[c][r]; height=Math.Max(height,s.Height); baseline=Math.Max(baseline,s.Baseline); }
                 // The 6.5 px band stays fixed: scaling it with the font let an 8 px document pack
                 // table rows below the gutter label height (settings probe, overlapping numbers).
-                double pad=6.5, top=r==0 ? pad : 0, bottom=r==row.PhysicalRows-1 ? pad : 0;
+                double top=r==0 ? TableRowPad : 0, bottom=r==row.PhysicalRows-1 ? TableRowPad : 0;
                 // A column without a slice in this physical row emits no element. Its width
                 // folds into the next filler, so later columns keep their x. A wrapped cell
                 // that is taller than its neighbours (the row being typed into) then costs
@@ -2714,6 +2987,7 @@ internal static partial class MarkdownLivePreview {
             return row.Projection;
         }
         TableRowElement(LineInfo info,RowLayout row,TableProjection projection) : base(projection.Map.Count-1,info.Text.Length) { this.projection=projection;Row=row;Info=info; }
+        internal IList<TableToken> Tokens { get { return projection.Tokens; } }
         public override int GetVisualColumn(int offset) { return VisualColumn+projection.Reverse[Math.Max(0,Math.Min(DocumentLength,offset-RelativeTextOffset))]; }
         public override int GetRelativeOffset(int column) { return RelativeTextOffset+projection.Map[Math.Max(0,Math.Min(VisualLength,column-VisualColumn))]; }
         // Columns (relative to this element) inside an element-relative source offset range.
@@ -2969,7 +3243,7 @@ internal static partial class MarkdownLivePreview {
             // An inline formula is one object position as well; the span behind it is hidden source.
             if(token.Text.IsMath(index))return token.Text.MathRun(index,token.Text.Properties[index]);
             // A <kbd> padding position is its own fixed-width object (no glyph, no ink).
-            if(token.Text.IsPad(index))return token.Text.PadRun(token.Text.Properties[index]);
+            if(token.Text.IsPad(index))return token.Text.PadRun(index,token.Text.Properties[index]);
             TextRunProperties properties=token.Text.Properties[index]; int length=1;
             while(length<count && token.Text.Properties[index+length]==properties && !token.Text.IsBreak(index+length) && !token.Text.IsImage(index+length) && !token.Text.IsMath(index+length) && !token.Text.IsPad(index+length))length++;
             return new TextCharacters(token.Text.Text,index,length,properties);
@@ -3065,6 +3339,7 @@ internal static partial class MarkdownLivePreview {
         // Replaces the stock selection layer while this session is attached: a selection inside
         // one cell of a wrapped table row must stay inside that cell (LiveTableSelection.cs).
         readonly LiveTableSelectionLayer selection;
+        readonly KeyboardBoxLayer keyboardLayer;
         readonly double oldHeight;
         // Alt+drag rectangle selection is switched off while markers are hidden; the editor's
         // own value comes back when the session detaches (원문 편집).
@@ -3271,6 +3546,8 @@ internal static partial class MarkdownLivePreview {
             View.LineTransformers.Add(codeColors);
             View.BackgroundRenderers.Add(renderer);
             selection = LiveTableSelectionLayer.Install(Editor.TextArea);
+            keyboardLayer = new KeyboardBoxLayer(this, renderer);
+            View.InsertLayer(keyboardLayer, KnownLayer.Selection, LayerInsertionPosition.Below);
             Document.Changing += DocumentChanging;
             Document.Changed += DocumentChanged;
             View.SizeChanged += ViewSizeChanged;
@@ -3388,6 +3665,7 @@ internal static partial class MarkdownLivePreview {
             // so a shown tooltip would describe the wrong link.
             hoverOffset=-1;HideLinkTip();SetLinkCursor(false);
             ClearCodeCopyHover();
+            if (keyboardLayer != null) keyboardLayer.InvalidateVisual();
             CompositionScrolled(sender,e);
         }
         void FinishInputLayout() {
@@ -9444,6 +9722,7 @@ internal static partial class MarkdownLivePreview {
             // cached parse here (and a document without a block pays the same).
             MermaidSeeTop();
             MermaidPreRender();
+            if (keyboardLayer != null) keyboardLayer.InvalidateVisual();
             // A command/paste can place the caret before the layout that exposes its row (H7).
             QueueCaretGuard();
         }
@@ -9518,6 +9797,24 @@ internal static partial class MarkdownLivePreview {
             if (closeSpaceStart < 0 || closeSpaceStart > Document.TextLength) return offset;
             return PendingCloseSpaceIntact() ? closeSpaceStart : offset;
         }
+        internal int TableImeStyleAt(LineInfo info, int relative) {
+            if (!closeSpacePending || Document == null || closeSpaceCaret < 0 || closeSpaceCaret > Document.TextLength) return relative;
+            DocumentLine line = Document.GetLineByOffset(closeSpaceCaret);
+            if (line == null || !Object.ReferenceEquals(Info(line), info) || relative != closeSpaceCaret - line.Offset) return relative;
+            return closeSpaceStart >= line.Offset && PendingCloseSpaceIntact() ? closeSpaceStart - line.Offset : relative;
+        }
+        // Pending closing-edge space inside a table cell (plus any drawn closer characters on a
+        // raw row) shares the composition's shade while the space is intact, matching CloseSpaceBoxRange.
+        internal bool TableCloseSpaceShadeRange(LineInfo info, int imeAt, out int start, out int end) {
+            start = end = 0;
+            if (!closeSpacePending || Document == null || closeSpaceCaret < 0 || closeSpaceCaret > Document.TextLength) return false;
+            DocumentLine line = Document.GetLineByOffset(closeSpaceCaret);
+            if (line == null || !Object.ReferenceEquals(Info(line), info) || imeAt != closeSpaceCaret - line.Offset) return false;
+            if (closeSpaceStart < line.Offset || closeSpaceCaret > line.EndOffset || !PendingCloseSpaceIntact()) return false;
+            start = closeSpaceStart - line.Offset;
+            end = closeSpaceCaret - line.Offset;
+            return end > start;
+        }
         // The background of the inline span the composition starts in (highlight, inline code), or null. The span's box is drawn from the
         // line element's BackgroundBrush (MarkdownTransformer), which the run properties the composition copies do not carry, so a later
         // composing syllable was drawn on a hole in the span (11-09 user: ==테스트입|== and `코드|`). The caret line's own parse says which
@@ -9581,7 +9878,9 @@ internal static partial class MarkdownLivePreview {
             return current;
         }
 
+        internal TextFormattingMode FormatterMode { get { return formatterMode; } }
         internal RowLayout LayoutRow(LineInfo info, bool raw) {
+            EnsureFormatter();
             TableLayout table = null;
             for (LinkedListNode<TableLayout> node = tables.First; node != null; node = node.Next) {
                 if (node.Value.Start != info.TableStart) continue;
@@ -9600,7 +9899,7 @@ internal static partial class MarkdownLivePreview {
                 // and is immediately formatted a second time after width publication.
                 int rows=0, chars=0;
                 while (table.Next!=null && rows<8 && chars<8192) MeasureTableLine(table,ref rows,ref chars);
-                table.Widths=(double[])table.Work.Clone(); table.Minima=(double[])table.WorkMinima.Clone(); table.Align=(int[])table.WorkAlign.Clone();
+                table.Widths=(double[])table.Work.Clone(); table.Minima=(double[])table.WorkMinima.Clone(); table.SampledMinima=(double[])table.WorkMinima.Clone(); table.Align=(int[])table.WorkAlign.Clone();
                 ScheduleTables();
             }
             // The header row is the grid: a structural edit that lands on it (the last edit of
@@ -9775,7 +10074,7 @@ internal static partial class MarkdownLivePreview {
             // set stale for the new grid, so drop it instead of carrying old slices. The
             // grow-only widths are indexed by column too, so they go with it: after a column
             // was inserted or removed the stored width would hold the neighbour's column.
-            if (table.PublishedCount != table.Count) { table.Shapes.Clear(); table.ShapeCharacters = 0; Array.Clear(table.Grow, 0, table.Grow.Length); }
+            if (table.PublishedCount != table.Count) { table.Shapes.Clear(); table.ShapeCharacters = 0; Array.Clear(table.Grow, 0, table.Grow.Length); Array.Clear(table.SampledMinima, 0, table.SampledMinima.Length); }
             table.PublishedCount = table.Count;
             bool changed = false;
             for (int c = 0; c < TableLayout.Columns; c++) {
@@ -9783,6 +10082,7 @@ internal static partial class MarkdownLivePreview {
             }
             table.Widths = table.Work;
             table.Minima = table.WorkMinima;
+            table.SampledMinima = (double[])table.WorkMinima.Clone();
             table.Align = table.WorkAlign;
             if (changed) { table.Version++; RedrawTable(table); }
         }
@@ -9838,7 +10138,7 @@ internal static partial class MarkdownLivePreview {
                 if (!info.Delimiter && !info.Header) continue;
                 TableLayout table=FindTable(info.TableStart);
                 if (table==null || table.Start.IsDeleted || table.Count==info.Cells.Count) continue;
-                if (table.PublishedCount!=info.Cells.Count) { table.Shapes.Clear(); table.ShapeCharacters = 0; Array.Clear(table.Grow, 0, table.Grow.Length); }
+                if (table.PublishedCount!=info.Cells.Count) { table.Shapes.Clear(); table.ShapeCharacters = 0; Array.Clear(table.Grow, 0, table.Grow.Length); Array.Clear(table.SampledMinima, 0, table.SampledMinima.Length); }
                 table.Count=info.Cells.Count;
                 table.PublishedCount=info.Cells.Count;
                 table.Version++;
@@ -9864,7 +10164,7 @@ internal static partial class MarkdownLivePreview {
             if (edgeCells.Count==0) return;
             TableLayout table=FindTable(info.TableStart);
             if (table==null || table.Start.IsDeleted || table.Count==edgeCells.Count) return;
-            if (table.PublishedCount!=edgeCells.Count) { table.Shapes.Clear(); table.ShapeCharacters = 0; Array.Clear(table.Grow, 0, table.Grow.Length); }
+            if (table.PublishedCount!=edgeCells.Count) { table.Shapes.Clear(); table.ShapeCharacters = 0; Array.Clear(table.Grow, 0, table.Grow.Length); Array.Clear(table.SampledMinima, 0, table.SampledMinima.Length); }
             table.Count=edgeCells.Count;
             table.PublishedCount=edgeCells.Count;
             table.Version++;
@@ -9903,7 +10203,7 @@ internal static partial class MarkdownLivePreview {
                 // the caret stays in the table, so the old, wider grid otherwise kept drawing
                 // one empty extra column until the caret left and the table redrew.
                 if (cells.Count > 0 && table.Count != cells.Count) {
-                    if (table.PublishedCount != cells.Count) { table.Shapes.Clear(); table.ShapeCharacters = 0; Array.Clear(table.Grow, 0, table.Grow.Length); }
+                    if (table.PublishedCount != cells.Count) { table.Shapes.Clear(); table.ShapeCharacters = 0; Array.Clear(table.Grow, 0, table.Grow.Length); Array.Clear(table.SampledMinima, 0, table.SampledMinima.Length); }
                     table.Count = cells.Count;
                     table.PublishedCount = cells.Count;
                     changed = true;
@@ -9920,7 +10220,7 @@ internal static partial class MarkdownLivePreview {
                 // a column command, applied after the delimiter row was transiently not yet
                 // a table - publishes the new grid here, not only on the delimiter row.
                 if (info.Header && table.Count != cells.Count) {
-                    if (table.PublishedCount != cells.Count) { table.Shapes.Clear(); table.ShapeCharacters = 0; Array.Clear(table.Grow, 0, table.Grow.Length); }
+                    if (table.PublishedCount != cells.Count) { table.Shapes.Clear(); table.ShapeCharacters = 0; Array.Clear(table.Grow, 0, table.Grow.Length); Array.Clear(table.SampledMinima, 0, table.SampledMinima.Length); }
                     table.Count = cells.Count;
                     table.PublishedCount = cells.Count;
                     changed = true;
@@ -9964,14 +10264,39 @@ internal static partial class MarkdownLivePreview {
             Cell cell=cells[column];
             // The composition string the cell draws now (live editor state, not a stale LineInfo): it is part of the text width.
             double composing=CompositionWidth(info);
-            if (cell.End<=cell.Start && composing<=0) return false;
             // A column that was inserted or removed while the caret stayed here renumbers every
             // stored width; they would then hold a neighbour's column, so drop them first.
             if (table.GrowColumns!=cells.Count) { Array.Clear(table.Grow,0,table.Grow.Length); table.GrowColumns=cells.Count; }
+            double beforeMin=table.Minima[column];
+            double sampled=column<table.SampledMinima.Length ? table.SampledMinima[column] : 0;
+            if (cell.End<=cell.Start && composing<=0) {
+                if (beforeMin!=sampled) { table.Minima[column]=sampled; return true; }
+                return false;
+            }
             // Widths (and Work) hold the cell's TEXT width; TableWidths adds the padding and
             // bounds the table's total, so this column is not capped here.
-            double text=(cell.End>cell.Start ? glyphs.Measure(info.Text,cell.Start,cell.End,info.Header) : 0)+composing;
-            if (text<=0) return false;
+            double text=0, minWord=0;
+            if (cell.End>cell.Start) glyphs.MeasureCell(info,cell,this,Raw(line),out text,out minWord);
+            text+=composing;
+            if (text<=0) {
+                if (beforeMin!=sampled) { table.Minima[column]=sampled; return true; }
+                return false;
+            }
+            double minNeed=minWord>0 ? Math.Ceiling(minWord+1.05) : 0;
+            int count=table.Count>0 ? table.Count : cells.Count;
+            double available=Math.Max(40,RowWidth()-Math.Max(0,info.TableIndent)-4);
+            double otherMin=0;
+            for (int c=0;c<count;c++) {
+                if (c==column) continue;
+                double m=c<table.Minima.Length ? table.Minima[c] : 0;
+                otherMin+=Math.Max(CellPadding*2+1,m+CellPadding*2);
+            }
+            // One pixel short of the edge: TableWidths re-sums the minima in another order, and a
+            // total that lands exactly on `available` can round over it at a fractional DPI and
+            // take the equal-share branch (the 304 -> 129 px collapse of the typed column).
+            double cap=Math.Max(sampled,available-otherMin-CellPadding*2-1);
+            double cappedNeed=minNeed>cap ? cap : minNeed;
+            table.Minima[column]=Math.Max(sampled,cappedNeed);
             // A composition string is not in the document yet: reserve one more syllable so
             // the column is already wide enough when the IME draws its interim glyphs.
             double allowance=Editor.ImeBusy ? Options.FontSize*1.2 : 0;
@@ -9982,7 +10307,9 @@ internal static partial class MarkdownLivePreview {
             double before=table.Widths[column];
             // The grown width is remembered even when the current grid cannot use it, so a
             // wider view pays it without another key.
-            if (table.Grow[column]<=before+.5) return false;
+            // A changed minimum (grown on key insert or lowered after undo) must be published even
+            // when the width itself did not grow: LayoutRow reuses rows of the same Version.
+            if (table.Grow[column]<=before+.5) return table.Minima[column]!=beforeMin;
             table.Widths[column]=table.Grow[column];
             double published;
             double gained=AllocatedWidthGain(table,cells,column,info.TableIndent,before,out published);
@@ -9997,7 +10324,7 @@ internal static partial class MarkdownLivePreview {
             double grownWidth=Math.Max(0,published+gained-CellPadding*2-1);
             if (gained<Math.Max(1,Options.FontSize*.5) && !(text>textWidth && text<=grownWidth)) {
                 table.Widths[column]=before;
-                return false;
+                return table.Minima[column]!=beforeMin;
             }
             return true;
         }
@@ -10084,19 +10411,110 @@ internal static partial class MarkdownLivePreview {
                         do {
                             using (TextLine line=Formatter.FormatLine(text,position,width,paragraph,null,cache)) {
                                 int length=Math.Min(text.FormatEnd-position,line.Length);
+                                if (position>0 && !text.IsBreak(position-1) && length==1 && text.Text[position]==' ' && position+1<text.FormatEnd && text.Text[position+1]!=' ') {
+                                    // Avoid a blank physical row holding only the wrap space before an
+                                    // overflowing word or <kbd>: keep leading space with a fitting key, or
+                                    // with the fitting prefix of an overflowing token/oversized key.
+                                    var noWrap=new CellParagraph(text.Default,paragraph.LineHeight,TextWrapping.NoWrap);
+                                    using (TextLine full=Formatter.FormatLine(text,position,300000,noWrap,null,new TextRunCache())) {
+                                        int fullLen=Math.Min(text.FormatEnd-position,full.Length);
+                                        int fitSpace=FittingCharacters(full,width,position,fullLen);
+                                        int keyStart, keyEnd;
+                                        if (text.Pads!=null && text.IsPad(position+1) && !text.IsClosePad(position+1) &&
+                                            text.FindKeyRange(position+2,out keyStart,out keyEnd) && keyStart==position+1) {
+                                            double spaceW=full.GetDistanceFromCharacterHit(new CharacterHit(position+1,0));
+                                            double keyEndX=full.GetDistanceFromCharacterHit(new CharacterHit(keyEnd+1,0));
+                                            if (keyEndX-spaceW<=width) {
+                                                fitSpace=keyEnd+1-position;
+                                            } else {
+                                                if (fitSpace<=2 && fullLen>3) fitSpace=3;
+                                                if (position+fitSpace==keyEnd) fitSpace++;
+                                            }
+                                        } else if (fitSpace>1 && text.Pads!=null && text.FindKeyRange(position+fitSpace,out keyStart,out keyEnd) &&
+                                                   keyStart>position && !OnlySpaces(text.Text,position,keyStart)) {
+                                            fitSpace=keyStart-position;
+                                        }
+                                        if (fitSpace>1) {
+                                            int saved=text.FormatEnd;
+                                            text.FormatEnd=position+fitSpace;
+                                            try {
+                                                using (TextLine part=Formatter.FormatLine(text,position,width,noWrap,null,new TextRunCache())) {
+                                                    int take=Math.Max(1,Math.Min(fitSpace,part.Length));
+                                                    slices.Add(new CellSlice {Start=position,Length=take,Width=part.WidthIncludingTrailingWhitespace,Height=part.Height,Baseline=part.Baseline});
+                                                    position+=take;
+                                                }
+                                            } finally { text.FormatEnd=saved; }
+                                            continue;
+                                        }
+                                    }
+                                }
+                                // Keep a <kbd> key whole whenever non-space text precedes it on this slice: move
+                                // the entire key (and its pads) onto the next physical row instead of
+                                // breaking inside spaces, hyphens or Hangul inside the key. When only leading spaces
+                                // precede a fitting key, keep space + key together on this slice.
+                                if (text.Pads!=null && position+length<text.FormatEnd) {
+                                    int keyStart, keyEnd;
+                                    if (text.FindKeyRange(position+length,out keyStart,out keyEnd) && keyStart>position) {
+                                        if (!OnlySpaces(text.Text,position,keyStart)) {
+                                            int saved=text.FormatEnd;
+                                            text.FormatEnd=keyStart;
+                                            try {
+                                                using (TextLine beforeKey=Formatter.FormatLine(text,position,width,paragraph,null,new TextRunCache())) {
+                                                    int bLen=Math.Min(keyStart-position,beforeKey.Length);
+                                                    if (beforeKey.Width<=width+.5 && beforeKey.WidthIncludingTrailingWhitespace<=width+CellPadding) {
+                                                        slices.Add(new CellSlice {Start=position,Length=bLen,Width=beforeKey.WidthIncludingTrailingWhitespace,Height=beforeKey.Height,Baseline=beforeKey.Baseline});
+                                                        position+=Math.Max(1,bLen);
+                                                        continue;
+                                                    }
+                                                }
+                                            } finally { text.FormatEnd=saved; }
+                                        } else {
+                                            var noWrap=new CellParagraph(text.Default,paragraph.LineHeight,TextWrapping.NoWrap);
+                                            using (TextLine full=Formatter.FormatLine(text,position,300000,noWrap,null,new TextRunCache())) {
+                                                double spaceW=full.GetDistanceFromCharacterHit(new CharacterHit(keyStart,0));
+                                                double keyEndX=full.GetDistanceFromCharacterHit(new CharacterHit(keyEnd+1,0));
+                                                if (keyEndX-spaceW<=width) {
+                                                    int saved=text.FormatEnd;
+                                                    text.FormatEnd=keyEnd+1;
+                                                    try {
+                                                        using (TextLine part=Formatter.FormatLine(text,position,width,noWrap,null,new TextRunCache())) {
+                                                            int took=Math.Max(1,Math.Min(keyEnd+1-position,part.Length));
+                                                            slices.Add(new CellSlice {Start=position,Length=took,Width=part.WidthIncludingTrailingWhitespace,Height=part.Height,Baseline=part.Baseline});
+                                                            position+=took;
+                                                        }
+                                                    } finally { text.FormatEnd=saved; }
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 // One unbreakable run (a long token) is formatted wider than the
                                 // cell: WPF keeps the word whole, and the row paragraph then wraps
                                 // the rest onto a second visual line at the paragraph's left edge
                                 // (the fragment users saw in the first column). Break the run at
-                                // the character that still fits, so every physical row of a cell
-                                // stays inside its own column.
-                                if (line.WidthIncludingTrailingWhitespace>width+.5 && length>1) {
+                                // the character that still fits inside `width`, while keeping an
+                                // unsplit <kbd> whole unless it starts this slice (or after spaces).
+                                if ((line.Width>width+.5 || line.WidthIncludingTrailingWhitespace>width+CellPadding) && length>1) {
                                     int fit=FittingCharacters(line,width,position,length);
+                                    if (text.Pads!=null) {
+                                        int keyStart, keyEnd;
+                                        if (text.FindKeyRange(position+fit,out keyStart,out keyEnd)) {
+                                            if (keyStart>position && !OnlySpaces(text.Text,position,keyStart)) {
+                                                fit=keyStart-position;
+                                            } else {
+                                                int minPadFit=(keyStart-position)+2;
+                                                if (text.IsPad(keyStart) && fit<minPadFit && length>minPadFit) fit=minPadFit;
+                                                if (position+fit==keyEnd) fit++;
+                                            }
+                                        }
+                                    }
                                     if (fit<length) {
+                                        var noWrap=new CellParagraph(text.Default,paragraph.LineHeight,TextWrapping.NoWrap);
                                         int saved=text.FormatEnd;
                                         text.FormatEnd=position+fit;
                                         try {
-                                            using (TextLine part=Formatter.FormatLine(text,position,width,paragraph,null,new TextRunCache())) {
+                                            using (TextLine part=Formatter.FormatLine(text,position,width,noWrap,null,new TextRunCache())) {
                                                 int take=Math.Max(1,Math.Min(fit,part.Length));
                                                 slices.Add(new CellSlice {Start=position,Length=take,Width=part.WidthIncludingTrailingWhitespace,Height=part.Height,Baseline=part.Baseline});
                                                 position+=take;
@@ -10151,8 +10569,14 @@ internal static partial class MarkdownLivePreview {
         // Characters of an over-wide formatted line that still end inside the cell width. The
         // text line's character indices are paragraph-absolute (the same space as `start`).
         static int FittingCharacters(TextLine line,double width,int start,int length) {
-            CharacterHit hit=line.GetCharacterHitFromDistance(Math.Max(0,width));
-            int at=hit.FirstCharacterIndex+hit.TrailingLength-start;
+            double limit=Math.Max(0,width);
+            CharacterHit hit=line.GetCharacterHitFromDistance(limit);
+            int at=hit.FirstCharacterIndex-start;
+            if (at<length-1 && hit.TrailingLength>0 &&
+                line.GetDistanceFromCharacterHit(new CharacterHit(start+at+hit.TrailingLength,0))<=limit+.05) {
+                at+=hit.TrailingLength;
+            }
+            while (at>1 && line.GetDistanceFromCharacterHit(new CharacterHit(start+at,0))>limit+.05) at--;
             if (at<1) at=1;
             if (at>=length) at=length-1;
             return at;
@@ -10179,9 +10603,7 @@ internal static partial class MarkdownLivePreview {
                 } else {
                     string key=plain ? (info.Header ? "H" : "B")+info.Text.Substring(cell.Start,cell.End-cell.Start) : null;
                     if (key==null || !table.Metrics.TryGetValue(key,out metric)) {
-                        var text=new CellText(info,cell,this,false,0,null);
-                        MinMaxParagraphWidth measured=Formatter.FormatMinMaxParagraphWidth(text,0,new CellParagraph(text.Default,0));
-                        metric=new CellMetric { Preferred=Math.Ceiling(measured.MaxWidth+1), Minimum=Math.Ceiling(measured.MinWidth+1) };
+                        metric=MeasureCellMetric(info,cell,plain);
                         if (key!=null && table.Metrics.Count<512 && table.MetricCharacters+key.Length<=32768) {
                             table.Metrics.Add(key,metric); table.MetricCharacters+=key.Length;
                         }
@@ -10192,6 +10614,52 @@ internal static partial class MarkdownLivePreview {
             }
             DiagMeasureTicks+=System.Diagnostics.Stopwatch.GetTimestamp()-started;
             return changed;
+        }
+        // A styled cell (a <kbd> pad run, a code face, a sized span) can lay out wider in FormatLine
+        // than FormatMinMaxParagraphWidth reports, so it is also measured as one unwrapped line; a
+        // plain cell keeps the single min/max pass (large tables open at the old cost).
+        CellMetric MeasureCellMetric(LineInfo info, Cell cell, bool plain) {
+            var text=new CellText(info,cell,this,false,0,null);
+            double lineHeight=Options.FontSize*Options.LinePercent/100;
+            var paragraph=new CellParagraph(text.Default,lineHeight);
+            var noWrapParagraph=new CellParagraph(text.Default,lineHeight,TextWrapping.NoWrap);
+            double maxWidth=0, minWidth=0;
+            int position=0;
+            int breakAt=text.NextBreak(position);
+            text.FormatEnd=breakAt<0 ? text.Text.Length : breakAt;
+            try {
+                while (true) {
+                    if (position<text.FormatEnd) {
+                        TextRunCache cache=text.Breaks==null ? text.RunCache : new TextRunCache();
+                        MinMaxParagraphWidth measured=Formatter.FormatMinMaxParagraphWidth(text,position,paragraph);
+                        if (measured.MaxWidth>maxWidth) maxWidth=measured.MaxWidth;
+                        if (measured.MinWidth>minWidth) minWidth=measured.MinWidth;
+                        if (!plain) using (TextLine line=Formatter.FormatLine(text,position,300000,noWrapParagraph,null,cache)) {
+                            if (line.WidthIncludingTrailingWhitespace>maxWidth) maxWidth=line.WidthIncludingTrailingWhitespace;
+                            if (text.Pads!=null) {
+                                for (int p=position;p<text.FormatEnd;p++) {
+                                    if (!text.IsPad(p) || text.IsClosePad(p)) continue;
+                                    int q=p+1;
+                                    while (q<text.FormatEnd && (!text.IsPad(q) || !text.IsClosePad(q))) q++;
+                                    if (q<text.FormatEnd) {
+                                        double keyW=line.GetDistanceFromCharacterHit(new CharacterHit(q+1,0))-line.GetDistanceFromCharacterHit(new CharacterHit(p,0));
+                                        if (keyW>minWidth) minWidth=keyW;
+                                    }
+                                    p=q;
+                                }
+                            }
+                        }
+                    }
+                    if (breakAt<0) break;
+                    position=breakAt+1;
+                    breakAt=text.NextBreak(position);
+                    text.FormatEnd=breakAt<0 ? text.Text.Length : breakAt;
+                }
+            } finally { text.FormatEnd=text.Text.Length; }
+            return new CellMetric {
+                Preferred=maxWidth>0 ? Math.Ceiling(maxWidth+1.05) : 0,
+                Minimum=minWidth>0 ? Math.Ceiling(minWidth+1.05) : 0
+            };
         }
         internal UIElement ImageObject(Replacement replacement) {
             UIElement element = images.Object(replacement.Source, replacement.Label);
@@ -10217,6 +10685,11 @@ internal static partial class MarkdownLivePreview {
             if (properties==null || !MathRender.Check(latex)) return null;
             MathVisual visual=MathRender.Get(latex,false,properties.FontRenderingEmSize,properties.ForegroundBrush,Options.Family);
             return visual.Error || visual.Drawing==null || visual.Width<=0 || visual.Height<=0 ? null : visual;
+        }
+        internal double CellMathWidth(string latex, double fontSize) {
+            if (!MathRender.Check(latex)) return 0;
+            MathVisual visual=MathRender.Get(latex,false,fontSize,Colors.Foreground,Options.Family);
+            return visual.Error || visual.Drawing==null || visual.Width<=0 || visual.Height<=0 ? 0 : visual.Width;
         }
         internal bool UsesImage(Uri uri) {
             foreach (VisualLine line in visible) {
@@ -10827,6 +11300,7 @@ internal static partial class MarkdownLivePreview {
             View.LineTransformers.Remove(transformer);
             View.LineTransformers.Remove(codeColors);
             View.BackgroundRenderers.Remove(renderer);
+            if (keyboardLayer != null) View.Layers.Remove(keyboardLayer);
             selection.Dispose();
             Editor.Options.EnableRectangularSelection = oldRectangularSelection;
             View.LineHeight = oldHeight;
@@ -13237,6 +13711,25 @@ internal static partial class MarkdownLivePreview {
         }
     }
 
+    // Rounded <kbd> key boxes sit above TextView's element backgrounds (Highlight, InlineCode)
+    // and below SelectionLayer/TextLayer so highlighted runs stay continuous behind the key
+    // while the complete box (fill + border) sits on top of them.
+    internal sealed class KeyboardBoxLayer : FrameworkElement {
+        readonly Session session;
+        readonly BlockRenderer renderer;
+        internal KeyboardBoxLayer(Session session, BlockRenderer renderer) {
+            this.session = session;
+            this.renderer = renderer;
+            IsHitTestVisible = false;
+            Focusable = false;
+        }
+        protected override void OnRender(DrawingContext drawingContext) {
+            base.OnRender(drawingContext);
+            if (session.IsDisposed) return;
+            renderer.DrawKeyboardLayer(session.View, drawingContext);
+        }
+    }
+
     internal sealed class BlockRenderer : IBackgroundRenderer {
         readonly Session session;
         Palette colors;
@@ -13421,8 +13914,6 @@ internal static partial class MarkdownLivePreview {
                     drawingContext.Pop();
                 }
                 bool raw = session.Raw(line.FirstDocumentLine);
-                // A table row's cell shade is painted below, so its key boxes are drawn after it.
-                if (!raw && info.Row == null) DrawKeyboardBoxes(drawingContext, textView, line, info);
                 if (!raw && info.Row == null) DrawScriptText(drawingContext, textView, line, info);
                 if (info.Quote && !raw) {
                     int levels = 0;
@@ -13476,10 +13967,9 @@ internal static partial class MarkdownLivePreview {
                     drawingContext.DrawLine(tableRule,new Point(left,y+line.Height),new Point(left+end-row.Indent,y+line.Height));
                     if (info.Header) { headerLeft = left; headerEnd = left + end - row.Indent; }
                 }
-                // A table row's key boxes go above its cell shade and rules, which this layer just
-                // painted; the text layer's run backgrounds no longer cover them (CellText drops
-                // the inline code shade on a key in a non-raw cell).
-                if (!raw && info.Row != null) DrawKeyboardBoxes(drawingContext, textView, line, info);
+                // Cell inline-code / highlight shades go above the table grid; key boxes paint on
+                // KeyboardBoxLayer above both cell shades and ordinary-line BackgroundBrush runs.
+                if (info.Row != null) DrawCellShades(drawingContext, textView, line);
                 // #17: the header rule is drawn once, through the delimiter row and only as wide
                 // as the table (it used to be a short header underline plus a full-width rule).
                 if (info.Delimiter && !raw) {
@@ -13495,6 +13985,17 @@ internal static partial class MarkdownLivePreview {
             }
             DrawCodeCopy(textView, drawingContext, width);
         }
+        internal void DrawKeyboardLayer(TextView textView, DrawingContext drawingContext) {
+            if (!textView.VisualLinesValid) return;
+            EnsurePens();
+            foreach (VisualLine line in textView.VisualLines) {
+                if (line.IsDisposed) continue;
+                DocumentLine docLine = line.FirstDocumentLine;
+                if (docLine.IsDeleted) continue;
+                LineInfo info = session.Info(docLine);
+                if (!session.Raw(docLine)) DrawKeyboardBoxes(drawingContext, textView, line, info);
+            }
+        }
         // The rounded key box of every <kbd> run on this visual line. A document-offset segment
         // (BackgroundGeometryBuilder) mapped its end through the hidden "</kbd>" run, so a key
         // after the first on the line drew its box on that empty run's column (the letter beside
@@ -13502,37 +14003,30 @@ internal static partial class MarkdownLivePreview {
         // are the visual line's own, the same ones its elements and the caret draw at; a table
         // row's projection (TableRowElement) maps them through its cells too.
         void DrawKeyboardBoxes(DrawingContext drawingContext, TextView textView, VisualLine line, LineInfo info) {
+            if (info.Row != null) {
+                DrawTableKeyboardBoxes(drawingContext, textView, line, info);
+                return;
+            }
             foreach (StyledPart part in info.Styles) {
                 if ((part.Style & Style.Keyboard) == 0 || part.Length <= 0) continue;
                 int from = part.Start, to = part.Start + part.Length;
                 int runStart = -1, runEnd = -1;
-                // A table row's cell text carries the tag padding as its own layout positions
-                // (CellText pad runs), so the box has the same reserved width there; an ordinary
-                // line carries it in the hidden tag elements instead. Without either the box
-                // would cover the neighbouring text, so it stays the tight one.
-                bool cell = info.Row != null;
+                // An ordinary line carries <kbd> padding in the hidden tag elements; without them the
+                // box would cover the neighbouring text, so it stays tight.
                 bool padded = false;
-                if (!cell) {
-                    foreach (VisualLineElement candidate in line.Elements) {
-                        InvisibleElement hidden = candidate as InvisibleElement;
-                        if (hidden == null || hidden.PadEm <= 0) continue;
-                        if (hidden.RelativeTextOffset + hidden.DocumentLength == from || hidden.RelativeTextOffset == to) { padded = true; break; }
-                    }
+                foreach (VisualLineElement candidate in line.Elements) {
+                    InvisibleElement hidden = candidate as InvisibleElement;
+                    if (hidden == null || hidden.PadEm <= 0) continue;
+                    if (hidden.RelativeTextOffset + hidden.DocumentLength == from || hidden.RelativeTextOffset == to) { padded = true; break; }
                 }
-                // The run's own size turns the .35 em into pixels (a heading keeps its scale); a
-                // cell names the exact width its text reserved, and its closing tag's pad names
-                // the column the run ends at, so both sides take the same width. The body size
-                // stands in when the part begins with an embedded object the walk below skips
-                // (an entity, a formula), as it did before the cell path existed.
                 double leadPad = 0, trailPad = 0;
                 if (padded) leadPad = trailPad = session.Options.FontSize * KeyboardPadEm;
                 foreach (VisualLineElement element in line.Elements) {
                     if (element.DocumentLength <= 0 || element.VisualLength <= 0) continue;
                     // A hidden marker run draws one column for many source characters (an embedded
                     // object the same way); only a run that draws its characters one for one has
-                    // character boxes. A table row is the one projected element whose columns the
-                    // projection's own reverse map names exactly.
-                    if (element.DocumentLength != element.VisualLength && !(element is TableRowElement)) continue;
+                    // character boxes.
+                    if (element.DocumentLength != element.VisualLength) continue;
                     int relative = element.RelativeTextOffset;
                     int end = relative + element.DocumentLength;
                     if (end <= from) continue;
@@ -13546,24 +14040,49 @@ internal static partial class MarkdownLivePreview {
                     int startColumn = element.GetVisualColumn(a);
                     int endColumn = element.GetVisualColumn(b);
                     if (endColumn <= startColumn) continue;
-                    // The box's pad comes from the run's own size, so a key inside a heading keeps
-                    // the same .35 em proportion as a body key; a cell names the width its text
-                    // actually reserved, so the box edge sits on the measured padding.
-                    if (a == from) {
+                    if (a == from && padded) {
                         double em = element.TextRunProperties.FontRenderingEmSize;
-                        TableRowElement rowElement = element as TableRowElement;
-                        if (cell) {
-                            leadPad = rowElement == null ? 0 : rowElement.KeyboardPad(from);
-                            trailPad = leadPad;
-                        } else if (padded) {
-                            leadPad = trailPad = em * KeyboardPadEm;
-                        }
+                        leadPad = trailPad = em * KeyboardPadEm;
                     }
                     if (runStart >= 0 && startColumn == runEnd) { runEnd = endColumn; continue; }
                     if (runStart >= 0) DrawKeyboardRange(drawingContext, textView, line, runStart, runEnd, leadPad, trailPad);
                     runStart = startColumn; runEnd = endColumn;
                 }
                 if (runStart >= 0) DrawKeyboardRange(drawingContext, textView, line, runStart, runEnd, leadPad, trailPad);
+            }
+        }
+        // Draws <kbd> key boxes on a projected table row per TableToken slice so a wrapped key
+        // never spans across physical-row fillers or neighbouring cells.
+        void DrawTableKeyboardBoxes(DrawingContext drawingContext, TextView textView, VisualLine line, LineInfo info) {
+            TableRowElement rowElement = null;
+            foreach (VisualLineElement element in line.Elements) {
+                rowElement = element as TableRowElement;
+                if (rowElement != null) break;
+            }
+            if (rowElement == null) return;
+            IList<TableToken> tokens = rowElement.Tokens;
+            foreach (StyledPart part in info.Styles) {
+                if ((part.Style & Style.Keyboard) == 0 || part.Length <= 0) continue;
+                int from = part.Start, to = part.Start + part.Length;
+                double keyPad = rowElement.KeyboardPad(from);
+                for (int t = 0; t < tokens.Count; t++) {
+                    TableToken token = tokens[t];
+                    if (token.Text == null || token.Length <= 0) continue;
+                    CellText cellText = token.Text;
+                    if (to <= cellText.SourceStart || from >= cellText.SourceStart + cellText.SourceLength) continue;
+                    int tStart = token.TextStart, tEnd = Math.Min(cellText.Text.Length, tStart + token.Length);
+                    for (int p = tStart; p < tEnd; ) {
+                        if (cellText.IsPad(p) || cellText.Map[p] < from || cellText.Map[p] >= to) { p++; continue; }
+                        int runStart = p;
+                        while (p < tEnd && !cellText.IsPad(p) && cellText.Map[p] >= from && cellText.Map[p] < to) p++;
+                        int runEnd = p;
+                        bool hasLead = runStart - 1 >= tStart && cellText.IsPad(runStart - 1) && !cellText.IsClosePad(runStart - 1);
+                        bool hasTrail = runEnd < tEnd && cellText.IsPad(runEnd) && cellText.IsClosePad(runEnd);
+                        int col0 = rowElement.VisualColumn + token.Start + (runStart - tStart);
+                        int col1 = rowElement.VisualColumn + token.Start + (runEnd - tStart);
+                        DrawKeyboardRange(drawingContext, textView, line, col0, col1, hasLead ? keyPad : 0, hasTrail ? keyPad : 0);
+                    }
+                }
             }
         }
         // One contiguous stream of key characters, split over the text lines it wraps across. The
@@ -13590,9 +14109,184 @@ internal static partial class MarkdownLivePreview {
                 // The reserved pad pays for that (0.35 em a side against a code-face advance of
                 // about 0.55 em); a run without reserved padding keeps the tight box rather than
                 // covering a neighbour.
-                if (leadPad > 0 && right - left < height) { double extra = (height - (right - left)) / 2; left -= extra; right += extra; }
+                if (leadPad > 0 && trailPad > 0 && right - left < height) { double extra = (height - (right - left)) / 2; left -= extra; right += extra; }
                 Rect box = new Rect(left, top, right - left, height);
                 drawingContext.DrawRoundedRectangle(session.Colors.InlineCode, rule, box, 3, 3);
+            }
+        }
+        struct OpenCellShade {
+            internal CellText Text;
+            internal int NextIndex;
+            internal byte Shade;
+            internal Brush Brush;
+            internal BackgroundGeometryBuilder Builder;
+        }
+        // Precomputes each TextLine's column span, bounds and baseline in viewport coordinates once
+        // per visual line so shaded ranges never re-walk from the first TextLine.
+        static void PrecomputeCellLineMetrics(TextView textView, VisualLine line, IList<TextLine> textLines,
+            out int[] lineStarts, out int[] lineEnds, out double[] lineTops, out double[] lineBottoms, out double[] baselines) {
+            int count = textLines.Count;
+            lineStarts = new int[count];
+            lineEnds = new int[count];
+            lineTops = new double[count];
+            lineBottoms = new double[count];
+            baselines = new double[count];
+            double pos = line.VisualTop;
+            double vOffset = textView.VerticalOffset;
+            int col = 0;
+            for (int i = 0; i < count; i++) {
+                TextLine tl = textLines[i];
+                int len = tl.Length;
+                lineStarts[i] = col;
+                lineEnds[i] = col + len;
+                col += len;
+                lineTops[i] = pos - vOffset;
+                lineBottoms[i] = pos + tl.Height - vOffset;
+                baselines[i] = pos + tl.Baseline - vOffset;
+                pos += tl.Height;
+            }
+        }
+        // A cell shade's band is the one an ordinary line gives the same run, measured from the
+        // cell text's own baseline: the line strut's 0.8 / 0.2 split of the body line height,
+        // grown by the run's font ascent/descent (a larger or taller font grows an ordinary
+        // TextLine the same way). The row's TextLine edges are no guide: the first/last physical
+        // row's filler carries the 6.5 px cell padding in its height and baseline (11-21, the
+        // band covered the padding and touched the cell border).
+        static void GrowCellBand(TextRunProperties[] props, int index, ref double ascent, ref double descent) {
+            if (props == null || index < 0 || index >= props.Length || props[index] == null) return;
+            TextRunProperties p = props[index];
+            Typeface face = p.Typeface;
+            if (face == null || face.FontFamily == null) return;
+            double em = p.FontRenderingEmSize, a = em * face.FontFamily.Baseline, d = em * (face.FontFamily.LineSpacing - face.FontFamily.Baseline);
+            if (a > ascent) ascent = a;
+            if (d > descent) descent = d;
+        }
+        // Uniform inline-code and highlight shades inside table cells: groups wrapped slice runs
+        // per CellText and draws each run through BackgroundGeometryBuilder (AlignToWholePixels,
+        // CornerRadius = 3) matching ordinary-line element backgrounds.
+        void DrawCellShades(DrawingContext drawingContext, TextView textView, VisualLine line) {
+            IList<TextLine> textLines = line.TextLines;
+            if (textLines == null || textLines.Count == 0) return;
+            int[] lineStarts = null, lineEnds = null;
+            double[] lineTops = null, lineBottoms = null, baselines = null;
+            List<OpenCellShade> openRuns = null;
+            // The ordinary line's strut (StrutElement / StrutRun): body line height, baseline at 0.8.
+            double fontSize = session.Options.FontSize;
+            double strutHeight = Math.Max(fontSize, fontSize * session.Options.LinePercent / 100);
+            double strutAscent = strutHeight * 0.8, strutDescent = strutHeight - strutAscent;
+            foreach (VisualLineElement element in line.Elements) {
+                TableRowElement rowElement = element as TableRowElement;
+                if (rowElement == null) continue;
+                IList<TableToken> tokens = rowElement.Tokens;
+                for (int t = 0; t < tokens.Count; t++) {
+                    TableToken token = tokens[t];
+                    if (token.Text == null || token.Text.Shades == null || token.Length <= 0) continue;
+                    byte[] shades = token.Text.Shades;
+                    int textStart = token.TextStart;
+                    if (textStart < 0 || textStart >= shades.Length) continue;
+                    int count = Math.Min(token.Length, shades.Length - textStart);
+                    int tokenEnd = textStart + count;
+                    bool wrappedEnd = tokenEnd < token.Text.Text.Length && !token.Text.IsBreak(tokenEnd);
+                    TextRunProperties[] props = token.Text.Properties;
+                    int runStart = 0;
+                    byte runShade = 0;
+                    double runAscent = strutAscent, runDescent = strutDescent;
+                    for (int k = 0; k <= count; k++) {
+                        byte shade = k < count ? shades[textStart + k] : (byte)0;
+                        if (k < count && shade == runShade) {
+                            if (shade != 0) GrowCellBand(props, textStart + k, ref runAscent, ref runDescent);
+                            continue;
+                        }
+                        if (runShade != 0) {
+                            Brush brush = runShade == 1 ? session.Colors.InlineCode : session.Colors.Highlight;
+                            if (brush != null) {
+                                int runAbsStart = textStart + runStart;
+                                int runAbsEnd = textStart + k;
+                                int paintEnd = runAbsEnd;
+                                if (wrappedEnd && runAbsEnd == tokenEnd) {
+                                    string cellString = token.Text.Text;
+                                    while (paintEnd > runAbsStart && char.IsWhiteSpace(cellString[paintEnd - 1])) paintEnd--;
+                                }
+                                BackgroundGeometryBuilder builder = null;
+                                if (runStart == 0 && openRuns != null) {
+                                    for (int o = openRuns.Count - 1; o >= 0; o--) {
+                                        OpenCellShade entry = openRuns[o];
+                                        if (Object.ReferenceEquals(entry.Text, token.Text) && entry.NextIndex == textStart && entry.Shade == runShade) {
+                                            builder = entry.Builder;
+                                            openRuns.RemoveAt(o);
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (builder == null) {
+                                    builder = new BackgroundGeometryBuilder();
+                                    builder.AlignToWholePixels = true;
+                                    builder.CornerRadius = 3;
+                                }
+                                if (paintEnd > runAbsStart) {
+                                    if (lineStarts == null) PrecomputeCellLineMetrics(textView, line, textLines, out lineStarts, out lineEnds, out lineTops, out lineBottoms, out baselines);
+                                    DrawCellShadeRange(textView, textLines, lineStarts, lineEnds, lineTops, lineBottoms, baselines,
+                                        rowElement.VisualColumn + token.Start + runStart,
+                                        rowElement.VisualColumn + token.Start + (paintEnd - textStart), runAscent, runDescent, builder);
+                                }
+                                bool continues = wrappedEnd && runAbsEnd == tokenEnd && tokenEnd < shades.Length && shades[tokenEnd] == runShade;
+                                if (continues) {
+                                    if (openRuns == null) openRuns = new List<OpenCellShade>(4);
+                                    openRuns.Add(new OpenCellShade { Text = token.Text, NextIndex = tokenEnd, Shade = runShade, Brush = brush, Builder = builder });
+                                } else {
+                                    Geometry geometry = builder.CreateGeometry();
+                                    if (geometry != null) drawingContext.DrawGeometry(brush, null, geometry);
+                                }
+                            }
+                        }
+                        runStart = k;
+                        runShade = shade;
+                        runAscent = strutAscent; runDescent = strutDescent;
+                        if (shade != 0) GrowCellBand(props, textStart + k, ref runAscent, ref runDescent);
+                    }
+                }
+                if (openRuns != null && openRuns.Count > 0) {
+                    for (int o = 0; o < openRuns.Count; o++) {
+                        Geometry geometry = openRuns[o].Builder.CreateGeometry();
+                        if (geometry != null) drawingContext.DrawGeometry(openRuns[o].Brush, null, geometry);
+                    }
+                    openRuns.Clear();
+                }
+            }
+        }
+        // Adds one shaded column range's TextBounds rectangles (RTL/bidi safe) across overlapping
+        // precomputed TextLines using binary search on start columns; the band is ascent/descent
+        // around each TextLine's baseline, kept inside that TextLine.
+        static void DrawCellShadeRange(TextView textView, IList<TextLine> textLines,
+            int[] lineStarts, int[] lineEnds, double[] lineTops, double[] lineBottoms, double[] baselines,
+            int startColumn, int endColumn, double ascent, double descent, BackgroundGeometryBuilder builder) {
+            int lineCount = textLines.Count;
+            if (lineCount == 0 || endColumn <= startColumn) return;
+            int lo = 0, hi = lineCount - 1;
+            while (lo < hi) {
+                int mid = lo + (hi - lo + 1) / 2;
+                if (lineStarts[mid] <= startColumn) lo = mid;
+                else hi = mid - 1;
+            }
+            while (lo < lineCount && lineEnds[lo] <= startColumn) lo++;
+            double hOffset = textView.HorizontalOffset;
+            for (int i = lo; i < lineCount && lineStarts[i] < endColumn; i++) {
+                int a = Math.Max(startColumn, lineStarts[i]), b = Math.Min(endColumn, lineEnds[i]);
+                if (b <= a) continue;
+                double top = Math.Max(lineTops[i], baselines[i] - ascent);
+                double bottom = Math.Min(lineBottoms[i], baselines[i] + descent);
+                if (bottom <= top) continue;
+                IList<TextBounds> bounds = textLines[i].GetTextBounds(a, b - a);
+                if (bounds == null) continue;
+                for (int r = 0; r < bounds.Count; r++) {
+                    Rect rect = bounds[r].Rectangle;
+                    double left = rect.Left - hOffset;
+                    double right = rect.Right - hOffset;
+                    double minX = Math.Min(left, right);
+                    double width = Math.Abs(right - left);
+                    if (width <= 0.01) continue;
+                    builder.AddRectangle(textView, new Rect(minX, top, width, bottom - top));
+                }
             }
         }
         // A <sup>/<sub> span's ink: the run keeps the 0.75 em advance and no ink of its own
