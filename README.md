@@ -7,7 +7,7 @@ A fast, lightweight Markdown and TXT editor for Windows—just like Notepad.
 ## Why MDNote
 
 - **Markdown Without Memorizing Syntax**: Write directly in a Word-like formatted view while your files are saved as standard Markdown.
-- **Lightweight Like Notepad, Fast with Large Files**: Around 1.3 MB installer. Opens documents with millions of characters right away with no typing lag.
+- **Lightweight Like Notepad, Fast with Large Files**: Around 2.1 MB installer. Opens documents with millions of characters right away with no typing lag.
 - **MD and TXT in One App**: Edit TXT files like Notepad with line numbers, and MD files like formatted documents. Open and save in multiple encodings.
 - **Reliable Korean, Japanese, and Chinese Input**: Characters don't break and the cursor doesn't jump when typing Korean, Japanese, or Chinese.
 - **Keep Your Work Safe**: Recovers unsaved text on the next launch after an unexpected exit, and protects the original file from corruption even if an error occurs while saving.
