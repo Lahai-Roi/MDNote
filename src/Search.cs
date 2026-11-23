@@ -743,66 +743,26 @@ public partial class MainWindow {
         if(end>documentLength)end=documentLength;
         length=end-start;
     }
-    /* W1: a replacement that lands inside a table row's cell must not add a cell. The row parser
-       splits on unescaped pipes, so a "|" the user typed is written as "\|"; a pipe that already
-       carries an odd run of backslashes is escaped already and stays as it is. A pipe inside a
-       closed `code` span stays raw, the same rule MarkdownTableCommands.CellInsertText writes (the
-       renderer skips the span whole); the span is read in the cell text the replacement leaves
-       behind, prefix + value + suffix. Anywhere else the text is written exactly as typed. */
+    /* W1: a replacement that lands inside a table row's cell must not add a cell. The GFM row
+       parser splits on every unescaped pipe (including inside `code` spans), so a "|" the user
+       typed is written as "\|"; a pipe that already carries an odd run of backslashes is escaped
+       already and stays as it is. Anywhere else the text is written exactly as typed. */
     string ReplacementForMatch(int sourceOffset,int sourceEnd,string value){
-        if(value.Length==0||value.IndexOf('|')<0)return value;
+        if(value.Length==0||(value.IndexOf('|')<0&&value[value.Length-1]!='\\'))return value;
         if(PlainText||!SourceInTableRow(sourceOffset))return value;
         ICSharpCode.AvalonEdit.Document.TextDocument document=source.Document;
-        if(sourceEnd<sourceOffset)sourceEnd=sourceOffset;
-        string prefix="",suffix="";
-        if(sourceEnd<=document.TextLength){
-            ICSharpCode.AvalonEdit.Document.DocumentLine line=document.GetLineByOffset(sourceOffset);
-            int start=sourceOffset-line.Offset;
-            int end=sourceEnd-line.Offset;
-            if(end<=line.Length){
-                string lineText=document.GetText(line.Offset,line.Length);
-                List<MarkdownLivePreview.Cell> cells=MarkdownLivePreview.SplitCells(lineText);
-                for(int c=0;c<cells.Count;c++){
-                    if(start>=cells[c].Start&&end<=cells[c].End){
-                        prefix=lineText.Substring(cells[c].Start,start-cells[c].Start);
-                        suffix=lineText.Substring(end,cells[c].End-end);
-                        break;
-                    }
-                }
-            }
-        }
-        string cellText=prefix+value+suffix;
-        var opens=new List<int>();
-        var closes=new List<int>();
-        int budget=cellText.Length*3;
-        for(int p=0;p<cellText.Length;){
-            char c=cellText[p];
-            if(c=='\\'){p+=2;continue;}
-            if(c=='`'){
-                int run=1;
-                while(p+run<cellText.Length&&cellText[p+run]=='`')run++;
-                int close=MarkdownPlainText.CodeClose(cellText,p+run,run,ref budget);
-                if(close>=0){opens.Add(p+run);closes.Add(close);p=close+run;continue;}
-                p+=run;
-                continue;
-            }
-            p++;
-        }
         var escaped=new StringBuilder(value.Length+4);
+        int clampedStart=Math.Min(Math.Max(0,sourceOffset),document.TextLength);
+        var startLine=document.GetLineByOffset(clampedStart);
         int backslashes=0;
-        for(int p=Math.Min(sourceOffset,document.TextLength)-1;p>=0;p--){
+        for(int p=clampedStart-1;p>=startLine.Offset;p--){
             if(document.GetCharAt(p)!='\\')break;
             backslashes++;
         }
-        int span=0;
-        int offset=prefix.Length;
         for(int i=0;i<value.Length;i++){
             char c=value[i];
-            int at=offset+i;
-            while(span<opens.Count&&closes[span]<at)span++;
-            bool code=span<opens.Count&&at>=opens[span];
             if(c=='|'){
-                if(!code&&(backslashes&1)==0)escaped.Append('\\');
+                if((backslashes&1)==0)escaped.Append('\\');
                 escaped.Append(c);
                 backslashes=0;
             }else{
@@ -810,6 +770,9 @@ public partial class MainWindow {
                 if(c=='\\')backslashes++;else backslashes=0;
             }
         }
+        int clampedEnd = Math.Min(Math.Max(sourceOffset, sourceEnd), document.TextLength);
+        var endLine = document.GetLineByOffset(clampedEnd);
+        if (MarkdownTableCommands.NeedsTrailingBackslashBeforePipe(document, endLine.Offset, endLine.Offset + endLine.Length, clampedEnd, backslashes)) escaped.Append('\\');
         return escaped.ToString();
     }
     // The live parse knows which lines are table rows (fences, list indentation and the delimiter

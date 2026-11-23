@@ -96,22 +96,14 @@ internal static class MarkdownWriter {
         if(rows.Count>0){var d=new List<string>();for(int i=0;i<columns;i++){TableCell header=i<headerCells.Count?headerCells[i]:null;TextAlignment alignment=header==null?TextAlignment.Left:ColumnAlignment(header);bool explicitLeft=header!=null&&ExplicitLeftAlignment(header);d.Add(alignment==TextAlignment.Center?":---:":alignment==TextAlignment.Right?"---:":explicitLeft?":---":"---");}rows.Insert(1,"| "+String.Join(" | ",d)+" |");}
         return String.Join("\n",rows);
     }
-    // A "|" inside a closed `code` span is cell text, not a column separator (the renderer's
-    // TablePipes skips the span whole, and MarkdownTableCommands.CellInsertText writes the same
-    // rule), so it stays raw; every other pipe is escaped. An opener without its same-length
-    // closer is not a span, so its pipes are escaped like plain text.
+    // GFM splits table rows on every unescaped "|" (including inside `code` spans), so every
+    // unescaped pipe in a FlowDocument table cell is written as "\|".
     static string CellPipes(string value){
         if(value==null||value.IndexOf('|')<0)return value;
-        var escaped=new StringBuilder(value.Length+8);int budget=value.Length*3;
+        var escaped=new StringBuilder(value.Length+8);
         for(int p=0;p<value.Length;){
             char c=value[p];
             if(c=='\\'){escaped.Append(c);if(p+1<value.Length)escaped.Append(value[p+1]);p+=2;continue;}
-            if(c=='`'){
-                int run=1;while(p+run<value.Length&&value[p+run]=='`')run++;
-                int close=MarkdownPlainText.CodeClose(value,p+run,run,ref budget);
-                if(close>=0){int end=close+run;escaped.Append(value,p,end-p);p=end;continue;}
-                escaped.Append(value,p,run);p+=run;continue;
-            }
             if(c=='|')escaped.Append('\\');
             escaped.Append(c);p++;
         }
@@ -168,10 +160,23 @@ internal static class MarkdownWriter {
     // wrappers are not emphasis: a piece that is only whitespace still opens them around the space.
     // Code stays one unit (its backticks protect spaces) and empty pieces emit no markers, keeping blank
     // lines blank.
+    internal static bool HasOddBackslashPipe(string text){
+        if(String.IsNullOrEmpty(text))return false;
+        for(int i=0;i<text.Length;i++){
+            if(text[i]!='|')continue;
+            int bs=0;
+            for(int q=i-1;q>=0&&text[q]=='\\';q--)bs++;
+            if((bs&1)!=0)return true;
+        }
+        return false;
+    }
+    internal static string HtmlTableCode(string text){
+        return "<code>"+text.Replace("&","&amp;").Replace("<","&lt;").Replace(">","&gt;").Replace("\\","&#92;").Replace("|","&#124;")+"</code>";
+    }
     static void EmitPiece(string piece,string[] style,string link,StringBuilder output,List<Wrap> open,StringBuilder trail,StringBuilder lead,bool lineMarkers){
         if(piece.Length==0)return;
         var wrappers=Wrappers(style,link);
-        if(style[3]=="1"){Transition(output,open,wrappers,trail,lead,'`');output.Append(Code(piece));return;}
+        if(style[3]=="1"){Transition(output,open,wrappers,trail,lead,'`');output.Append(!lineMarkers&&HasOddBackslashPipe(piece)?HtmlTableCode(piece):Code(piece));return;}
         int at=0;bool staged=false;
         while(at<piece.Length){char c=piece[at];if(Char.IsWhiteSpace(c)){(staged?trail:lead).Append(c);at++;continue;}int end=at+1;while(end<piece.Length&&!Char.IsWhiteSpace(piece[end]))end++;Transition(output,open,wrappers,trail,lead,piece[at]);output.Append(Escape(piece.Substring(at,end-at),lineMarkers&&OnlySpacesSinceNewline(output)));staged=true;at=end;}
         if(!staged)Transition(output,open,OuterWrappers(wrappers),trail,lead,' ');

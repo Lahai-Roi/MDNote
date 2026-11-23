@@ -1209,8 +1209,8 @@ internal static class ImeAbuseProbe {
 
     // ---------------------------------------------------------------- document model
     // Independent of the preview parser: a table row is a line that starts with a pipe (after its
-    // indent) and is not a delimiter row; its cells follow the same escaped pipe / code span rule
-    // the table commands use. The code-fence state is deliberately NOT part of this shape: a
+    // indent) and is not a delimiter row; its cells follow the same escaped pipe rule the table
+    // commands use (under GFM, backtick code spans do not protect unescaped pipes). The code-fence state is deliberately NOT part of this shape: a
     // committed character can break a fence line's leading "```" and a later "```" then reads as
     // an opener, which would hide every row below it from a fence-aware scan. A fence decides
     // rendering, not whether a row's cells changed; the probe's committed text contains no pipe,
@@ -1297,28 +1297,10 @@ internal static class ImeAbuseProbe {
         while(at<text.Length){
             char c=text[at];
             if(c=='\\'){at+=2;continue;}
-            if(c=='`'){
-                int run=1;
-                while(at+run<text.Length&&text[at+run]=='`')run++;
-                int close=FindBackticks(text,at+run,run);
-                at=close>=0?close+run:at+run;
-                continue;
-            }
             if(c=='|')pipes.Add(at);
             at++;
         }
         return pipes;
-    }
-    static int FindBackticks(string text,int from,int length) {
-        int at=from;
-        while(at<text.Length){
-            if(text[at]!='`'){at++;continue;}
-            int run=1;
-            while(at+run<text.Length&&text[at+run]=='`')run++;
-            if(run==length)return at;
-            at+=run;
-        }
-        return -1;
     }
     static List<string> Lines(string text) {
         var lines=new List<string>();

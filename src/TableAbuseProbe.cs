@@ -997,20 +997,13 @@ internal static class TableAbuseProbe {
     static string NextLine(DocView doc, int line) {
         return line + 1 < doc.Count ? doc.Lines[line + 1] : "(end of document)";
     }
-    // Pipes that delimit cells: an unescaped "|" outside a `code span` (the same rule the table
-    // commands and the preview use, implemented here so a broken split cannot hide itself).
+    // Pipes that delimit cells: an unescaped "|" (under GFM, backtick code spans do not protect
+    // unescaped pipes, implemented here so a broken split cannot hide itself).
     static void ScanPipes(string text, List<int> pipes) {
         int at = 0;
         while (at < text.Length) {
             char c = text[at];
             if (c == '\\') { at += 2; continue; }
-            if (c == '`') {
-                int run = 1;
-                while (at + run < text.Length && text[at + run] == '`') run++;
-                int close = FindBackticks(text, at + run, run);
-                at = close >= 0 ? close + run : at + run;
-                continue;
-            }
             if (c == '|') pipes.Add(at);
             at++;
         }
@@ -1069,60 +1062,12 @@ internal static class TableAbuseProbe {
         }
         return spans.ToString();
     }
-    // Structural column cells: the segments the source's own unescaped "|" separators name,
-    // with no code-span pairing. The app's renderer reads a pipe inside a code span as cell
-    // text (MarkdownLivePreview.TablePipes, and the "cell index code span pipe" table-command
-    // test), so an inline edit that opens or closes a code span can change CellCount without a
-    // single separator changing. The column-count invariant is about the separators the user
-    // typed (a pipe or a newline), so it compares this count.
-    static void ScanSeparators(string text, List<int> pipes) {
-        int at = 0;
-        while (at < text.Length) {
-            char c = text[at];
-            if (c == '\\') { at += 2; continue; }
-            if (c == '|') pipes.Add(at);
-            at++;
-        }
-    }
-    static int SeparatorCellCount(string text) {
-        if (text == null) return 0;
-        var pipes = new List<int>();
-        ScanSeparators(text, pipes);
-        int cells = 0;
-        int segmentStart = 0;
-        for (int i = 0; i <= pipes.Count; i++) {
-            int segmentEnd = i < pipes.Count ? pipes[i] : text.Length;
-            int a = segmentStart, b = segmentEnd;
-            while (a < b && (text[a] == ' ' || text[a] == '\t')) a++;
-            while (b > a && (text[b - 1] == ' ' || text[b - 1] == '\t')) b--;
-            bool interior = i > 0 && i < pipes.Count;
-            if (a != b || interior) cells++;
-            segmentStart = segmentEnd + 1;
-        }
-        return cells;
-    }
     // A line the renderer keeps as a table line: a pipe the renderer reads as a separator (an
-    // escaped or code-span pipe is text). Outer pipes are not required any more: the product
+    // escaped pipe is text). Outer pipes are not required any more: the product
     // makes a header + delimiter pair with the same cell count a table, and every following
     // piped line stays a row (MarkdownLivePreview.ParseLine's "before.Table" state).
     static bool IsRowLine(string text) {
         return text != null && HasPipe(text);
-    }
-    // The app's table parser reads a "|" inside a code span as cell text, not a separator
-    // (MarkdownLivePreview.TablePipes; its own fixture here writes "`코드|막대`" inside one
-    // cell, and the table commands' "cell index code span pipe" test states the same rule). So
-    // a step that only changed the backtick pairing of the line can change the cell split with
-    // every separator untouched. That is inline markup, not the pipe/newline column edit this
-    // invariant names, so it is excluded; a step that moved a separator still fails.
-    static int BacktickCount(string text) {
-        int count = 0;
-        for (int i = 0; i < text.Length; i++) if (text[i] == '`') count++;
-        return count;
-    }
-    static bool CodeSpanResplit(string pre, string post) {
-        if (pre == null || post == null) return false;
-        if (SeparatorCellCount(pre) != SeparatorCellCount(post)) return false;
-        return BacktickCount(pre) != BacktickCount(post);
     }
     // A delimiter row: optional spaces, one or more dashes, optional colons on either side, at
     // least one pipe and at least one cell (one dash is enough, per GFM).
@@ -1339,12 +1284,6 @@ internal static class TableAbuseProbe {
         }
         Bump(checkCounts, "c");
         int headerCells = CellCount(post.Lines[line]);
-        // The renderer reads a pipe inside a code span as cell text, so typing one backtick in
-        // the header changes its split while every separator stays; that keeps the delimiter
-        // row's own columns below. A header whose edge cell text was emptied names one cell less
-        // although no pipe moved, but that is the same count mismatch every other step produces:
-        // GFM needs equal counts, so the pair is not a table and there is nothing to hold.
-        bool headerResplit = CodeSpanResplit(PreLine(table,0), post.Lines[line]);
         int delimiterCells = CellCount(post.Lines[line + 1]);
         // GFM: the header and its delimiter row must name the same columns for the pair to be a
         // table (MarkdownLivePreview.NextIsDelimiter). A step that splits one of them (text typed
@@ -1352,7 +1291,7 @@ internal static class TableAbuseProbe {
         // text, a deleted edge cell) makes the product read the block as ordinary text; that is
         // the documented rule, not damage, so there is no table shape left to hold the remaining
         // lines to.
-        if (delimiterCells != headerCells && !headerResplit) return true;
+        if (delimiterCells != headerCells) return true;
         // The delimiter row is the table's column count (equal to the header's, above). A body row
         // may name fewer cells (they are padded) or more (the extras are ignored): GFM reads a
         // ragged row as a row, and so does the renderer's block state, so a row's own count is not
@@ -1408,11 +1347,10 @@ internal static class TableAbuseProbe {
         var document = source.Document;
         if (document.LineCount < lastLine + 1) return true;
         // The preview's cell split is a pure function of the line (MarkdownLivePreview.SplitCells:
-        // an escaped pipe and a pipe inside a closed `code` span are cell text), so it must name
-        // the model's cells whatever the block state says. The comparison sits before the
-        // equal-count skip below, so that skip cannot hide the two splitters drifting apart: at
-        // b56c6 seed 7 step 164 a deleted word turned the header's backtick run into a span that
-        // closed over two separators, and only the model's own count said the pair was no table.
+        // an escaped pipe is cell text; under GFM, backtick code spans do not protect unescaped
+        // pipes), so it must name the model's cells whatever the block state says. The comparison
+        // sits before the equal-count skip below, so that skip cannot hide the two splitters
+        // drifting apart.
         int previewHeaderCells = MarkdownLivePreview.SplitCells(ctx.PostDoc.Lines[headerLine]).Count;
         if (previewHeaderCells != headerCells) {
             return Fail(ctx, "b:parse", "the preview splits the header line into " + previewHeaderCells +
@@ -1422,9 +1360,8 @@ internal static class TableAbuseProbe {
         // not a table at all (MarkdownLivePreview.NextIsDelimiter). The text model already reads
         // that pair as plain text, so there is no table header for the preview to agree with; a
         // step that broke the count (the text after a backslash stopped escaping a separator, a
-        // "|" the row no longer takes as cell text, a header whose edge cell was emptied, a
-        // backtick that now closes a span over a separator) follows the product's documented rule
-        // instead of disagreeing with it.
+        // "|" the row no longer takes as cell text, a header whose edge cell was emptied) follows
+        // the product's documented rule instead of disagreeing with it.
         if (headerCells != rowCells) return true;
         MarkdownLivePreview.LineInfo header = session.Info(document.GetLineByNumber(headerLine + 1));
         if (header == null || !header.Table || !header.Header) {
@@ -1452,7 +1389,6 @@ internal static class TableAbuseProbe {
             MarkdownLivePreview.LineInfo info = session.Info(document.GetLineByNumber(i + 1));
             if (info == null || !info.Table || info.Delimiter || info.Cells == null || info.Cells.Count != modelCells) {
                 if (info != null && info.Cells != null && EdgeCellEmptied(PreLine(table,i-headerLine), ctx.PostDoc.Lines[i])) continue;
-                if (info != null && CodeSpanResplit(PreLine(table,i-headerLine), ctx.PostDoc.Lines[i])) continue;
                 focusPre = table.Header + (i - headerLine);
                 focusPost = i;
                 return Fail(ctx, "b:parse", "the preview disagrees about row " + (i + 1) + " (preview " +
@@ -1670,7 +1606,7 @@ internal static class TableAbuseProbe {
                 Line(text, nl, "| 제목 | 설명 | 비고 |");
                 Line(text, nl, "| :-- | :-: | --: |");
                 Line(text, nl, "| 가나다라마바사 | 아주 긴 셀 값이 여러 단어로 이어지는 줄바꿈 셀입니다 | 😀 |");
-                Line(text, nl, "| 日本語 | `코드|막대` 셀 | **굵게** |");
+                Line(text, nl, "| 日本語 | `코드\\|막대` 셀 | **굵게** |");
                 Line(text, nl, "");
                 Line(text, nl, "마지막 문단.");
                 break;

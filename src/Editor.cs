@@ -538,7 +538,17 @@ public partial class MainWindow : Window {
     void FontSizeKeyDown(object sender,KeyEventArgs args){if(args.Key==Key.Enter){if(sizes.IsDropDownOpen)return;CommitFontSize(true);args.Handled=true;}else if(args.Key==Key.Escape){cancelSizeChoice=true;sizeChoice=null;committingSize=true;try{sizes.IsDropDownOpen=false;sizes.Text=sizeText;source.Focus();}finally{committingSize=false;}UpdateTools();args.Handled=true;}}
     void CommitFontSize(bool showError){if(updatingTools||committingSize||sizes.IsDropDownOpen||!LiveFormat)return;string entry=(sizes.Text??"").Replace("px","").Trim();double value;if((Double.TryParse(entry,NumberStyles.Float,CultureInfo.CurrentCulture,out value)||Double.TryParse(entry,NumberStyles.Float,CultureInfo.InvariantCulture,out value))&&!Double.IsNaN(value)&&!Double.IsInfinity(value)&&value>=6&&value<=120){committingSize=true;try{sizeText=sizes.Text;SetFontSize(value);if(showError)source.Focus();}finally{committingSize=false;}}else{sizeText=sizes.Text;UpdateTools();if(showError)MessageBox.Show(this,T("글자 크기는 6~120 사이의 숫자로 입력해 주세요."),"MDNote");}}
     internal void SetFontSizeForProbe(double value){SetFontSize(value);}
-    void SetFontSize(double value){if(!LiveFormat)return;int pixels=(int)Math.Round(value);RunLiveCommand(delegate(ICSharpCode.AvalonEdit.Document.TextDocument d,int s,int l){return l==0?MarkdownCommands.SetTypingSize(d,s,pixels):MarkdownCommands.SetSpanSize(d,s,l,pixels);});}
+    void SetFontSize(double value){
+        if(!LiveFormat||source==null)return;
+        double baseSize=LivePreviewAttached&&livePreview!=null&&livePreview.Options!=null&&livePreview.Options.FontSize>0?livePreview.Options.FontSize:fontSize;
+        int pixels=value<=0||Math.Abs(value-baseSize)<0.01?0:(int)Math.Round(value);
+        source.RunAfterComposition(delegate{
+            if(!LiveFormat||source==null)return;
+            RunLiveCommand(delegate(ICSharpCode.AvalonEdit.Document.TextDocument d,int s,int l){
+                return l==0?MarkdownCommands.SetTypingSize(d,s,pixels):MarkdownCommands.SetSpanSize(d,s,l,pixels);
+            });
+        });
+    }
     void SetTextColor(Color value){LiveColor(value);}
     void UpdateTools(){UpdateUndoRedoTools();LiveUpdateTools();}
     // Never overwrite an in-progress keyboard entry. The live surface has no rich selection
@@ -605,17 +615,14 @@ public partial class MainWindow : Window {
         var info=livePreview.Info(line);
         if(info==null)return fontSize;
         double baseSize=livePreview.Options==null||livePreview.Options.FontSize<=0?fontSize:livePreview.Options.FontSize;
-        int relative=offset-line.Offset;
-        // The caret on the outer edge of a hidden closing run draws on that run's inside (the
-        // same rule typed text follows), so the box reports the size the next character gets.
-        int inside=MarkdownLivePreview.Session.HiddenCloseInside(info,relative);
-        if(inside>=0)relative=inside;
+        int relative=livePreview.TypingStyleRelative(line,info,offset);
         // The heading scale is applied to the text after the list prefix, so a bullet keeps its own size.
         double drawn=info.Heading>0&&relative>=(info.List!=null?info.ListBody:0)?baseSize*Markdown.HeadingScale(info.Heading):baseSize;
+        bool sizeEnded=livePreview.IsStyleEndedAt(offset,"font-size");
         foreach(MarkdownLivePreview.StyledPart part in info.Styles){
             if(relative<part.Start||relative>part.Start+part.Length)continue;
             /* only parts that set a size matter here; bold, italic, strike, code and link restyle ink or typeface */
-            if(part.Size>0)drawn=part.Size;
+            if(!sizeEnded&&part.Size>0)drawn=part.Size;
             if((part.Style&MarkdownLivePreview.Style.Small)!=0)drawn=baseSize*0.9;
             if((part.Style&(MarkdownLivePreview.Style.Superscript|MarkdownLivePreview.Style.Subscript))!=0)drawn=baseSize*0.75;
         }

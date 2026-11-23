@@ -790,10 +790,9 @@ internal static class FindAbuseProbe {
         ReplaceCase pipe = MakeCase("table-pipe-replacement", "| a | b |\n| --- | --- |\n| alpha | beta |\n", "alpha", "A|B");
         pipe.WrittenReplacement = "A\\|B";
         list.Add(pipe);
-        // bughunt3 tables item 6: inside a closed `code` span the pipe is cell text and stays raw,
-        // the same rule MarkdownTableCommands.CellInsertText writes.
+        // Under GFM, a "|" written inside a `code` span in a table row is also escaped as "\|".
         ReplaceCase codePipe = MakeCase("table-code-pipe-replacement", "| `a` | b |\n| --- | --- |\n| c | d |\n", "a", "x|y");
-        codePipe.WrittenReplacement = "x|y";
+        codePipe.WrittenReplacement = "x\\|y";
         list.Add(codePipe);
         if (liveMode) {
             list.Add(MakeCase("marker-edge-literal", "**ab**c\n", "ab**c", "XY"));
@@ -853,9 +852,9 @@ internal static class FindAbuseProbe {
         ReplaceAllCase pipe = MakeAllCase("table-pipe-replacement", "| a | b |\n| --- | --- |\n| alpha | beta |\n", "alpha", "A|B", true);
         pipe.WrittenReplacement = "A\\|B";
         list.Add(pipe);
-        // A pipe inside a closed `code` span stays raw (tables item 6), in 모두 바꾸기 too.
+        // Under GFM, a "|" inside a `code` span in a table row is escaped as "\|", in 모두 바꾸기 too.
         ReplaceAllCase codePipe = MakeAllCase("table-code-pipe-replacement", "| `a` | b |\n| --- | --- |\n| c | d |\n", "a", "x|y", true);
-        codePipe.WrittenReplacement = "x|y";
+        codePipe.WrittenReplacement = "x\\|y";
         list.Add(codePipe);
         if (!liveMode) list.Add(MakeAllCase("match-across-pipes", "| 가 | 나 |\n| --- | --- |\n", "가 나", "X", false));
         if (liveMode) {
@@ -1023,12 +1022,6 @@ internal static class FindAbuseProbe {
             char value = line[i];
             if (escaped) { cell.Append(value); escaped = false; continue; }
             if (value == '\\') { cell.Append(value); escaped = true; continue; }
-            // A pipe inside a closed `code` span is cell text, not a separator (the row parser's
-            // own rule, MarkdownTableCommands.PipePositions).
-            if (value == '`') {
-                int end = CodeSpanEnd(line, i);
-                if (end > i) { cell.Append(line, i, end - i); i = end - 1; continue; }
-            }
             if (value == '|') { cells.Add(cell.ToString()); cell.Length = 0; continue; }
             cell.Append(value);
         }
@@ -1036,21 +1029,6 @@ internal static class FindAbuseProbe {
         if (cells.Count > 0 && cells[0].Trim().Length == 0) cells.RemoveAt(0);
         if (cells.Count > 0 && cells[cells.Count - 1].Trim().Length == 0) cells.RemoveAt(cells.Count - 1);
         return cells;
-    }
-    // The index after the run that closes the backtick span opening at start, or start when the
-    // run has no same-length close.
-    static int CodeSpanEnd(string text, int start) {
-        int i = start;
-        while (i < text.Length && text[i] == '`') i++;
-        int run = i - start;
-        int j = i;
-        while (j < text.Length) {
-            if (text[j] != '`') { j++; continue; }
-            int close = j;
-            while (j < text.Length && text[j] == '`') j++;
-            if (j - close == run) return j;
-        }
-        return start;
     }
     static bool DelimiterCell(string cell) {
         string value = cell.Trim();

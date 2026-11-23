@@ -40,6 +40,9 @@ internal sealed class CommandResult {
     internal string TypingOpen;
     internal string TypingClose;
     internal string TypingMarker;
+    // A caret-only toggle on a run's inner closing edge only steps the caret past that closer: the
+    // marker it stepped past, so the live host can end the style there (null for every other result).
+    internal string SteppedPast;
 
     internal void Add(int offset, int length, string text) {
         Edits.Add(new SourceEdit(offset, length, text));
@@ -500,7 +503,7 @@ internal static class MarkdownCommands {
         if (start + length > line.EndOffset) return null;
         string text = LineText(document, line);
         bool isLink = false;
-        foreach (LinkSpan candidate in LineLinks(text, line.Offset)) {
+        foreach (LinkSpan candidate in LineLinksForLine(document, line, text)) {
             if (candidate.Start == start && candidate.End == start + length) { isLink = true; break; }
         }
         if (!isLink) return null;
@@ -609,13 +612,14 @@ internal static class MarkdownCommands {
             // Structure is skipped, never wrapped: a marker on a delimiter row ends the table
             // and a marker on a setext underline or a rule ends that block.
             if (role == 2) continue;
+            List<InlineRun> runs = LineInlineRuns(document, line, text);
             if (role == 1) {
                 // A table row is edited inside its cells: markers go around each cell's text and
                 // never around the pipes that keep the row a row.
                 foreach (CellSpan cell in TableCells(text)) {
                     int a = Math.Max(start, line.Offset + cell.Start);
                     int b = Math.Min(end, line.Offset + cell.End);
-                    WidenToCodeRun(text, line.Offset, ref a, ref b);
+                    WidenToCodeRun(runs, line.Offset, ref a, ref b);
                     while (a < b && char.IsWhiteSpace(document.GetCharAt(a))) a++;
                     while (b > a && char.IsWhiteSpace(document.GetCharAt(b - 1))) b--;
                     InlinePlan plan = new InlinePlan();
@@ -628,7 +632,7 @@ internal static class MarkdownCommands {
             }
             int from = Math.Max(start, line.Offset + prefix.BodyStart);
             int to = Math.Min(end, line.Offset + line.Length);
-            WidenToCodeRun(text, line.Offset, ref from, ref to);
+            WidenToCodeRun(runs, line.Offset, ref from, ref to);
             while (from < to && char.IsWhiteSpace(document.GetCharAt(from))) from++;
             while (to > from && char.IsWhiteSpace(document.GetCharAt(to - 1))) to--;
             InlinePlan linePlan = new InlinePlan();
@@ -928,22 +932,18 @@ internal static class MarkdownCommands {
             remove.SortEdits();
             return remove;
         }
-        // A closing marker right after the caret ends a run still open on this line: step
-        // past it without changing the text.
-        if (HasMarkerAfter(document, caret, marker) && HasOpenMarkerBefore(document, caret, marker)) {
-            CommandResult move = new CommandResult();
-            move.SelectionStart = caret + m;
-            move.SelectionLength = 0;
-            return move;
-        }
-        // A caret right after an opening marker stands on that run's inner edge: step out in
-        // front of the opener so the next character is written outside the run. Arming a new pair
-        // here wrote a second one inside the first ("****x**abc**").
-        if (HasMarkerBefore(document, caret, marker) && HasOpenMarkerBefore(document, caret, marker)) {
-            CommandResult outside = new CommandResult();
-            outside.SelectionStart = caret - m;
-            outside.SelectionLength = 0;
-            return outside;
+        int sliceOffset;
+        string slice;
+        List<MarkdownInlineSpans.Span> spans = LineSpansAtCaret(document, caret, out sliceOffset, out slice);
+        if (spans != null && spans.Count > 0) {
+            int rel = caret - sliceOffset;
+            if (marker == "`") {
+                CommandResult codeEdge = ToggleCodeAtEdge(spans, slice, sliceOffset, rel);
+                if (codeEdge != null) return codeEdge;
+            } else {
+                CommandResult emphasisEdge = ToggleEmphasisAtEdge(spans, sliceOffset, rel, caret, marker);
+                if (emphasisEdge != null) return emphasisEdge;
+            }
         }
         // Otherwise arm the style for the text typed next. The pair is written only with that
         // first input (WrapTyped), so a caret move or a second toggle never leaves "****" in the
@@ -955,6 +955,248 @@ internal static class MarkdownCommands {
         result.SelectionStart = caret;
         result.SelectionLength = 0;
         return result;
+    }
+
+    // The edited line body or owning table cell for caret-edge inspection, so inline
+    // pairing stays O(edited line) and never pairs markers across two cells.
+    static bool InlinePieceSlice(TextDocument document, int caret, out int sliceOffset, out string slice) {
+        sliceOffset = caret;
+        slice = string.Empty;
+        DocumentLine line = document.GetLineByOffset(caret);
+        string text = LineText(document, line);
+        LinePrefix prefix = ParsePrefix(text);
+        int role = LineRole(document, line, prefix);
+        if (role == 2) return false;
+        if (role == 1) {
+            int relative = caret - line.Offset;
+            foreach (CellSpan cell in TableCells(text)) {
+                if (relative >= cell.Start && relative <= cell.End) {
+                    sliceOffset = line.Offset + cell.Start;
+                    slice = text.Substring(cell.Start, cell.End - cell.Start);
+                    return true;
+                }
+            }
+            return false;
+        }
+        int bodyStart = prefix.BodyStart;
+        if (caret < line.Offset + bodyStart) return false;
+        sliceOffset = line.Offset + bodyStart;
+        slice = text.Substring(bodyStart);
+        return true;
+    }
+
+    static List<MarkdownInlineSpans.Span> LineSpansAtCaret(TextDocument document, int caret, out int sliceOffset, out string slice) {
+        if (!InlinePieceSlice(document, caret, out sliceOffset, out slice) || slice.Length == 0) {
+            return null;
+        }
+        return MarkdownInlineSpans.Build(MarkdownLivePreview.ParseInlineText(slice, false), slice);
+    }
+
+    static bool MatchesEmphasisMarker(string spanMarker, string marker) {
+        if (string.IsNullOrEmpty(spanMarker) || string.IsNullOrEmpty(marker)) return false;
+        if (string.CompareOrdinal(spanMarker, marker) == 0) return true;
+        if (marker == "**" && spanMarker == "__") return true;
+        if (marker == "*" && spanMarker == "_") return true;
+        return false;
+    }
+
+    static bool IsPaddedCodeSpan(string slice, MarkdownInlineSpans.Span span) {
+        int openEnd = span.OpenStart + span.OpenLen;
+        if (span.CloseStart - openEnd < 2) return false;
+        if (slice[openEnd] != ' ' || slice[span.CloseStart - 1] != ' ') return false;
+        for (int i = openEnd; i < span.CloseStart; i++) {
+            if (slice[i] != ' ') return true;
+        }
+        return false;
+    }
+
+    static CommandResult ToggleCodeAtEdge(List<MarkdownInlineSpans.Span> spans, string slice, int sliceOffset, int rel) {
+        for (int i = 0; i < spans.Count; i++) {
+            MarkdownInlineSpans.Span span = spans[i];
+            if (span.Kind != MarkdownInlineSpans.SpanKind.Code || span.CloseLen <= 0) continue;
+            // Inner edge of closing backticks: step past without editing. Outer edge stays armable
+            // because the toolbar code button is already off outside a code span.
+            bool padded = IsPaddedCodeSpan(slice, span);
+            if (rel == span.CloseStart || (padded && rel == span.CloseStart - 1)) {
+                CommandResult move = new CommandResult();
+                move.SelectionStart = sliceOffset + span.CloseStart + span.CloseLen;
+                move.SelectionLength = 0;
+                move.SteppedPast = "`";
+                return move;
+            }
+        }
+        for (int i = 0; i < spans.Count; i++) {
+            MarkdownInlineSpans.Span span = spans[i];
+            if (span.Kind != MarkdownInlineSpans.SpanKind.Code || span.CloseLen <= 0) continue;
+            int openEnd = span.OpenStart + span.OpenLen;
+            bool padded = IsPaddedCodeSpan(slice, span);
+            if (rel == openEnd || (padded && rel == openEnd + 1)) {
+                CommandResult outside = new CommandResult();
+                outside.SelectionStart = sliceOffset + span.OpenStart;
+                outside.SelectionLength = 0;
+                return outside;
+            }
+        }
+        return null;
+    }
+
+    static CommandResult ToggleEmphasisAtEdge(List<MarkdownInlineSpans.Span> spans, int sliceOffset, int rel, int caret, string marker) {
+        // Outer edge of one or more closing HTML tags (e.g. "<span ...>**굵게**</span>|"):
+        // the hidden tag draws at the same spot as the closer before it, so the style is still lit.
+        int empPoint = rel;
+        for (int pass = 0; pass < spans.Count; pass++) {
+            int moved = empPoint;
+            for (int i = 0; i < spans.Count; i++) {
+                MarkdownInlineSpans.Span span = spans[i];
+                if (span.Kind == MarkdownInlineSpans.SpanKind.Tag && span.CloseLen > 0
+                    && span.CloseStart + span.CloseLen == moved) {
+                    moved = span.CloseStart;
+                    break;
+                }
+            }
+            if (moved == empPoint) break;
+            empPoint = moved;
+        }
+        if (empPoint < rel) {
+            int tagRunStart, tagRunEnd;
+            if (ContiguousCloseRun(spans, MarkdownInlineSpans.SpanKind.Emphasis, empPoint, out tagRunStart, out tagRunEnd)
+                && tagRunEnd == empPoint
+                && CloseRunContainsMarker(spans, tagRunStart, tagRunEnd, marker)) {
+                CommandResult outerAfterTag = new CommandResult();
+                outerAfterTag.SelectionStart = caret;
+                outerAfterTag.SelectionLength = 0;
+                outerAfterTag.SteppedPast = marker;
+                return outerAfterTag;
+            }
+            return null;
+        }
+
+        // Inner edge, interior, or outer edge of a contiguous emphasis closing run
+        // (e.g. "**굵게|**", "**굵게**|", "***테스트|***", "***테스트***|", "**~~테스트|~~**").
+        int closeRunStart, closeRunEnd;
+        if (ContiguousCloseRun(spans, MarkdownInlineSpans.SpanKind.Emphasis, rel, out closeRunStart, out closeRunEnd)
+            && CloseRunContainsMarker(spans, closeRunStart, closeRunEnd, marker)) {
+            if (rel == closeRunEnd) {
+                CommandResult outer = new CommandResult();
+                outer.SelectionStart = caret;
+                outer.SelectionLength = 0;
+                outer.SteppedPast = marker;
+                return outer;
+            }
+            if (rel == closeRunStart || MatchingCloserAtOrAfter(spans, closeRunStart, closeRunEnd, rel, marker)) {
+                CommandResult move = new CommandResult();
+                move.SelectionStart = sliceOffset + closeRunEnd;
+                move.SelectionLength = 0;
+                move.SteppedPast = marker;
+                return move;
+            }
+            CommandResult past = new CommandResult();
+            past.SelectionStart = caret;
+            past.SelectionLength = 0;
+            past.SteppedPast = marker;
+            return past;
+        }
+
+        // Inner edge of an opening marker run ("**|굵게**", "***|테스트***"): step in front of
+        // the opener so the next character is written outside the run.
+        int openRunStart, openRunEnd;
+        if (ContiguousEmphasisOpenRun(spans, rel, out openRunStart, out openRunEnd)
+            && rel == openRunEnd
+            && OpenRunContainsMarker(spans, openRunStart, openRunEnd, marker)) {
+            CommandResult outside = new CommandResult();
+            outside.SelectionStart = sliceOffset + openRunStart;
+            outside.SelectionLength = 0;
+            return outside;
+        }
+        return null;
+    }
+
+    static bool ContiguousCloseRun(List<MarkdownInlineSpans.Span> spans, MarkdownInlineSpans.SpanKind kind, int rel, out int runStart, out int runEnd) {
+        runStart = -1;
+        runEnd = -1;
+        for (int i = 0; i < spans.Count; i++) {
+            MarkdownInlineSpans.Span span = spans[i];
+            if (span.Kind != kind || span.CloseLen <= 0) continue;
+            int closeEnd = span.CloseStart + span.CloseLen;
+            if (span.CloseStart > rel || closeEnd < rel) continue;
+            if (runStart < 0 || span.CloseStart < runStart) runStart = span.CloseStart;
+            if (closeEnd > runEnd) runEnd = closeEnd;
+        }
+        if (runStart < 0) return false;
+        for (int pass = 0; pass < spans.Count; pass++) {
+            bool grew = false;
+            for (int i = 0; i < spans.Count; i++) {
+                MarkdownInlineSpans.Span span = spans[i];
+                if (span.Kind != kind || span.CloseLen <= 0) continue;
+                int closeEnd = span.CloseStart + span.CloseLen;
+                if (span.CloseStart <= runEnd && closeEnd >= runStart) {
+                    if (span.CloseStart < runStart) { runStart = span.CloseStart; grew = true; }
+                    if (closeEnd > runEnd) { runEnd = closeEnd; grew = true; }
+                }
+            }
+            if (!grew) break;
+        }
+        return true;
+    }
+
+    static bool CloseRunContainsMarker(List<MarkdownInlineSpans.Span> spans, int runStart, int runEnd, string marker) {
+        for (int i = 0; i < spans.Count; i++) {
+            MarkdownInlineSpans.Span span = spans[i];
+            if (span.Kind != MarkdownInlineSpans.SpanKind.Emphasis || span.CloseLen <= 0) continue;
+            if (span.CloseStart >= runStart && span.CloseStart + span.CloseLen <= runEnd
+                && MatchesEmphasisMarker(span.CloseText, marker)) return true;
+        }
+        return false;
+    }
+
+    static bool MatchingCloserAtOrAfter(List<MarkdownInlineSpans.Span> spans, int runStart, int runEnd, int rel, string marker) {
+        for (int i = 0; i < spans.Count; i++) {
+            MarkdownInlineSpans.Span span = spans[i];
+            if (span.Kind != MarkdownInlineSpans.SpanKind.Emphasis || span.CloseLen <= 0) continue;
+            if (span.CloseStart < runStart || span.CloseStart + span.CloseLen > runEnd) continue;
+            if (!MatchesEmphasisMarker(span.CloseText, marker)) continue;
+            if (span.CloseStart <= rel && rel < span.CloseStart + span.CloseLen) return true;
+            if (span.CloseStart >= rel) return true;
+        }
+        return false;
+    }
+
+    static bool ContiguousEmphasisOpenRun(List<MarkdownInlineSpans.Span> spans, int rel, out int runStart, out int runEnd) {
+        runStart = -1;
+        runEnd = -1;
+        for (int i = 0; i < spans.Count; i++) {
+            MarkdownInlineSpans.Span span = spans[i];
+            if (span.Kind != MarkdownInlineSpans.SpanKind.Emphasis || span.CloseLen <= 0) continue;
+            int openEnd = span.OpenStart + span.OpenLen;
+            if (span.OpenStart > rel || openEnd < rel) continue;
+            if (runStart < 0 || span.OpenStart < runStart) runStart = span.OpenStart;
+            if (openEnd > runEnd) runEnd = openEnd;
+        }
+        if (runStart < 0) return false;
+        for (int pass = 0; pass < spans.Count; pass++) {
+            bool grew = false;
+            for (int i = 0; i < spans.Count; i++) {
+                MarkdownInlineSpans.Span span = spans[i];
+                if (span.Kind != MarkdownInlineSpans.SpanKind.Emphasis || span.CloseLen <= 0) continue;
+                int openEnd = span.OpenStart + span.OpenLen;
+                if (span.OpenStart <= runEnd && openEnd >= runStart) {
+                    if (span.OpenStart < runStart) { runStart = span.OpenStart; grew = true; }
+                    if (openEnd > runEnd) { runEnd = openEnd; grew = true; }
+                }
+            }
+            if (!grew) break;
+        }
+        return true;
+    }
+
+    static bool OpenRunContainsMarker(List<MarkdownInlineSpans.Span> spans, int runStart, int runEnd, string marker) {
+        for (int i = 0; i < spans.Count; i++) {
+            MarkdownInlineSpans.Span span = spans[i];
+            if (span.Kind != MarkdownInlineSpans.SpanKind.Emphasis || span.CloseLen <= 0) continue;
+            if (span.OpenStart >= runStart && span.OpenStart + span.OpenLen <= runEnd
+                && MatchesEmphasisMarker(span.OpenText, marker)) return true;
+        }
+        return false;
     }
 
     // The first input after a caret-only style toggle: the armed markers are written around the
@@ -1016,38 +1258,6 @@ internal static class MarkdownCommands {
         while (b > a && Char.IsWhiteSpace(document.GetCharAt(b - 1))) b--;
         if (a == b) return document.GetText(start, end - start);
         return document.GetText(start, a - start) + marker + document.GetText(a, b - a) + marker + document.GetText(b, end - b);
-    }
-
-    // True when the line text before the caret holds an unmatched opening marker of this
-    // style, so the marker right after the caret closes a run that contains that text.
-    static bool HasOpenMarkerBefore(TextDocument document, int caret, string marker) {
-        DocumentLine line = document.GetLineByOffset(caret);
-        string text = LineText(document, line);
-        int end = caret - line.Offset;
-        int count = 0;
-        int i = 0;
-        while (i + marker.Length <= end) {
-            if (IsMarkerAt(text, i, marker)) {
-                count++;
-                i += marker.Length;
-            } else {
-                i++;
-            }
-        }
-        return (count & 1) == 1;
-    }
-
-    // One marker occurrence inside a line. A single "*" that belongs to a "**" pair is not
-    // an italic marker, like HasMarkerBefore / HasMarkerAfter.
-    static bool IsMarkerAt(string text, int index, string marker) {
-        int m = marker.Length;
-        if (index + m > text.Length) return false;
-        if (string.CompareOrdinal(text, index, marker, 0, m) != 0) return false;
-        if (marker == "*") {
-            if (index > 0 && text[index - 1] == '*') return false;
-            if (index + 1 < text.Length && text[index + 1] == '*') return false;
-        }
-        return true;
     }
 
     // Post-edit caret for a command that keeps the text around the caret in place. Edits
@@ -1490,21 +1700,14 @@ internal static class MarkdownCommands {
         internal int End;
     }
 
-    // Pipes that separate cells: an escaped pipe and a pipe inside an inline code span are text,
-    // exactly like the table command's own split.
+    // Pipes that separate cells: an escaped pipe is text, while any unescaped pipe splits a cell
+    // (even inside an inline code span), matching GFM and the table command's own split.
     static List<int> TablePipes(string text) {
         List<int> pipes = new List<int>();
         int i = 0;
         while (i < text.Length) {
             char c = text[i];
             if (c == '\\') { i += 2; continue; }
-            if (c == '`') {
-                int fence = 1;
-                while (i + fence < text.Length && text[i + fence] == '`') fence++;
-                int close = CodeRunEnd(text, i + fence, fence);
-                i = close >= 0 ? close + fence : i + fence;
-                continue;
-            }
             if (c == '|') pipes.Add(i);
             i++;
         }
@@ -1640,7 +1843,12 @@ internal static class MarkdownCommands {
     // the run's markers, the same rule NormalizeInlineSelection applies to spans.
     static void WidenToCodeRun(string text, int lineOffset, ref int a, ref int b) {
         if (a >= b) return;
-        foreach (InlineRun run in InlineRuns(text)) {
+        WidenToCodeRun(InlineRuns(text), lineOffset, ref a, ref b);
+    }
+
+    static void WidenToCodeRun(List<InlineRun> runs, int lineOffset, ref int a, ref int b) {
+        if (a >= b) return;
+        foreach (InlineRun run in runs) {
             if (!run.Code) continue;
             int open = lineOffset + run.OpenStart;
             int close = lineOffset + run.CloseEnd;
@@ -1819,7 +2027,7 @@ internal static class MarkdownCommands {
         DocumentLine line = document.GetLineByOffset(offset);
         string text = LineText(document, line);
         int relative = offset - line.Offset;
-        List<LinkSpan> links = LineLinks(text, line.Offset);
+        List<LinkSpan> links = LineLinksForLine(document, line, text);
         for (int i = 0; i < links.Count; i++) {
             if (relative > links[i].Start - line.Offset && relative < links[i].End - line.Offset) {
                 linkStart = links[i].Start;
@@ -1855,7 +2063,7 @@ internal static class MarkdownCommands {
         List<LinkSpan> cuts = new List<LinkSpan>();
         foreach (DocumentLine line in TouchedLines(document, start, length)) {
             string text = LineText(document, line);
-            foreach (LinkSpan link in LineLinks(text, line.Offset)) {
+            foreach (LinkSpan link in LineLinksForLine(document, line, text)) {
                 int labelEnd = LinkLabelClose(text, link.Start - line.Offset, link.End - line.Offset);
                 if (labelEnd < 0) {
                     AddLink(cuts, 0, link.Start, link.End);
@@ -1872,7 +2080,7 @@ internal static class MarkdownCommands {
                 }
                 foreach (LinkSpan inner in LineLinks(label, link.Start + 1)) cuts.Add(inner);
             }
-            foreach (InlineRun run in InlineRuns(text)) {
+            foreach (InlineRun run in LineInlineRuns(document, line, text)) {
                 if (run.Code) continue;
                 AddLink(cuts, line.Offset, run.OpenStart, run.OpenEnd);
                 AddLink(cuts, line.Offset, run.CloseStart, run.CloseEnd);
@@ -1936,6 +2144,7 @@ internal static class MarkdownCommands {
         internal int LineOffset;
         internal string Text;
         internal List<InlineRun> Runs;
+        internal List<InlineRun> AllRuns;
     }
 
     // Rule A: a selection that is not entirely in the style takes the style as a whole, and one
@@ -1963,13 +2172,15 @@ internal static class MarkdownCommands {
             part.Text = LineText(document, line);
             int pieceStart, pieceEnd;
             PieceBounds(document, line, part.Start, out pieceStart, out pieceEnd);
+            List<InlineRun> lineRuns = LineInlineRuns(document, line, part.Text);
             // Inline code is a unit: a marker written between its backticks stays literal text.
-            if (marker != "`") WidenToCodeRun(part.Text, line.Offset, ref part.Start, ref part.End);
+            if (marker != "`") WidenToCodeRun(lineRuns, line.Offset, ref part.Start, ref part.End);
             if (part.Start < pieceStart) part.Start = pieceStart;
             if (part.End > pieceEnd) part.End = pieceEnd;
             part.Runs = new List<InlineRun>();
+            part.AllRuns = lineRuns;
             int covered = 0;
-            foreach (InlineRun run in InlineRuns(part.Text)) {
+            foreach (InlineRun run in lineRuns) {
                 if (run.Code || !IsStyleRun(part.Text, run, marker)) continue;
                 int open = line.Offset + run.OpenStart;
                 int close = line.Offset + run.CloseEnd;
@@ -2032,7 +2243,7 @@ internal static class MarkdownCommands {
     // covers text outside the selection is split, and the split marker moves across whitespace
     // to the nearest spot where it can actually close or open.
     static bool RemoveEmphasisPart(EmphasisPart part, CommandResult result) {
-        List<InlineRun> all = InlineRuns(part.Text);
+        List<InlineRun> all = part.AllRuns ?? InlineRuns(part.Text);
         for (int r = 0; r < part.Runs.Count; r++) {
             InlineRun run = part.Runs[r];
             int openStart = part.LineOffset + run.OpenStart;
@@ -2180,7 +2391,7 @@ internal static class MarkdownCommands {
         DocumentLine line = document.GetLineByOffset(caret);
         string text = LineText(document, line);
         int relative = caret - line.Offset;
-        foreach (InlineRun run in InlineRuns(text)) {
+        foreach (InlineRun run in LineInlineRuns(document, line, text)) {
             if (!run.Code) continue;
             if (relative > run.OpenStart && relative < run.CloseEnd) return true;
         }
@@ -2197,7 +2408,7 @@ internal static class MarkdownCommands {
         for (int i = 0; i < lines.Count; i++) {
             DocumentLine line = lines[i];
             string text = LineText(document, line);
-            foreach (InlineRun run in InlineRuns(text)) {
+            foreach (InlineRun run in LineInlineRuns(document, line, text)) {
                 if (!run.Code) continue;
                 int open = line.Offset + run.OpenStart;
                 int close = line.Offset + run.CloseEnd;
@@ -2223,6 +2434,14 @@ internal static class MarkdownCommands {
         int relative = caret - line.Offset;
         foreach (CellSpan cell in TableCells(text)) {
             if (relative >= cell.Start && relative <= cell.End) return true;
+            // 11-22 user (videos 155428, 163733): a space typed at a cell's end is padding to the cell span, so the caret after it
+            // armed nothing and Ctrl+B looked dead there. Blanks only between the cell's end and the caret, then its closing pipe
+            // (or the line end of a row without one): the caret is still in this cell.
+            if (relative > cell.End && IsBlankRun(text, cell.End, relative)) {
+                int pipe = relative;
+                while (pipe < text.Length && (text[pipe] == ' ' || text[pipe] == '\t')) pipe++;
+                if (pipe >= text.Length || text[pipe] == '|') return true;
+            }
             // A padding-only cell ("|  |") reads as the one offset at its closing pipe, but its caret stop is one space inside
             // (MarkdownTableCommands.EmptyCellStop): any offset in its padding is the cell (11-08: bold / inline code armed nothing there).
             if (cell.Start == cell.End && relative < cell.Start) {
@@ -2232,6 +2451,10 @@ internal static class MarkdownCommands {
             }
         }
         return false;
+    }
+    static bool IsBlankRun(string text, int from, int to) {
+        for (int i = from; i < to && i < text.Length; i++) if (text[i] != ' ' && text[i] != '\t') return false;
+        return true;
     }
     #endregion
 
@@ -3180,10 +3403,12 @@ internal static class MarkdownCommands {
         }
         if (value == null) {
             // Removing a property needs a span to step out of; anything else is a no-op.
-            if (!IsBeforeSpanClose(document, caret, property)) return null;
+            int moveOffset;
+            if (!FindSpanCloseEdge(document, caret, property, out moveOffset)) return null;
             CommandResult move = new CommandResult();
-            move.SelectionStart = caret + SpanClose.Length;
+            move.SelectionStart = moveOffset;
             move.SelectionLength = 0;
+            move.SteppedPast = property;
             return move;
         }
         // Arm the property for the text typed next; the tag pair is written with that input
@@ -3228,18 +3453,44 @@ internal static class MarkdownCommands {
         return caret + delta;
     }
 
-    // True when the caret sits directly before a span close with the requested property.
-    static bool IsBeforeSpanClose(TextDocument document, int caret, string property) {
-        if (caret + SpanClose.Length > document.TextLength) return false;
-        if (string.CompareOrdinal(document.GetText(caret, SpanClose.Length), SpanClose) != 0) return false;
-        DocumentLine line = document.GetLineByOffset(caret);
-        string window = document.GetText(line.Offset, caret - line.Offset);
-        int index = window.LastIndexOf(SpanPrefix, StringComparison.Ordinal);
-        if (index < 0) return false;
-        int quote = window.IndexOf('"', index + SpanPrefix.Length);
-        if (quote < 0 || quote + 1 >= window.Length || window[quote + 1] != '>') return false;
-        string style = window.Substring(index + SpanPrefix.Length, quote - index - SpanPrefix.Length);
-        return HasStyleProperty(style, property);
+    // True when the caret sits at the inner or outer edge of a closing span tag holding the
+    // requested property; inner edges step past contiguous closing tags, while outer edges stay put.
+    static bool FindSpanCloseEdge(TextDocument document, int caret, string property, out int moveOffset) {
+        moveOffset = caret;
+        int sliceOffset;
+        string slice;
+        List<MarkdownInlineSpans.Span> spans = LineSpansAtCaret(document, caret, out sliceOffset, out slice);
+        if (spans == null || spans.Count == 0) return false;
+        int rel = caret - sliceOffset;
+        int runStart, runEnd;
+        if (!ContiguousCloseRun(spans, MarkdownInlineSpans.SpanKind.Tag, rel, out runStart, out runEnd)) {
+            int empStart, empEnd;
+            if (!ContiguousCloseRun(spans, MarkdownInlineSpans.SpanKind.Emphasis, rel, out empStart, out empEnd)) return false;
+            int probe = rel == empEnd ? empStart : (rel == empStart ? empEnd : -1);
+            if (probe < 0 || !ContiguousCloseRun(spans, MarkdownInlineSpans.SpanKind.Tag, probe, out runStart, out runEnd)) return false;
+        }
+        if (!TagCloseRunHasProperty(spans, runStart, runEnd, property)) return false;
+        moveOffset = rel < runEnd ? sliceOffset + runEnd : caret;
+        return true;
+    }
+
+    static bool TagCloseRunHasProperty(List<MarkdownInlineSpans.Span> spans, int runStart, int runEnd, string property) {
+        for (int i = 0; i < spans.Count; i++) {
+            MarkdownInlineSpans.Span span = spans[i];
+            if (span.Kind != MarkdownInlineSpans.SpanKind.Tag || span.CloseLen <= 0) continue;
+            if (span.CloseStart >= runStart && span.CloseStart + span.CloseLen <= runEnd
+                && TagHasStyleProperty(span.OpenText, property)) return true;
+        }
+        return false;
+    }
+
+    static bool TagHasStyleProperty(string openTag, string property) {
+        if (string.IsNullOrEmpty(openTag)) return false;
+        if (!openTag.StartsWith(SpanPrefix, StringComparison.OrdinalIgnoreCase)) return false;
+        int start = SpanPrefix.Length;
+        int quote = openTag.IndexOf('"', start);
+        if (quote <= start) return false;
+        return HasStyleProperty(openTag.Substring(start, quote - start), property);
     }
 
     static bool HasStyleProperty(string style, string property) {
@@ -3293,7 +3544,7 @@ internal static class MarkdownCommands {
         DocumentLine line = document.GetLineByOffset(selectionStart);
         if (end > line.EndOffset) return;
         string text = LineText(document, line);
-        List<InlineRun> runs = InlineRuns(text);
+        List<InlineRun> runs = LineInlineRuns(document, line, text);
         if (runs.Count == 0) return;
         int start = selectionStart - line.Offset, stop = end - line.Offset;
         // Nested runs ("***x***", "**`x`**") widen one pass at a time; the loop stops as soon
@@ -3321,6 +3572,31 @@ internal static class MarkdownCommands {
     // the same opener/closer whitespace and intraword tests). Link labels, image spans and
     // <span>/<font> tags are skipped: the live parser does not read markers inside them either,
     // so a span wrapped around those would only show its own tags as text.
+    static List<InlineRun> LineInlineRuns(TextDocument document, DocumentLine line, string text) {
+        if (text.IndexOf('|') < 0 || TableLineKind(document, line) != 1) return InlineRuns(text);
+        List<InlineRun> runs = new List<InlineRun>();
+        foreach (CellSpan cell in TableCells(text)) {
+            foreach (InlineRun item in InlineRuns(text.Substring(cell.Start, cell.End - cell.Start))) {
+                InlineRun shifted = item;
+                shifted.OpenStart += cell.Start;
+                shifted.OpenEnd += cell.Start;
+                shifted.CloseStart += cell.Start;
+                shifted.CloseEnd += cell.Start;
+                runs.Add(shifted);
+            }
+        }
+        return runs;
+    }
+
+    static List<LinkSpan> LineLinksForLine(TextDocument document, DocumentLine line, string text) {
+        if (text.IndexOf('|') < 0 || TableLineKind(document, line) != 1) return LineLinks(text, line.Offset);
+        List<LinkSpan> links = new List<LinkSpan>();
+        foreach (CellSpan cell in TableCells(text)) {
+            links.AddRange(LineLinks(text.Substring(cell.Start, cell.End - cell.Start), line.Offset + cell.Start));
+        }
+        return links;
+    }
+
     static List<InlineRun> InlineRuns(string text) {
         List<InlineRun> runs = new List<InlineRun>();
         int[] opens = { -1, -1, -1, -1, -1, -1 };
@@ -3531,6 +3807,10 @@ internal static class MarkdownCommands {
     static bool TryFindSpan(TextDocument document, int selectionStart, int selectionLength, out SpanMatch match) {
         match = null;
         int selectionEnd = selectionStart + selectionLength;
+        DocumentLine line = document.GetLineByOffset(selectionStart);
+        int pieceStart, pieceEnd;
+        PieceBounds(document, line, selectionStart, out pieceStart, out pieceEnd);
+        if (selectionStart < pieceStart || selectionEnd > pieceEnd) return false;
         string selected = document.GetText(selectionStart, selectionLength);
         if (selected.StartsWith(SpanPrefix, StringComparison.Ordinal) && selected.EndsWith(SpanClose, StringComparison.Ordinal)) {
             int styleStart = SpanPrefix.Length;
@@ -3551,10 +3831,10 @@ internal static class MarkdownCommands {
                 }
             }
         }
-        if (selectionEnd + SpanClose.Length > document.TextLength) return false;
+        if (selectionEnd + SpanClose.Length > pieceEnd) return false;
         if (string.CompareOrdinal(document.GetText(selectionEnd, SpanClose.Length), SpanClose) != 0) return false;
-        // Only the selected line is inspected, like the other line-based commands.
-        int windowStart = document.GetLineByOffset(selectionStart).Offset;
+        // Only the selected piece (line body or owning table cell) is inspected, like the other line-based commands.
+        int windowStart = pieceStart;
         string window = document.GetText(windowStart, selectionStart - windowStart);
         int index = window.LastIndexOf(SpanPrefix, StringComparison.Ordinal);
         if (index < 0) return false;

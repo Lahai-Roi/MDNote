@@ -7,9 +7,9 @@ using System.Text;
 namespace MDNote {
 // Converts Markdown to the plain text that ReadableText(Markdown.Parse(...)) returns.
 // oracle: ReadableText(Markdown.Parse(...)), see MarkdownPlainTextTests.
-// The table cell split follows the live renderer (MarkdownLivePreview.TablePipes: odd backslash
-// runs, code spans by run length), which is what the user sees; Markdown.Cells and this file use
-// the same cell rule, so a pipe inside a closed `code` span is cell text in both. The table start
+// The table cell split follows the GFM pipe rule (MarkdownLivePreview.TablePipes: split on every
+// unescaped pipe, even inside `code` spans, and unescape "\|" -> "|" before inline parsing),
+// which is what the user sees; Markdown.Cells and this file use the same cell rule. The table start
 // (TableStart: delimiter row and header cell count), the ATX closing "#" (AtxHeading) and the link
 // target scan (TargetEnd) are the live renderer's CommonMark/GFM rules too; Markdown.ParseCore can
 // read the same helpers instead of its own regexes.
@@ -345,36 +345,41 @@ internal static class MarkdownPlainText {
         return !ListLine(line.Substring(at),out indent,out bodyColumn,out ordered,out number,out task,out checkedBox,out body);
     }
 
-    // Markdown.Cells: trim, drop one edge pipe, then split on unescaped pipes outside backtick spans.
+    static string TrimAsciiSpace(string value){
+        int start=0;
+        int end=value.Length;
+        while(start<end&&(Space(value[start])||value[start]=='\r'||value[start]=='\n'))start++;
+        while(end>start&&(Space(value[end-1])||value[end-1]=='\r'||value[end-1]=='\n'))end--;
+        return start==0&&end==value.Length?value:value.Substring(start,end-start);
+    }
+
+    // Markdown.Cells: trim, drop one edge pipe, split on unescaped pipes (GFM), and unescape "\|" -> "|".
     internal static string[] Cells(string line){
         var cells=new List<string>();
         var cell=new StringBuilder();
-        string value=line.Trim();
+        string value=TrimAsciiSpace(line);
+        if(value.Length==0||value=="|")return cells.ToArray();
         if(value.StartsWith("|"))value=value.Substring(1);
         // The closing pipe is structure unless an ODD backslash run escapes it: "\\|" is a literal
         // backslash and a live pipe, so the row still ends there (MarkdownLivePreview.TablePipes).
         bool closed=value.EndsWith("|")&&!PipeEscaped(value,value.Length-1);
         if(closed)value=value.Substring(0,value.Length-1);
-        bool escaped=false;int budget=value.Length*3;
+        bool escaped=false;
         for(int i=0;i<value.Length;i++){
             char c=value[i];
-            if(escaped){cell.Append(c);escaped=false;continue;}
-            // #4: the escape backslash stays in the cell (the inline pass reads it), exactly like
-            // Markdown.Cells, so print and TXT keep the same literal text.
-            if(c=='\\'){cell.Append(c);escaped=true;continue;}
-            // A code span holds its pipes: a run of n backticks closes at the next run of exactly n
-            // (MarkdownLivePreview.TablePipes/FindCodeEnd), not at the next single backtick, so a
-            // pipe inside "``a`b|c``" stays cell text.
-            if(c=='`'&&budget>0){
-                int run=1;while(i+run<value.Length&&value[i+run]=='`')run++;
-                int close=CodeClose(value,i+run,run,ref budget);
-                if(close>=0){cell.Append(value,i,close+run-i);i=close+run-1;continue;}
-                cell.Append(value,i,run);i+=run-1;continue;
+            if(escaped){
+                // #4: GFM unescapes "\|" -> "|" before inline parsing (even inside code spans), while
+                // keeping other "\x" pairs intact so the inline pass reads them identically in print and TXT.
+                if(c!='|')cell.Append('\\');
+                cell.Append(c);
+                escaped=false;
+                continue;
             }
-            budget-=2;
-            if(c=='|'){cells.Add(cell.ToString());cell.Length=0;}
-            else cell.Append(c);
+            if(c=='\\'){escaped=true;continue;}
+            if(c=='|'){cells.Add(cell.ToString());cell.Length=0;continue;}
+            cell.Append(c);
         }
+        if(escaped)cell.Append('\\');
         cells.Add(cell.ToString());
         string[] result=cells.ToArray();
         // A backslash at the end of a cell is a literal backslash (GFM, and the live view draws it): only a backslash at the end

@@ -517,15 +517,14 @@ internal static class PasteAbuseProbe {
         currentContext = check; currentPayloadKind = "-"; currentAction = "focused/" + check;
         FailOpen("f:" + check, detail);
     }
-    // A row ending in "\\|" is a literal backslash and a live closing pipe, and a pipe inside a
-    // multi-backtick code span is cell text: both keep the header's column count
-    // (MarkdownLivePreview.TablePipes, which the TXT converter follows), so no empty column is
-    // written. Before that fix the first row carried an extra empty cell and the second split
-    // "``x|y``" in two.
+    // A row ending in "\\|" is a literal backslash and a live closing pipe, and an escaped pipe
+    // inside a multi-backtick code span unescapes to "|" under GFM: both keep the header's column
+    // count (MarkdownLivePreview.TablePipes, which the TXT converter follows), so no empty column
+    // is written.
     static void CheckPlainTableCells(StringBuilder report) {
         string closed = MarkdownPlainText.Convert("| C:\\\\|\n|---|");
         Focused("txt-table-closing-pipe", closed == "C:\\", "txt=[" + Short(closed, 200) + "]", report);
-        string code = MarkdownPlainText.Convert("| a ``x|y`` b | c |\n|---|---|\n| 1 | 2 |");
+        string code = MarkdownPlainText.Convert("| a ``x\\|y`` b | c |\n|---|---|\n| 1 | 2 |");
         Focused("txt-table-code-span", code == "a x|y b\tc\n1\t2", "txt=[" + Short(code, 200) + "]", report);
     }
     // The escaped-id reference resolves exactly like the renderer: Markdown.Para expands references
@@ -575,12 +574,11 @@ internal static class PasteAbuseProbe {
         System.Windows.Documents.FlowDocument document = Markdown.Parse(markdown, 16, "Malgun Gothic", System.Windows.Media.Brushes.Black, false, "");
         return (string)readable.Invoke(null, new object[] { document });
     }
-    // A pasted <code>a | b</code> cell keeps its pipe unescaped: the renderer's table splitter skips
-    // code spans, and it never hides an escape inside one, so "`a \| b`" would draw the backslash.
+    // Under GFM, a pasted <code>a | b</code> cell escapes its pipe as "\|" even inside a code span.
     static void CheckHtmlTableCode(StringBuilder report, MainWindow window) {
         string html = "<table><tr><th>a</th><th>b</th></tr><tr><td><code>x | y</code></td><td>c</td></tr></table>";
         string converted = (string)Invoke(window, "ClipboardMarkdown", html);
-        string expected = "| a | b |\n| --- | --- |\n| `x | y` | c |";
+        string expected = "| a | b |\n| --- | --- |\n| `x \\| y` | c |";
         Focused("html-table-code-pipe", converted == expected, "html=[" + Short(converted, 200) + "]", report);
     }
     // A rich paste reads the caret's line to decide whether it is inside italic/bold. A marker
@@ -749,7 +747,7 @@ internal static class PasteAbuseProbe {
         Line(text, "| --- | :--: | --: |");
         Line(text, "| 김철수 | 진행 중 | 값 |");
         Line(text, "|  |  |  |");
-        Line(text, "| a \\| b | `c|d` | 마지막 |");
+        Line(text, "| a \\| b | `c\\|d` | 마지막 |");
         Line(text, "");
         Line(text, "표 아래 문단입니다.");
         Line(text, "마지막 줄.");
@@ -1142,6 +1140,13 @@ internal static class PasteAbuseProbe {
         MarkdownLivePreview.Cell cell = cells[cells.Count - 1];
         for (int i = 0; i < cells.Count; i++) {
             if (relative <= cells[i].End) { cell = cells[i]; break; }
+        }
+        // An empty cell's text lands between its padding spaces (2.5.3: caret stop in the middle,
+        // "| x |"), so its span is the whole inside between the two pipes.
+        if (cell.Start == cell.End && cell.InnerEnd >= cell.InnerStart) {
+            cellStart = doc.Starts[line] + cell.InnerStart;
+            cellEnd = doc.Starts[line] + cell.InnerEnd;
+            return true;
         }
         cellStart = doc.Starts[line] + cell.Start;
         cellEnd = doc.Starts[line] + cell.End;
@@ -1584,20 +1589,13 @@ internal static class PasteAbuseProbe {
         }
         return low;
     }
-    // Pipes that delimit cells: an unescaped "|" outside a `code span`, the same rule the table
-    // commands and the preview use.
+    // Pipes that delimit cells: an unescaped "|" (under GFM, backtick code spans do not protect
+    // unescaped pipes).
     static void ScanPipes(string text, List<int> pipes) {
         int at = 0;
         while (at < text.Length) {
             char c = text[at];
             if (c == '\\') { at += 2; continue; }
-            if (c == '`') {
-                int run = 1;
-                while (at + run < text.Length && text[at + run] == '`') run++;
-                int close = FindBackticks(text, at + run, run);
-                at = close >= 0 ? close + run : at + run;
-                continue;
-            }
             if (c == '|') pipes.Add(at);
             at++;
         }

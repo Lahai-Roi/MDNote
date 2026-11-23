@@ -8,7 +8,7 @@ namespace MDNote {
 // GFM pipe-table commands as pure source transformations over the caret's table. Each
 // command reads only the table lines (the scan stops at the table's own edges), returns edits
 // in pre-edit offsets and never mutates the document; the host applies the edits as one undo
-// step. Cell boundaries honour "\|" escapes and `code` spans. New cells are three spaces wide.
+// step. Cell boundaries honour "\|" escapes (GFM splits cells at unescaped pipes, even inside `code` spans). New cells are three spaces wide.
 // Indent/outdent move the whole table in or out of the list item above it (see TableLevel).
 internal static class MarkdownTableCommands {
     // The two edge scans stop at the first non-row line, so this cap only guards a pathological
@@ -31,8 +31,8 @@ internal static class MarkdownTableCommands {
     }
 
     #region FindTable
-    // The caret line is a table row when it holds a pipe that is not escaped and not inside a
-    // `code` span, which is the renderer's own row rule (MarkdownLivePreview.HasTablePipe): GFM
+    // The caret line is a table row when it holds an unescaped pipe (even inside a `code` span),
+    // which is the renderer's own row rule (MarkdownLivePreview.HasTablePipe): GFM
     // tables do not need the outer pipes, so "Name | Age" / "--- | ---" is the same table the
     // screen draws, and every command above must read it as one. The table starts at the first
     // line of the pipe run whose next line is a delimiter row with the same cell count (the
@@ -104,27 +104,21 @@ internal static class MarkdownTableCommands {
         return CellCount(LineText(document, header)) == CellCount(LineText(document, next));
     }
 
-    // Cell count as the renderer splits a row (pipes inside `code` and escaped pipes are text).
+    // Cell count as the renderer splits a row (escaped pipes are text; unescaped pipes split even inside `code`).
     internal static int CellCount(string text) {
         return SplitRow(text).Count;
     }
 
-    // A pipe outside an escaped pair and outside a `code` span; the renderer's HasTablePipe rule,
+    // An unescaped pipe (even inside a `code` span); the renderer's HasTablePipe rule,
     // shared with MarkdownStructuralInput so the keys see exactly the rows the screen draws.
     internal static bool HasTablePipe(string text) {
-        // Most lines have no pipe at all; one vectorized index check keeps the escape/code scan
+        // Most lines have no pipe at all; one vectorized index check keeps the escape scan
         // off the boundary lines of every table lookup.
         if (text.IndexOf('|') < 0) return false;
         int i = 0;
         while (i < text.Length) {
             char c = text[i];
             if (c == '\\') { i += 2; continue; }
-            if (c == '`') {
-                int end = CodeSpanEnd(text, i);
-                if (end > i) { i = end; continue; }
-                while (i < text.Length && text[i] == '`') i++;
-                continue;
-            }
             if (c == '|') return true;
             i++;
         }
@@ -147,13 +141,22 @@ internal static class MarkdownTableCommands {
         return true;
     }
 
+    static bool IsAsciiSpace(char c) {
+        return c == ' ' || c == '\t';
+    }
+
+    static bool IsAsciiSpaceOnly(string text, int start) {
+        for (int i = start; i < text.Length; i++) if (!IsAsciiSpace(text[i])) return false;
+        return true;
+    }
+
     // One delimiter cell: optional spaces, an optional leading colon, one or more dashes,
     // an optional trailing colon, optional spaces.
     static bool IsDelimiterCell(string cell) {
         int start = 0;
         int end = cell.Length;
-        while (start < end && char.IsWhiteSpace(cell[start])) start++;
-        while (end > start && char.IsWhiteSpace(cell[end - 1])) end--;
+        while (start < end && IsAsciiSpace(cell[start])) start++;
+        while (end > start && IsAsciiSpace(cell[end - 1])) end--;
         if (start >= end) return false;
         if (cell[start] == ':') start++;
         if (end > start && cell[end - 1] == ':') end--;
@@ -165,7 +168,7 @@ internal static class MarkdownTableCommands {
 
     #region CellIndexAt
     // 0-based column of the caret: unescaped pipes before the caret minus the leading pipe,
-    // ignoring pipes inside `code` spans and clamped to the line's cell count.
+    // clamped to the line's cell count.
     internal static int CellIndexAt(TextDocument document, int offset) {
         if (document == null || offset < 0 || offset > document.TextLength) return 0;
         DocumentLine line = document.GetLineByOffset(offset);
@@ -195,12 +198,6 @@ internal static class MarkdownTableCommands {
         while (i < text.Length) {
             char c = text[i];
             if (c == '\\') { i += 2; continue; }
-            if (c == '`') {
-                int end = CodeSpanEnd(text, i);
-                if (end > i) { i = end; continue; }
-                while (i < text.Length && text[i] == '`') i++;
-                continue;
-            }
             if (c == '|') pipes.Add(i);
             i++;
         }
@@ -208,27 +205,11 @@ internal static class MarkdownTableCommands {
     }
 
     // True when the pipe at index is a column separator: the renderer's own list (TablePipes),
-    // where an escaped "\|" and a pipe inside a `code` span are cell text, not separators.
+    // where an escaped "\|" is cell text and any unescaped pipe is a separator (even inside `code`).
     static bool IsSeparatorPipe(string text, int index) {
         int[] pipes = PipePositions(text);
         for (int i = 0; i < pipes.Length; i++) if (pipes[i] == index) return true;
         return false;
-    }
-
-    // Index after the run that closes the backtick span opening at start, or start when the
-    // run has no matching close (GFM treats an unmatched run as literal text).
-    static int CodeSpanEnd(string text, int start) {
-        int i = start;
-        while (i < text.Length && text[i] == '`') i++;
-        int run = i - start;
-        int j = i;
-        while (j < text.Length) {
-            if (text[j] != '`') { j++; continue; }
-            int close = j;
-            while (j < text.Length && text[j] == '`') j++;
-            if (j - close == run) return j;
-        }
-        return start;
     }
 
     static RowCells SplitRow(string text) {
@@ -247,7 +228,7 @@ internal static class MarkdownTableCommands {
             cells.Pipes.Add(pipes[i]);
             content = pipes[i] + 1;
         }
-        if (content < text.Length && text.Substring(content).Trim().Length > 0) {
+        if (content < text.Length && !IsAsciiSpaceOnly(text, content)) {
             cells.Starts.Add(content);
             cells.Ends.Add(text.Length);
             cells.Pipes.Add(-1);
@@ -256,7 +237,7 @@ internal static class MarkdownTableCommands {
     }
 
     static bool IsLeadingPipe(string text, int index) {
-        for (int i = 0; i < index; i++) if (!char.IsWhiteSpace(text[i])) return false;
+        for (int i = 0; i < index; i++) if (!IsAsciiSpace(text[i])) return false;
         return true;
     }
 
@@ -534,7 +515,8 @@ internal static class MarkdownTableCommands {
         int caret = caretOffset;
         for (int n = firstLine; n <= lastLine; n++) {
             DocumentLine line = document.GetLineByNumber(n);
-            RowCells cells = SplitRow(LineText(document, line));
+            string rowText = LineText(document, line);
+            RowCells cells = SplitRow(rowText);
             if (cells.Count == 0) continue;
             int c = column;
             if (c >= cells.Count) c = cells.Count - 1;
@@ -549,8 +531,15 @@ internal static class MarkdownTableCommands {
                 cellStart = insertAt;
             } else {
                 insertAt = line.Length;
-                inserted = "|" + cell + "|";
-                cellStart = insertAt + 1;
+                int bs = 0;
+                for (int k = rowText.Length - 1; k >= 0 && rowText[k] == '\\'; k--) bs++;
+                if ((bs & 1) != 0) {
+                    inserted = " |" + cell + "|";
+                    cellStart = insertAt + 2;
+                } else {
+                    inserted = "|" + cell + "|";
+                    cellStart = insertAt + 1;
+                }
             }
             result.Add(line.Offset + insertAt, 0, inserted);
             if (line.LineNumber < caretLine.LineNumber) shift += inserted.Length;
@@ -1017,7 +1006,7 @@ internal static class MarkdownTableCommands {
     internal static CommandResult EnterOutsideTable(TextDocument document, int selectionStart, int selectionLength) {
         return EnterOutsideTable(document, selectionStart, selectionLength, true);
     }
-    internal static CommandResult EnterOutsideTable(TextDocument document, int selectionStart, int selectionLength, bool keyEnter) {
+    internal static CommandResult EnterOutsideTable(TextDocument document, int selectionStart, int selectionLength, bool keyEnter, int drawnCells = -1) {
         if (document == null || selectionStart < 0 || selectionLength != 0) return null;
         if (selectionStart > document.TextLength) return null;
         DocumentLine line = document.GetLineByOffset(selectionStart);
@@ -1035,7 +1024,8 @@ internal static class MarkdownTableCommands {
                 string row = LineText(document, line);
                 RowCells cells = SplitRow(row);
                 if (cells.Count > 0) {
-                    int contentEnd = TrimEnd(row, cells.Starts[cells.Count - 1], cells.Ends[cells.Count - 1]);
+                    int lastIndex = drawnCells > 0 && drawnCells < cells.Count ? drawnCells - 1 : cells.Count - 1;
+                    int contentEnd = TrimEnd(row, cells.Starts[lastIndex], cells.Ends[lastIndex]);
                     // The caret may stand in the last cell's trailing padding (a typed space before
                     // the row's closing pipe), which is the cell's own text: only spaces or tabs
                     // between the trimmed end and the caret mean the same boundary, so Enter leaves
@@ -1114,8 +1104,8 @@ internal static class MarkdownTableCommands {
     internal const string CellBreak = "<br>";
     internal const int CellBreakLength = 4;
 
-    // Cell spans of a pipe row, as the renderer reads them (escaped pipes and code spans are not
-    // separators). Null when the line is not a pipe row at all.
+    // Cell spans of a pipe row, as the renderer reads them (escaped pipes are not separators;
+    // unescaped pipes split even inside code spans). Null when the line is not a pipe row at all.
     internal static List<MarkdownLivePreview.Cell> CellsAt(TextDocument document, int offset) {
         if (document == null || offset < 0 || offset > document.TextLength) return null;
         DocumentLine line = document.GetLineByOffset(offset);
@@ -1128,49 +1118,41 @@ internal static class MarkdownTableCommands {
     // The cell that owns an element-relative offset; a cell's own end belongs to that cell and
     // past the last cell the last one is answered.
     static int CellAt(List<MarkdownLivePreview.Cell> cells, int relative) {
-        for (int c = 0; c < cells.Count; c++) if (relative <= cells[c].End) return c;
+        int owned = MarkdownLivePreview.OwningCellAt(cells, relative);
+        if (owned >= 0) return owned;
+        for (int c = 0; c < cells.Count; c++) {
+            int innerStart, innerEnd;
+            MarkdownLivePreview.CellBounds(cells, c, out innerStart, out innerEnd);
+            if (relative <= innerEnd) return c;
+        }
         return cells.Count - 1;
     }
 
     // Index of the cell a row offset belongs to when a cell's own padding counts as that cell, or
-    // -1 on a separator pipe and outside the cells. A cell with text owns the run between its
-    // trimmed end and the pipe that closes it; a padding-only cell is all padding, so every offset
-    // between its opening pipe and its trimmed position (its caret stop included) belongs to it.
-    // SourceTab and the paste caret use this: the old text-span test read a caret inside an empty
-    // cell as "past the row's last cell" and moved on to the next row.
+    // -1 outside the cells.
     internal static int CellIndexAtPadding(string text, List<MarkdownLivePreview.Cell> cells, int relative) {
         if (text == null || cells == null || cells.Count == 0) return -1;
-        for (int c = 0; c < cells.Count; c++)
-            if (relative >= cells[c].Start && relative <= cells[c].End) return c;
-        for (int c = 0; c < cells.Count; c++) {
-            if (cells[c].Start != cells[c].End) {
-                if (relative <= cells[c].End) continue;
-                int pipe = cells[c].End;
-                while (pipe < text.Length && (text[pipe] == ' ' || text[pipe] == '\t')) pipe++;
-                if (pipe < text.Length && text[pipe] == '|') {
-                    if (relative < pipe) return c;
-                    continue;
-                }
-                // The last cell's padding runs to the line's end when the row has no closing pipe.
-                if (c == cells.Count - 1 && pipe == text.Length) return c;
-                continue;
-            }
-            int open = cells[c].Start - 1;
-            while (open >= 0 && (text[open] == ' ' || text[open] == '\t')) open--;
-            if (open < 0 || text[open] != '|') continue;
-            if (relative > open && relative < cells[c].End) return c;
-        }
-        return -1;
+        return MarkdownLivePreview.OwningCellAt(cells, relative);
     }
 
-    // The nearest cell text position: inside the containing cell, at the cell's start when the
-    // caret is in its leading padding, and at the last cell's end past the row's text.
-    static int ClampIntoCell(List<MarkdownLivePreview.Cell> cells, int relative) {
-        for (int c = 0; c < cells.Count; c++) {
-            if (relative > cells[c].End) continue;
-            return relative < cells[c].Start ? cells[c].Start : relative;
+    // The nearest cell text position: inside the containing cell (keeping trailing padding after
+    // typed spaces), EmptyCellStop for an empty padded cell, or the cell start/end when outside.
+    static int ClampIntoCell(List<MarkdownLivePreview.Cell> cells, int relative) { return ClampIntoCell(cells, relative, null); }
+    static int ClampIntoCell(List<MarkdownLivePreview.Cell> cells, int relative, string rowText) {
+        if (cells == null || cells.Count == 0) return relative;
+        int owned = MarkdownLivePreview.OwningCellAt(cells, relative);
+        if (owned >= 0) {
+            MarkdownLivePreview.Cell cell = cells[owned];
+            if (cell.Start == cell.End) return MarkdownLivePreview.CellCaretStart(cell);
+            return relative < cell.Start ? cell.Start : relative;
         }
-        return cells[cells.Count - 1].End;
+        for (int c = 0; c < cells.Count; c++) {
+            int innerStart, innerEnd;
+            MarkdownLivePreview.CellBounds(cells, c, out innerStart, out innerEnd);
+            if (relative < innerStart) return MarkdownLivePreview.CellCaretStart(cells[c]);
+        }
+        MarkdownLivePreview.Cell last = cells[cells.Count - 1];
+        return last.Start == last.End ? MarkdownLivePreview.CellCaretStart(last) : last.End;
     }
 
     static CommandResult CaretOnly(int offset) {
@@ -1220,75 +1202,78 @@ internal static class MarkdownTableCommands {
     // ODD run of backslashes in front of it ("\\|" is a literal backslash and a live pipe, so that
     // pipe still needs one more backslash); a pipe at the start of the pasted text counts the
     // document's own backslash run in front of the insertion point (R5).
-    // A pipe inside a closed `code` span stays raw: TablePipes skips the span whole (a border
-    // needs the same-length backtick run to close first) and ParseInline draws span text
-    // literally, so "\|" there would show a backslash the user never typed. The cell's text
-    // around the insertion point (the replaced selection is not kept) is what that scan reads.
+    // Under GFM, an unescaped "|" splits a table cell even inside a `code` span, so every
+    // unescaped "|" in inserted/pasted/typed text is escaped as "\|", including inside `code`
+    // spans.
     internal static string CellInsertText(TextDocument document, int selectionStart, int selectionLength, string value, List<MarkdownLivePreview.Cell> cells) {
+        if (value == null) return string.Empty;
         string canonical = value.Replace("\r\n", "\n").Replace('\r', '\n');
-        if (canonical.IndexOf('|') >= 0) {
-            string prefix = string.Empty, suffix = string.Empty;
+        if (canonical.IndexOf('|') >= 0 || (canonical.Length > 0 && canonical[canonical.Length - 1] == '\\')) {
+            int insertOffset = document != null ? Math.Min(selectionStart, document.TextLength) : 0;
+            int lineOffset = 0;
+            int lineEnd = document != null ? document.TextLength : 0;
+            int replaceEnd = insertOffset;
             if (document != null && cells != null && cells.Count > 0 && selectionStart >= 0 && selectionStart <= document.TextLength) {
                 DocumentLine line = document.GetLineByOffset(selectionStart);
+                lineOffset = line.Offset;
+                lineEnd = line.Offset + line.Length;
                 int relative = selectionStart - line.Offset;
                 if (selectionLength <= 0) {
-                    int at = ClampIntoCell(cells, relative);
-                    int cell = CellAt(cells, at);
-                    prefix = document.GetText(line.Offset + cells[cell].Start, at - cells[cell].Start);
-                    suffix = document.GetText(line.Offset + at, cells[cell].End - at);
+                    int at = ClampIntoCell(cells, relative, LineText(document, line));
+                    insertOffset = line.Offset + at;
+                    replaceEnd = insertOffset;
                 } else {
                     int end = Math.Min(selectionStart + selectionLength, line.Offset + line.Length) - line.Offset;
                     int first = CellAt(cells, relative), last = CellAt(cells, end);
-                    if (first == last && relative >= cells[first].Start && end <= cells[first].End) {
-                        prefix = document.GetText(line.Offset + cells[first].Start, relative - cells[first].Start);
-                        suffix = document.GetText(line.Offset + end, cells[first].End - end);
+                    if (first >= 0 && first < cells.Count && first == last) {
+                        int cellStart = Math.Max(0, Math.Min(line.Length, cells[first].Start));
+                        int cellEnd = Math.Max(cellStart, Math.Min(line.Length, cells[first].End));
+                        if (relative >= cellStart && end <= cellEnd) {
+                            int clampedStart = Math.Max(cellStart, Math.Min(cellEnd, relative));
+                            insertOffset = line.Offset + clampedStart;
+                        }
                     }
+                    replaceEnd = Math.Min(selectionStart + selectionLength, lineEnd);
                 }
-            }
-            // Code-span content ranges in the cell as the renderer would draw it: a backslash
-            // hides the next character and a run closes only on the same-length run (TablePipes).
-            string cellText = prefix + canonical + suffix;
-            var opens = new List<int>();
-            var closes = new List<int>();
-            int budget = cellText.Length * 3;
-            for (int p = 0; p < cellText.Length; ) {
-                char c = cellText[p];
-                if (c == '\\') { p += 2; continue; }
-                if (c == '`') {
-                    int run = 1;
-                    while (p + run < cellText.Length && cellText[p + run] == '`') run++;
-                    int close = MarkdownPlainText.CodeClose(cellText, p + run, run, ref budget);
-                    if (close >= 0) { opens.Add(p + run); closes.Add(close); p = close + run; continue; }
-                    p += run;
-                    continue;
-                }
-                p++;
             }
             StringBuilder escaped = new StringBuilder(canonical.Length + 8);
             int backslashes = 0;
             if (document != null) {
                 // The run in front of the insertion point: a "\\" pair is one literal backslash,
                 // so only an ODD run already escapes the first pasted pipe.
-                for (int p = Math.Min(selectionStart, document.TextLength) - 1; p >= 0; p--) {
-                    if (document.GetCharAt(p) != '\\') break;
+                for (int p = insertOffset - 1; p >= lineOffset && document.GetCharAt(p) == '\\'; p--) {
                     backslashes++;
                 }
             }
-            int span = 0;
-            int offset = prefix.Length;
             for (int i = 0; i < canonical.Length; i++) {
                 char c = canonical[i];
-                int at = offset + i;
-                while (span < opens.Count && closes[span] < at) span++;
-                bool code = span < opens.Count && at >= opens[span];
-                if (c == '|' && !code && (backslashes & 1) == 0) escaped.Append('\\');
+                if (c == '|' && (backslashes & 1) == 0) escaped.Append('\\');
                 if (c == '\\') backslashes++;
                 else backslashes = 0;
                 escaped.Append(c);
             }
+            if (NeedsTrailingBackslashBeforePipe(document, lineOffset, lineEnd, replaceEnd, backslashes)) escaped.Append('\\');
             canonical = escaped.ToString();
         }
         return canonical.Replace("\n", CellBreak);
+    }
+
+    // True when inserting text whose trailing backslash run (including preceding backslashes when
+    // the inserted text is all backslashes) before `replaceEnd` would flip the odd/even parity of
+    // the backslash run immediately preceding a '|' on the same line.
+    internal static bool NeedsTrailingBackslashBeforePipe(TextDocument document, int lineOffset, int lineEnd, int replaceEnd, int trailingBackslashes) {
+        if (document == null || replaceEnd < lineOffset || replaceEnd >= lineEnd) return false;
+        int afterBackslashes = 0;
+        int p = replaceEnd;
+        while (p < lineEnd && document.GetCharAt(p) == '\\') {
+            afterBackslashes++;
+            p++;
+        }
+        if (p >= lineEnd || document.GetCharAt(p) != '|') return false;
+        int oldRun = 0;
+        for (int q = p - 1; q >= lineOffset && document.GetCharAt(q) == '\\'; q--) oldRun++;
+        int newRun = trailingBackslashes + afterBackslashes;
+        return ((oldRun ^ newRun) & 1) != 0;
     }
 
     // The inline code span of one cell ([cellStart, cellEnd) of the row) whose content range,
@@ -1362,12 +1347,14 @@ internal static class MarkdownTableCommands {
         int end = relative + selectionLength;
         if (selectionLength > 0 && document.GetLineByOffset(Math.Min(selectionStart + selectionLength, document.TextLength)).LineNumber != line.LineNumber) return text;
         int cell = CellAt(cells, relative);
+        if (cell < 0 || cell >= cells.Count) return text;
         if (selectionLength > 0) {
             if (cell != CellAt(cells, end) || relative < cells[cell].Start || end > cells[cell].End) return text;
         } else {
-            relative = ClampIntoCell(cells, relative);
+            relative = ClampIntoCell(cells, relative, LineText(document, line));
             end = relative;
             cell = CellAt(cells, relative);
+            if (cell < 0 || cell >= cells.Count) return text;
         }
         string row = LineText(document, line);
         int openStart, openLen, closeStart, endOpen, endLen, endClose;
@@ -1404,14 +1391,14 @@ internal static class MarkdownTableCommands {
             return CellSelectionEdit(document, selectionStart, selectionLength, CellBreak);
         if (selectionLength == 0) {
             string rowText = LineText(document, line);
-            int at = line.Offset + ClampIntoCell(cells, settledColumn >= 0 ? Math.Min(settledColumn, rowText.Length) : selectionStart - line.Offset);
+            int at = line.Offset + ClampIntoCell(cells, settledColumn >= 0 ? Math.Min(settledColumn, rowText.Length) : selectionStart - line.Offset, rowText);
             // H9 in a cell: an Enter inside a marker run splits at the run's outer edge, so a
             // pair stays on one side of the cell's <br>. The cell's "<br>" is the single-marker
             // edge variant (an inert lone marker must not become an opener); plain Enter keeps
             // its old edges. A settled column came from the parsed pairs and stays as it is.
             if (settledColumn < 0) {
                 int edge = MarkdownStructuralInput.MarkerRunEdge(rowText, at - line.Offset, true);
-                if (edge != at - line.Offset) at = line.Offset + ClampIntoCell(cells, edge);
+                if (edge != at - line.Offset) at = line.Offset + ClampIntoCell(cells, edge, rowText);
             }
             // Inside an inline code span "<br>" would be drawn as text, so the span is closed
             // before the break and reopened after it ("`a<br>b`" -> "`a`<br>`b`"); at the span's
@@ -1435,7 +1422,9 @@ internal static class MarkdownTableCommands {
         }
         int firstCell = CellAt(cells, selectionStart - line.Offset);
         int lastCell = CellAt(cells, selectionEnd - line.Offset);
-        if (firstCell == lastCell && selectionStart - line.Offset >= cells[firstCell].Start && selectionEnd - line.Offset <= cells[firstCell].End) {
+        int enterCellStart, enterCellEnd;
+        MarkdownLivePreview.CellBounds(cells, firstCell, out enterCellStart, out enterCellEnd);
+        if (firstCell == lastCell && selectionStart - line.Offset >= enterCellStart && selectionEnd - line.Offset <= enterCellEnd) {
             // A selection inside one code span: "<br>" would be drawn as code text, so the span splits
             // around the break like a caret Enter does (a selection that leaves the span keeps the plain break).
             string spanRow = LineText(document, line);
@@ -1470,7 +1459,7 @@ internal static class MarkdownTableCommands {
         if (selectionLength > 0 && document.GetLineByOffset(Math.Min(selectionEnd, document.TextLength)).LineNumber != line.LineNumber)
             return CellSelectionEdit(document, selectionStart, selectionLength, text);
         if (selectionLength == 0) {
-            int at = line.Offset + ClampIntoCell(cells, selectionStart - line.Offset);
+            int at = line.Offset + ClampIntoCell(cells, selectionStart - line.Offset, LineText(document, line));
             CommandResult point = new CommandResult();
             if (text.Length > 0) point.Add(at, 0, text);
             point.SelectionStart = at + text.Length;
@@ -1479,7 +1468,9 @@ internal static class MarkdownTableCommands {
         }
         int firstCell = CellAt(cells, selectionStart - line.Offset);
         int lastCell = CellAt(cells, selectionEnd - line.Offset);
-        if (firstCell == lastCell && selectionStart - line.Offset >= cells[firstCell].Start && selectionEnd - line.Offset <= cells[firstCell].End) {
+        int enterCellStart, enterCellEnd;
+        MarkdownLivePreview.CellBounds(cells, firstCell, out enterCellStart, out enterCellEnd);
+        if (firstCell == lastCell && selectionStart - line.Offset >= enterCellStart && selectionEnd - line.Offset <= enterCellEnd) {
             CommandResult inside = new CommandResult();
             inside.Add(selectionStart, selectionLength, text);
             inside.SelectionStart = selectionStart + text.Length;
@@ -1557,13 +1548,17 @@ internal static class MarkdownTableCommands {
         if (document.GetLineByOffset(Math.Min(selectionEnd, document.TextLength)).LineNumber != line.LineNumber) return true;
         int first = selectionStart - line.Offset;
         int last = selectionEnd - line.Offset;
-        if (first < cells[0].Start || last > cells[cells.Count - 1].End) return true;
-        return CellAt(cells, first) != CellAt(cells, last);
+        int c0 = MarkdownLivePreview.OwningCellAt(cells, first);
+        int c1 = MarkdownLivePreview.OwningCellAt(cells, last);
+        if (c0 < 0 || c1 < 0) return true;
+        return c0 != c1;
     }
 
-    // Every selected cell's interior is emptied in one result (the pipes stay), and the insert
-    // goes to the first selected cell's start, which is where the basic view puts the paragraph
-    // break. Rows between the endpoints join in, exactly like the basic view's table selection.
+    // Every selected cell's interior is emptied in one result (the pipes stay) and cut inline
+    // pairs inside each cell are rebalanced (so "**a**" never loses its closing markers or leaves
+    // "****" behind). The insert goes to the first selected cell's start (or inside the first
+    // edited cell when the anchor lies there). Rows between the endpoints join in, exactly like
+    // the basic view's table selection.
     static CommandResult CellSelectionEdit(TextDocument document, int selectionStart, int selectionLength, string insert) {
         int firstLine, lastLine;
         if (!FindTable(document, selectionStart, out firstLine, out lastLine)) return null;
@@ -1571,30 +1566,192 @@ internal static class MarkdownTableCommands {
         int selectionEnd = selectionStart + selectionLength;
         DocumentLine lastRow = document.GetLineByNumber(lastLine);
         if (selectionEnd > lastRow.Offset + lastRow.Length) return null;
-        int anchor = -1;
+        int anchor;
+        bool insertedInCell;
         CommandResult result = new CommandResult();
-        for (int number = firstLine; number <= lastLine; number++) {
-            if (number == firstLine + 1) continue;   /* the delimiter row carries no cell text */
-            DocumentLine line = document.GetLineByNumber(number);
-            if (line.Offset + line.Length < selectionStart || line.Offset > selectionEnd) continue;
-            List<MarkdownLivePreview.Cell> cells = MarkdownLivePreview.SplitCells(LineText(document, line));
-            if (cells.Count == 0) continue;
-            if (anchor < 0) anchor = line.Offset + ClampIntoCell(cells, Math.Max(0, selectionStart - line.Offset));
-            for (int c = 0; c < cells.Count; c++) {
-                int a = Math.Max(selectionStart, line.Offset + cells[c].Start);
-                int b = Math.Min(selectionEnd, line.Offset + cells[c].End);
-                if (b <= a) continue;
-                result.Add(a, b - a, string.Empty);
-            }
-        }
+        AppendTableCellEdits(document, firstLine, lastLine, selectionStart, selectionEnd, insert, result, out anchor, out insertedInCell);
         if (anchor < 0) return null;
-        if (insert != null && insert.Length > 0) {
+        if (!insertedInCell && insert != null && insert.Length > 0) {
             result.Add(anchor, 0, insert);
             result.SelectionStart = anchor + insert.Length;
         } else result.SelectionStart = anchor;
         result.SelectionLength = 0;
         result.SortEdits();
         return result;
+    }
+
+    // Clears a selection that crosses one table boundary (table -> paragraph below, or paragraph
+    // above -> table) while keeping the row's pipes, row count, and the separating line break so
+    // the paragraph is never merged into the table row. Cut inline pairs in affected cells and
+    // surviving paragraph text are rebalanced. Returns null when the selection does not cross a
+    // single table boundary, covers whole tables, or touches structure (delimiter row / fence).
+    internal static CommandResult ClearBoundarySelection(TextDocument document, int selectionStart, int selectionLength) {
+        if (document == null || selectionStart < 0 || selectionLength <= 0) return null;
+        if (selectionStart > document.TextLength || selectionLength > document.TextLength - selectionStart) return null;
+        if (SelectionCoversWholeTables(document, selectionStart, selectionLength)) return null;
+        int selectionEnd = selectionStart + selectionLength;
+        int firstLine, lastLine;
+        if (FindTable(document, selectionStart, out firstLine, out lastLine)) {
+            DocumentLine startLine = document.GetLineByOffset(selectionStart);
+            if (MarkdownStructuralInput.IsInsideFence(document, startLine)) return null;
+            if (startLine.LineNumber == firstLine + 1) return null;
+            DocumentLine lastRow = document.GetLineByNumber(lastLine);
+            if (selectionEnd <= lastRow.EndOffset) return null;
+            int endProbe = selectionEnd > selectionStart ? selectionEnd - 1 : selectionEnd;
+            DocumentLine endTouchedLine = document.GetLineByOffset(endProbe);
+            if (MarkdownStructuralInput.IsInsideFence(document, endTouchedLine)) return null;
+            int endFirst, endLast;
+            if (FindTable(document, endProbe, out endFirst, out endLast) && endFirst != firstLine) return null;
+            int anchor;
+            bool insertedInCell;
+            CommandResult result = new CommandResult();
+            AppendTableCellEdits(document, firstLine, lastLine, selectionStart, lastRow.EndOffset, string.Empty, result, out anchor, out insertedInCell);
+            if (anchor < 0) return null;
+            DocumentLine afterRow = lastRow.NextLine;
+            if (afterRow != null && selectionEnd > afterRow.Offset) {
+                DocumentLine tailLine = document.GetLineByOffset(selectionEnd);
+                if (tailLine.LineNumber > afterRow.LineNumber) {
+                    result.Add(afterRow.Offset, tailLine.Offset - afterRow.Offset, string.Empty);
+                }
+                if (selectionEnd > tailLine.Offset) {
+                    int tailCaret;
+                    AddRebalancedLineDeletion(result, tailLine, LineText(document, tailLine), 0, selectionEnd - tailLine.Offset, out tailCaret);
+                }
+            }
+            result.SelectionStart = anchor;
+            result.SelectionLength = 0;
+            result.SortEdits();
+            return result;
+        }
+        int probe = selectionEnd > selectionStart ? selectionEnd - 1 : selectionEnd;
+        if (!FindTable(document, selectionEnd, out firstLine, out lastLine)
+            && (probe == selectionEnd || !FindTable(document, probe, out firstLine, out lastLine)))
+            return null;
+        DocumentLine headerRow = document.GetLineByNumber(firstLine);
+        DocumentLine tableLastRow = document.GetLineByNumber(lastLine);
+        if (selectionStart >= headerRow.Offset || selectionEnd > tableLastRow.EndOffset) return null;
+        if (firstLine + 1 <= lastLine) {
+            DocumentLine delimiterRow = document.GetLineByNumber(firstLine + 1);
+            if (selectionEnd > headerRow.EndOffset && selectionEnd < delimiterRow.EndOffset) return null;
+        }
+        DocumentLine firstParaLine = document.GetLineByOffset(selectionStart);
+        if (MarkdownStructuralInput.IsInsideFence(document, firstParaLine)) return null;
+        DocumentLine prevLine = headerRow.PreviousLine;
+        if (prevLine == null) return null;
+        CommandResult boundaryResult = new CommandResult();
+        int paraCaret = selectionStart;
+        if (selectionStart < prevLine.EndOffset) {
+            if (firstParaLine.LineNumber == prevLine.LineNumber) {
+                AddRebalancedLineDeletion(boundaryResult, firstParaLine, LineText(document, firstParaLine), selectionStart - firstParaLine.Offset, prevLine.Length, out paraCaret);
+            } else {
+                AddRebalancedLineDeletion(boundaryResult, firstParaLine, LineText(document, firstParaLine), selectionStart - firstParaLine.Offset, firstParaLine.Length, out paraCaret);
+                if (prevLine.EndOffset > firstParaLine.EndOffset)
+                    boundaryResult.Add(firstParaLine.EndOffset, prevLine.EndOffset - firstParaLine.EndOffset, string.Empty);
+            }
+        }
+        if (selectionEnd > headerRow.Offset) {
+            int tableAnchor;
+            bool tableInserted;
+            AppendTableCellEdits(document, firstLine, lastLine, headerRow.Offset, selectionEnd, string.Empty, boundaryResult, out tableAnchor, out tableInserted);
+        }
+        boundaryResult.SelectionStart = paraCaret;
+        boundaryResult.SelectionLength = 0;
+        boundaryResult.SortEdits();
+        return boundaryResult;
+    }
+
+    static void AppendTableCellEdits(TextDocument document, int firstLine, int lastLine, int rangeStart, int rangeEnd, string insert, CommandResult result, out int anchor, out bool insertedInCell) {
+        anchor = -1;
+        insertedInCell = false;
+        bool hasInsert = insert != null && insert.Length > 0;
+        int firstCaret = -1;
+        int firstEditedCellStart = -1;
+        for (int number = firstLine; number <= lastLine; number++) {
+            if (number == firstLine + 1) continue;   /* the delimiter row carries no cell text */
+            DocumentLine line = document.GetLineByNumber(number);
+            if (line.Offset + line.Length < rangeStart || line.Offset > rangeEnd) continue;
+            string rowText = LineText(document, line);
+            List<MarkdownLivePreview.Cell> cells = MarkdownLivePreview.SplitCells(rowText);
+            if (cells.Count == 0) continue;
+            if (anchor < 0) anchor = line.Offset + ClampIntoCell(cells, Math.Max(0, rangeStart - line.Offset), rowText);
+            for (int c = 0; c < cells.Count; c++) {
+                MarkdownLivePreview.Cell cell = cells[c];
+                int a = Math.Max(rangeStart, line.Offset + cell.Start);
+                int b = Math.Min(rangeEnd, line.Offset + cell.End);
+                if (b <= a) continue;
+                string cellInsert = string.Empty;
+                if (hasInsert && !insertedInCell && anchor >= line.Offset + cell.Start && anchor <= line.Offset + cell.End) {
+                    cellInsert = insert;
+                    insertedInCell = true;
+                }
+                int cellCaret;
+                string cellText = rowText.Substring(cell.Start, cell.End - cell.Start);
+                List<MarkdownInlineSpans.Span> spans = MarkdownInlineSpans.Build(MarkdownLivePreview.ParseInlineText(cellText, false), cellText);
+                if (spans != null && spans.Count > 0) {
+                    int relStart = a - (line.Offset + cell.Start);
+                    int relEnd = b - (line.Offset + cell.Start);
+                    WidenToSpanMarkers(spans, ref relStart, ref relEnd);
+                    string rebalanced = MarkdownInlineSpans.Rebalance(spans, cellText, relStart, relEnd, cellInsert, out cellCaret);
+                    AddMinimalDiff(result, line.Offset + cell.Start, cellText, rebalanced);
+                    cellCaret = line.Offset + cell.Start + cellCaret;
+                } else {
+                    result.Add(a, b - a, cellInsert);
+                    cellCaret = a + cellInsert.Length;
+                }
+                if (firstEditedCellStart < 0) {
+                    firstEditedCellStart = line.Offset + cell.Start;
+                    firstCaret = cellCaret;
+                }
+            }
+        }
+        if (firstCaret >= 0 && anchor >= 0 && firstEditedCellStart <= anchor) anchor = firstCaret;
+    }
+
+    static void AddRebalancedLineDeletion(CommandResult result, DocumentLine line, string text, int relStart, int relEnd, out int caret) {
+        if (relStart < 0) relStart = 0;
+        if (relEnd > text.Length) relEnd = text.Length;
+        if (relEnd <= relStart) {
+            caret = line.Offset + relStart;
+            return;
+        }
+        List<MarkdownInlineSpans.Span> spans = MarkdownInlineSpans.Build(MarkdownLivePreview.ParseInlineText(text, false), text);
+        if (spans == null || spans.Count == 0) {
+            result.Add(line.Offset + relStart, relEnd - relStart, string.Empty);
+            caret = line.Offset + relStart;
+            return;
+        }
+        WidenToSpanMarkers(spans, ref relStart, ref relEnd);
+        int localCaret;
+        string rebalanced = MarkdownInlineSpans.Rebalance(spans, text, relStart, relEnd, string.Empty, out localCaret);
+        AddMinimalDiff(result, line.Offset, text, rebalanced);
+        caret = line.Offset + localCaret;
+    }
+
+    static void WidenToSpanMarkers(List<MarkdownInlineSpans.Span> spans, ref int relStart, ref int relEnd) {
+        if (spans == null) return;
+        for (int i = 0; i < spans.Count; i++) {
+            MarkdownInlineSpans.Span span = spans[i];
+            if (span.Kind == MarkdownInlineSpans.SpanKind.Atomic || span.CloseLen <= 0) continue;
+            int openEnd = span.OpenStart + span.OpenLen;
+            int closeEnd = span.CloseStart + span.CloseLen;
+            if (relStart > span.OpenStart && relStart < openEnd) relStart = span.OpenStart;
+            if (relStart > span.CloseStart && relStart < closeEnd) relStart = span.CloseStart;
+            if (relEnd > span.OpenStart && relEnd < openEnd) relEnd = openEnd;
+            if (relEnd > span.CloseStart && relEnd < closeEnd) relEnd = closeEnd;
+        }
+    }
+
+    static void AddMinimalDiff(CommandResult result, int baseOffset, string before, string after) {
+        if (string.Equals(before, after, StringComparison.Ordinal)) return;
+        int head = 0;
+        int headMax = Math.Min(before.Length, after.Length);
+        while (head < headMax && before[head] == after[head]) head++;
+        int tail = 0;
+        int tailMax = headMax - head;
+        while (tail < tailMax && before[before.Length - 1 - tail] == after[after.Length - 1 - tail]) tail++;
+        int length = before.Length - head - tail;
+        string replacement = after.Substring(head, after.Length - head - tail);
+        if (length > 0 || replacement.Length > 0) result.Add(baseOffset + head, length, replacement);
     }
 
     // Backspace never crosses a cell boundary: at a cell's start the caret moves to the end of
@@ -1610,31 +1767,28 @@ internal static class MarkdownTableCommands {
         if (relative < 0 || relative > text.Length) return null;
         int breakStart = CellBreakBefore(text, relative);
         if (breakStart >= 0) return DeleteRange(line.Offset + breakStart, relative - breakStart);
-        // A padding-only cell is all padding around its own caret stop (EmptyCellStop). Backspace
-        // there would eat the left padding space (leaving "|  x|" or "| x|") or step out of the
-        // cell the user is about to type into, so the key writes nothing and the caret stays,
-        // exactly like the cell wall at a text cell's start. The closing pipe keeps the wall rule
-        // below, and a text cell's padding stays the editor's own character deletion.
-        if (PaddingOnlyCellAt(cells, text, relative) >= 0) return CaretOnly(caretOffset);
-        // A caret in a cell's own trailing padding (only spaces or tabs between that cell's last
-        // text character and the caret, no pipe) sits on text the writer typed. The cell rule
-        // must not swallow the key there: the editor's own Backspace removes the space. The last
-        // cell's padding is the same spot, so this check runs before the row-end clamp below; a
-        // run that reaches a real pipe keeps the caret-only step.
-        int paddingCell = PaddingCellAt(cells, relative);
-        if (paddingCell >= 0 && relative > cells[paddingCell].End && IsBlankRange(text, cells[paddingCell].End, relative)) return null;
-        if (relative > cells[cells.Count - 1].End) return CaretOnly(line.Offset + cells[cells.Count - 1].End);
-        // A caret in the row's hidden leading run is the row's start: at column 0 the key is
-        // swallowed where it is (the row never joins the line above), an indent stays the
-        // structural rule's, and the rest steps to the first cell's text.
-        if (relative < cells[0].Start) {
+        int cell = MarkdownLivePreview.OwningCellAt(cells, relative);
+        if (cell < 0) {
+            if (relative > cells[cells.Count - 1].End) return CaretOnly(line.Offset + MarkdownLivePreview.CellEdge(cells[cells.Count - 1], false));
             if (relative == 0) return CaretOnly(caretOffset);
             if (relative <= LeadingIndentLength(text)) return null;
-            return CaretOnly(line.Offset + cells[0].Start);
+            return CaretOnly(line.Offset + MarkdownLivePreview.CellCaretStart(cells[0]));
         }
-        int cell = CellAt(cells, relative);
+        if (cells[cell].Start == cells[cell].End) {
+            if (cell > 0) return CaretOnly(line.Offset + MarkdownLivePreview.CellEdge(cells[cell - 1], false));
+            return CaretOnly(caretOffset);
+        }
+        int innerStart, innerEnd;
+        MarkdownLivePreview.CellBounds(cells, cell, out innerStart, out innerEnd);
+        // A caret in a cell's own trailing padding sits on typed spaces: Backspace deletes the space.
+        if (relative > cells[cell].End && IsBlankRange(text, cells[cell].End, relative)) {
+            if (MarkdownLivePreview.IsOnlySpaceBeforePipeAfterOddBackslash(text, cells[cell].End, relative, innerEnd)) return CaretOnly(caretOffset);
+            return null;
+        }
         if (relative <= cells[cell].Start) {
-            if (cell > 0) return CaretOnly(line.Offset + cells[cell - 1].End);
+            // Extra leading padding (>= 2 spaces after pipe): Backspace deletes one space instead of jumping cells.
+            if (relative > innerStart + 1 && IsBlankRange(text, innerStart, relative)) return DeleteRange(caretOffset - 1, 1);
+            if (cell > 0) return CaretOnly(line.Offset + MarkdownLivePreview.CellEdge(cells[cell - 1], false));
             if (relative == 0) return CaretOnly(caretOffset);
             // Inside the row's own indentation (a table in a list item): the structural rule
             // removes one indent unit there, which is the basic view's behaviour as well.
@@ -1657,53 +1811,25 @@ internal static class MarkdownTableCommands {
         int breakEnd = CellBreakEnd(text, relative);
         if (breakEnd > 0) return DeleteRange(caretOffset, breakEnd - relative);
         if (relative >= text.Length) return CaretOnly(caretOffset);
-        // Only a pipe the renderer reads as a column separator is a wall. A pipe inside a `code`
-        // span or an escaped "\|" is cell text, so the ordinary delete removes it (the same
-        // separator list MarkdownLivePreview.TablePipeDelete reads).
+        // Only a pipe the renderer reads as a column separator is a wall. An escaped "\|" is cell
+        // text, so the ordinary delete removes it (while any unescaped "|" is a separator even
+        // inside a `code` span, matching MarkdownLivePreview.TablePipeDelete).
         if (text[relative] == '|' && IsSeparatorPipe(text, relative)) return CaretOnly(caretOffset);
-        // The row's hidden leading run: the indent is the editor's own text, the rest steps
-        // into the first cell.
-        if (relative < cells[0].Start) {
-            if (relative <= LeadingIndentLength(text)) return null;
-            return CaretOnly(line.Offset + cells[0].Start);
-        }
-        // A cell end is a wall: Delete never steps into the next cell. The padding between a
-        // cell's text and the following "|" belongs to that same cell (a typed space there, and
-        // the offset a delete left behind, stay inside it), so every spot from the cell's last
-        // text character through its padding and separator does nothing. Stepping into the
-        // neighbour from there made the first Delete a no-edit caret move, so the next Delete ate
-        // the neighbour's first character.
         int cell = PaddingCellAt(cells, relative);
-        if (cell >= 0 && relative >= cells[cell].End) return CaretOnly(caretOffset);
+        if (cell < 0) {
+            if (relative <= LeadingIndentLength(text)) return null;
+            if (relative < cells[0].Start) return CaretOnly(line.Offset + MarkdownLivePreview.CellCaretStart(cells[0]));
+            return CaretOnly(caretOffset);
+        }
+        if (cells[cell].Start == cells[cell].End) return CaretOnly(caretOffset);
+        if (relative < cells[cell].Start) return CaretOnly(caretOffset);
+        if (relative >= cells[cell].End) return CaretOnly(caretOffset);
         return null;
     }
 
-    // The padding-only cell whose padding holds the offset, or -1. The cell's opening pipe is the
-    // boundary: its stop and every padding space after that pipe are inside it, while the pipe
-    // itself is the cell end (the delete wall). A cell with text never answers here.
-    static int PaddingOnlyCellAt(List<MarkdownLivePreview.Cell> cells, string text, int relative) {
-        for (int c = 0; c < cells.Count; c++) {
-            if (cells[c].Start != cells[c].End) continue;
-            if (relative >= cells[c].End) continue;
-            int open = cells[c].Start - 1;
-            while (open >= 0 && (text[open] == ' ' || text[open] == '\t')) open--;
-            if (open < 0 || text[open] != '|') continue;
-            if (relative > open) return c;
-        }
-        return -1;
-    }
-
-    // The cell a row offset belongs to for the delete wall: a cell's own text and the padding
-    // between its text and the following pipe are that cell's, so the gap after cell c answers c.
-    // The run in front of the first cell's text belongs to no cell (-1); the caller keeps its own
-    // rule for it.
+    // The cell a row offset belongs to via the shared cell-boundary model.
     static int PaddingCellAt(List<MarkdownLivePreview.Cell> cells, int relative) {
-        int cell = -1;
-        for (int c = 0; c < cells.Count; c++) {
-            if (relative < cells[c].Start) break;
-            cell = c;
-        }
-        return cell;
+        return MarkdownLivePreview.OwningCellAt(cells, relative);
     }
     #endregion
 
@@ -1737,11 +1863,9 @@ internal static class MarkdownTableCommands {
         if (row.LineNumber != lastLine) return null;
         if (MarkdownStructuralInput.IsInsideFence(document, row)) return null;
         string text = LineText(document, row);
-        RowCells cells = SplitRow(text);
-        if (cells.Count == 0) return null;
-        int start = cells.Starts[cells.Count - 1];
-        int end = cells.Ends[cells.Count - 1];
-        return CaretOnly(row.Offset + TrimEnd(text, start, end));
+        List<MarkdownLivePreview.Cell> cells = MarkdownLivePreview.SplitCells(text);
+        if (cells == null || cells.Count == 0) return null;
+        return CaretOnly(row.Offset + MarkdownLivePreview.CellEdge(cells[cells.Count - 1], false));
     }
 
     // Delete at the end of a line whose next non-blank line is a table header: nothing is

@@ -96,7 +96,7 @@ int lastSelectionStart=-2,lastSelectionLength=-1,lastCaret=-1;
 void NotifySelectionChanged(){int start=SelectionStart,length=SelectionLength,caret=CaretIndex;if(start==lastSelectionStart&&length==lastSelectionLength&&caret==lastCaret)return;lastSelectionStart=start;lastSelectionLength=length;lastCaret=caret;if(!typing&&typingCaret>=0&&caret!=typingCaret)typingBroken=true;if(SelectionChanged!=null)SelectionChanged(this,EventArgs.Empty);}
 /* The live session's toolbar answer changed without the caret or selection moving (the pending closing-edge space): ask the toolbar to read the caret again. */
 internal void NotifyToolsChanged(){if(SelectionChanged!=null)SelectionChanged(this,EventArgs.Empty);}
-internal SourceEditor():base(new SafeAutomationTextArea()){DocumentChanged+=delegate{TrackDocument();};TrackDocument();Options.EnableHyperlinks=false;Options.EnableEmailHyperlinks=false;Options.AllowScrollBelowDocument=false;Options.ConvertTabsToSpaces=false;TextArea.SelectionChanged+=delegate{NotifySelectionChanged();};TextArea.Caret.PositionChanged+=delegate{NotifySelectionChanged();ScheduleCompositionFont();CaretPositionChangedForCommit(null,EventArgs.Empty);};TextArea.TextView.VisualLinesChanged+=delegate{ScheduleCompositionFont();};TextArea.TextEntering+=ImeResultEntering;TextArea.TextEntering+=TypingEntering;TextArea.TextEntered+=TypingEntered;TextArea.TextEntering+=CompositionCommitEntering;TextArea.AddHandler(System.Windows.Input.TextCompositionManager.TextInputEvent,new System.Windows.Input.TextCompositionEventHandler(TypingInputEnded),true);System.Windows.Input.CommandManager.AddPreviewExecutedHandler(TextArea,TypingCommandExecuting);TextArea.PreviewLostKeyboardFocus+=ImePreviewLostKeyboardFocus;TextArea.LostKeyboardFocus+=TypingFocusLost;TextArea.LostKeyboardFocus+=delegate{Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,new Action(delegate{RefreshCompositionState("lost focus");}));};System.Windows.DataObject.AddCopyingHandler(TextArea,DragCopying);TextArea.GotKeyboardFocus+=delegate{HookIme();if(imeSource!=null)QueueCompositionFont(imeSource.Handle);ScheduleCompositionFont();};TextArea.PreviewMouseDown+=ImeMouseDown;/* A surface that leaves the tree (tab switch or close) must keep no window-wide mouse handler and no dispatcher timer: both hold this editor, and the window outlives its tabs. The tab is reused, so Loaded re-hooks the IME and re-arms the composition timeout. */Loaded+=delegate{HookIme();if(imeParked!=null)ArmImeTimeout();};Unloaded+=delegate{StopPressWatch();DisarmButtonCaret();if(imeTimer!=null)imeTimer.Stop();UnhookIme();};PresentationSource.AddSourceChangedHandler(this,ImeSourceChanged);if(ImeTrace.Enabled)TraceCompositionEvents();}
+internal SourceEditor():base(new SafeAutomationTextArea()){TextArea.KeepImeCompositionWindow=KeepCjkCompositionWindow;DocumentChanged+=delegate{TrackDocument();};TrackDocument();Options.EnableHyperlinks=false;Options.EnableEmailHyperlinks=false;Options.AllowScrollBelowDocument=false;Options.ConvertTabsToSpaces=false;TextArea.SelectionChanged+=delegate{NotifySelectionChanged();};TextArea.Caret.PositionChanged+=delegate{NotifySelectionChanged();ScheduleCompositionFont();CaretPositionChangedForCommit(null,EventArgs.Empty);};TextArea.TextView.VisualLinesChanged+=delegate{ScheduleCompositionFont();};TextArea.TextEntering+=ImeResultEntering;TextArea.TextEntering+=TypingEntering;TextArea.TextEntered+=TypingEntered;TextArea.TextEntering+=CompositionCommitEntering;TextArea.AddHandler(System.Windows.Input.TextCompositionManager.TextInputEvent,new System.Windows.Input.TextCompositionEventHandler(TypingInputEnded),true);System.Windows.Input.CommandManager.AddPreviewExecutedHandler(TextArea,TypingCommandExecuting);TextArea.PreviewLostKeyboardFocus+=ImePreviewLostKeyboardFocus;TextArea.LostKeyboardFocus+=TypingFocusLost;TextArea.LostKeyboardFocus+=delegate{Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,new Action(delegate{RefreshCompositionState("lost focus");}));};System.Windows.DataObject.AddCopyingHandler(TextArea,DragCopying);TextArea.GotKeyboardFocus+=delegate{HookIme();if(imeSource!=null)QueueCompositionFont(imeSource.Handle);ScheduleCompositionFont();};TextArea.PreviewMouseDown+=ImeMouseDown;/* A surface that leaves the tree (tab switch or close) must keep no window-wide mouse handler and no dispatcher timer: both hold this editor, and the window outlives its tabs. The tab is reused, so Loaded re-hooks the IME and re-arms the composition timeout. */Loaded+=delegate{HookIme();if(imeParked!=null)ArmImeTimeout();};Unloaded+=delegate{StopPressWatch();DisarmButtonCaret();if(imeTimer!=null)imeTimer.Stop();UnhookIme();};PresentationSource.AddSourceChangedHandler(this,ImeSourceChanged);if(ImeTrace.Enabled)TraceCompositionEvents();}
 // MDNOTE_IME_TRACE: this surface composes in the IMM32 window (WPF's input method is suspended),
 // so WPF raises no TextInputStart/Update and TextInput only when a commit reaches the TextArea.
 // Attach on the focused element itself, again for already-handled events, and log the
@@ -137,8 +137,8 @@ internal bool AcceptsReturn {get;set;}internal bool AcceptsTab {get;set;}
 // Commit them before save, mode switches and commands read the text. CPS_COMPLETE alone is not
 // enough for the TSF-backed Korean IME (it accepts the notification but sends no result), so
 // CommitCompositionText moves the composition string into the document first.
-internal void CompleteComposition(){RequestCompositionCommit(false,"complete");}
-internal void CompleteCompositionForViewSwitch(){RequestCompositionCommit(true,"view switch");}
+[System.Runtime.InteropServices.DllImport("user32.dll")]static extern IntPtr GetForegroundWindow();
+internal void CompleteComposition(){RequestCompositionCommit(false,"complete");}internal void CompleteCompositionForViewSwitch(){RequestCompositionCommit(true,"view switch");}
 void RequestCompositionCommit(bool forceWindowCommit,string reason){CompositionRequests++;CompositionRequestCaret=CaretOffset;if(!forceWindowCommit&&!TextArea.IsKeyboardFocusWithin)return;if(CommitCompositionText(reason))return;CompleteWindowComposition(TextArea);}
 // View switches restore the editing focus after the menu closes, then commit the window's
 // IMM context even if WPF's focus/composition flags have not caught up. Also used for rich TSF.
@@ -359,7 +359,8 @@ internal Func<System.Windows.Input.MouseButtonEventArgs,bool> PressHandledElsewh
 // padding as the next cell's start.
 internal delegate bool PointOffset(Point point,out int offset);
 internal PointOffset TableOffsetAt;
-internal bool ImeBusy {get{return imeComposing||imeCommitPending>0;}}
+internal bool ImeComposing { get { return imeComposing; } }
+internal bool ImeBusy { get { if (imeCommitPending > 0) ExpireLostCommitResult("ime-busy"); return imeComposing || imeCommitPending > 0; } }
 int imeCommitTarget=-1,imeCommitTargetTick;TextDocument imeCommitTargetDocument;
 // The typing run the current commit request was made in. Keyboard focus can leave while the
 // counted result is still on its way (a menu, the find box, a dialog-opening command's own commit
@@ -491,7 +492,7 @@ void RebindImeAfterActivation(){if(!imeRebindPending)return;imeRebindPending=fal
    ordinary OnLostKeyboardFocus/OnGotKeyboardFocus. Toggling Options.EnableImeSupport instead flips InputMethod.SetIsInputMethodSuspended
    on the focused element, which left the Korean TSF IME locked in English with 한/영 dead (11-06 user, launch path; a review traced it). */
 System.Windows.Input.Keyboard.Focus(this);if(!TextArea.IsKeyboardFocused)TextArea.Focus();}
-void HookIme(){if(!imeFocusHooked){imeFocusHooked=true;/* No NoteInactiveImeFocus here (11-06 user: at launch the editor takes focus before the window is active, and the rebuild that followed left the Korean IME in English); only the drop handlers note it. */
+void HookIme(){if(!imeFocusHooked){imeFocusHooked=true;/* No NoteInactiveImeFocus here (11-06 user: at launch the editor takes focus before the window is active, and the rebuild that followed left the Korean IME in English); only the drop handlers note it. The launch case itself (a context bound before the window is in front) is rebuilt by AvalonEdit's ImeSupport on WM_NCACTIVATE (11-22). */
 TextArea.GotKeyboardFocus+=delegate{ScheduleImeUi();};Loaded+=delegate{HookImeActivation();};TextArea.LostKeyboardFocus+=delegate{SetImeInline(null);ScheduleImeUi();};TextArea.PreviewKeyDown+=ImeHanjaKeyDown;}var window=PresentationSource.FromVisual(TextArea) as System.Windows.Interop.HwndSource;if(Object.ReferenceEquals(window,imeSource))return;if(imeSource!=null){try{imeSource.RemoveHook(ImeProc);}catch(Exception){}}imeSource=window;if(window!=null)window.AddHook(ImeProc);}
 void UnhookIme(){SetImeInline(null);if(imeActivationWindow!=null){imeActivationWindow.Activated-=ImeWindowActivated;imeActivationWindow.Deactivated-=ImeWindowDeactivated;imeActivationWindow=null;}imeRebindPending=false;if(Object.ReferenceEquals(imeCompOwner,this)){HideCompositionBoxes(false);imeCompOwner=null;}if(imeSource==null)return;try{imeSource.RemoveHook(ImeProc);}catch(Exception){}imeSource=null;}
 // TextEditor.OnGotKeyboardFocus forwards focus to the TextArea, but Keyboard.Focus only reaches an
@@ -830,11 +831,17 @@ if(imeCommitTarget>=0){imeCommitTarget=-1;imeCommitTargetDocument=null;ForgetCom
 if(imeSessionOpen)CancelCompositionSession();
 }
 }
+// The window's rectangle at the last composition message, and the size/move loop (WM_ENTERSIZEMOVE..WM_EXITSIZEMOVE): a moved or
+// resized window makes the IME re-ask the position, which is not the Hanja key's lone request (see 0x0288 below).
+bool imeWindowSizing;ImeRect imeCompositionWindowRect;
+bool ImeWindowMovedSinceComposition(IntPtr hwnd){ImeRect now;if(!GetWindowRect(hwnd,out now))return false;return now.Left!=imeCompositionWindowRect.Left||now.Top!=imeCompositionWindowRect.Top||now.Right!=imeCompositionWindowRect.Right||now.Bottom!=imeCompositionWindowRect.Bottom;}
 IntPtr ImeProc(IntPtr hwnd,int msg,IntPtr wParam,IntPtr lParam,ref bool handled){
+if(msg==0x0231)imeWindowSizing=true;else if(msg==0x0232)imeWindowSizing=false;
+if(ImeTrace.Enabled&&(msg==0x0006||msg==0x001C||msg==0x0007||msg==0x0008||msg==0x0086||msg==0x0281||msg==0x0051))ImeTrace.Write("ime wnd msg=0x"+msg.ToString("X")+" wParam=0x"+wParam.ToInt64().ToString("X")+" lParam=0x"+lParam.ToInt64().ToString("X")+" foreground="+(GetForegroundWindow()==hwnd)+" focused="+TextArea.IsKeyboardFocused);
 if(ImeTrace.Enabled){if(msg==0x010D||msg==0x010E||msg==0x010F)ImeTrace.Write("ime msg=0x"+msg.ToString("X")+" lParam=0x"+lParam.ToInt64().ToString("X")+" composing="+imeComposing+" pending="+imeCommitPending);else if(msg==0x0286)ImeTrace.Write("ime WM_IME_CHAR char="+(char)(wParam.ToInt64()&0xFFFF)+" composing="+imeComposing);}
 // The hook is window-wide: a composition owned by another control (the find box) must not latch this editor (same rule as MarkdownLivePreview.CompositionMessage); one that started here is still finished here.
 if((msg==0x010D||msg==0x010F)&&!imeComposing&&!TextArea.IsKeyboardFocusWithin)return IntPtr.Zero;
-if(msg==0x010D||msg==0x010F)imeLastCompositionTick=Environment.TickCount;
+if(msg==0x010D||msg==0x010F){imeLastCompositionTick=Environment.TickCount;GetWindowRect(hwnd,out imeCompositionWindowRect);}
 // A form parked while the Korean layout was active outlives a switch to ja/zh, whose IMEs then open at the screen's top-left: bring it back to the caret first.
 if(msg==0x010D&&TextArea.IsKeyboardFocused&&!KoreanLayout())UnparkImeForm(hwnd);
 // Korean: the form is parked only while a composition runs (see IMN_SETCOMPOSITIONWINDOW below), from its first message on.
@@ -876,12 +883,43 @@ if(notify==0x000B&&imeComposing&&!imeCandidateQueued&&TextArea.IsKeyboardFocused
 if(msg==0x0288){long request=wParam.ToInt64();if(ImeTrace.Enabled)ImeTrace.Write("ime request 0x"+request.ToString("X")+" composing="+imeComposing+" focused="+TextArea.IsKeyboardFocused);
 // The Hanja key never reaches WPF (the IME eats it); the only sign is a lone IMR_QUERYCHARPOSITION, asked while the syllable is still
 // composing but long after the last WM_IME_COMPOSITION (each of those is followed by its own pair of requests within a few ms).
-if(request==0x0006&&imeComposing&&!imeHanjaAtCaret&&TextArea.IsKeyboardFocused&&KoreanLayout()&&unchecked(Environment.TickCount-imeLastCompositionTick)>100){imeHanjaAtCaret=true;RestoreParkedForm();if(ImeTrace.Enabled)ImeTrace.Write("ime hanja (lone request)");}
-if(request==0x0006&&lParam!=IntPtr.Zero&&TextArea.IsKeyboardFocused&&(KoreanLayout()||AnswersCharPositionWhileDrawn())&&AnswerCharPosition(hwnd,lParam)){handled=true;return new IntPtr(1);}}
+// A window move or resize also asks (11-22 user video, VM maximize: the form came back at the caret and the IME's own copy of the
+// syllable, with its black caret, drew over the cell): no lone request counts during a size/move loop or once the window has moved or
+// changed size since the last composition message.
+if(request==0x0006&&imeComposing&&!imeHanjaAtCaret&&TextArea.IsKeyboardFocused&&KoreanLayout()&&unchecked(Environment.TickCount-imeLastCompositionTick)>100&&!imeWindowSizing&&!ImeWindowMovedSinceComposition(hwnd)){imeHanjaAtCaret=true;RestoreParkedForm();if(ImeTrace.Enabled)ImeTrace.Write("ime hanja (lone request)");}
+if(request==0x0006&&lParam!=IntPtr.Zero&&TextArea.IsKeyboardFocused&&(KoreanLayout()||AnswersCharPositionForCjk())&&AnswerCharPosition(hwnd,lParam)){handled=true;return new IntPtr(1);}}
 return IntPtr.Zero;}
-// ja/zh: the candidate list opens at the composition form, which is the caret (the end of the string we draw), about one string width right of where it
-// starts (11-07 user, Japanese IME). While our inline string is drawn the IME is told where it starts and where each asked character is instead.
-bool AnswersCharPositionWhileDrawn(){return CjkLayout()&&imeInline!=null&&imeInline.Text!=null;}
+// ja/zh: Weasel and other TSF IMEs query IMR_QUERYCHARPOSITION before the composition string is drawn, while it is drawn, and right after a commit.
+// Answer in every state with the caret's position (a table cell: its drawn caret / string start) so the candidate window never jumps to the composition form or a stale start.
+bool AnswersCharPositionForCjk(){
+    if(!CjkLayout()||KoreanLayout())return false;
+    return true;
+}
+// Issue #5 (Rime/Weasel): while a ja/zh string is drawn inline, the composition form belongs to PlaceImeCandidate (the string start). AvalonEdit's caret write moved it
+// to the caret (the string end) for one pass before that put it back, and Weasel, which re-asks on every layout change, showed its candidate window there for ~30 ms.
+bool KeepCjkCompositionWindow(){
+    bool keep=imeComposing&&imeInline!=null&&imeInline.Text!=null&&TextArea.IsKeyboardFocused&&!KoreanLayout()&&CjkLayout();
+    // The skipped write used to send IMN_SETCOMPOSITIONWINDOW, which queued PlaceImeCandidate; a scroll or re-wrap mid-composition must still re-anchor (Opus review 11-22).
+    if(keep&&!imeCandidateQueued){imeCandidateQueued=true;Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,new Action(PlaceImeCandidate));}
+    return keep;
+}
+bool InTableRow(){
+    if(NativeCompositionHere())return true;
+    var document=Document;var view=TextArea.TextView;
+    if(document==null||view==null||view.Document!=document||document.IsInUpdate)return false;
+    int offset=Math.Max(0,Math.Min(CaretOffset,document.TextLength));
+    DocumentLine docLine=document.GetLineByOffset(offset);
+    VisualLine visual=view.VisualLinesValid?view.GetVisualLine(docLine.LineNumber):null;
+    if(visual==null){
+        try{visual=view.GetOrConstructVisualLine(docLine);}
+        catch(InvalidOperationException){return false;}
+        catch(ArgumentException){return false;}
+        catch(NullReferenceException){return false;}
+    }
+    if(visual==null||visual.IsDisposed||visual.Elements==null)return false;
+    for(int i=0;i<visual.Elements.Count;i++)if(visual.Elements[i] is MarkdownLivePreview.TableRowElement)return true;
+    return false;
+}
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]struct ImeCharPosition{public int dwSize;public int dwCharPos;public ImeScreenPoint pt;public int cLineHeight;public ImeRect rcDocument;}
 [System.Runtime.InteropServices.DllImport("user32.dll")]static extern bool ClientToScreen(IntPtr hwnd,ref ImeScreenPoint point);
 // The caret's top-left in screen pixels with the line height, and the editor as the document rectangle. The caret line is mid-format
@@ -896,20 +934,56 @@ bool AnswerCharPositionCore(IntPtr hwnd,IntPtr lParam){
     if(info.dwSize<System.Runtime.InteropServices.Marshal.SizeOf(typeof(ImeCharPosition)))return false;
     var source=System.Windows.Interop.HwndSource.FromHwnd(hwnd);
     if(source==null||source.IsDisposed||source.RootVisual==null||source.CompositionTarget==null)return false;
-    ImeScreenPoint at,docTop,docBottom;int height;bool saved;
-    if(!ImeCharPositionClient(source,info.dwCharPos,out at,out height,out docTop,out docBottom,out saved))return false;
+    ImeScreenPoint at,docTop,docBottom;int height;bool saved;string path;
+    if(!ImeCharPositionClientCore(source,info.dwCharPos,out at,out height,out docTop,out docBottom,out saved,out path))return false;
     ClientToScreen(hwnd,ref at);ClientToScreen(hwnd,ref docTop);ClientToScreen(hwnd,ref docBottom);
+    // ja/zh (table cells too): end the answered box where the hidden composition box of the same font ended (NoteCompositionBoxBottom).
+    // Before NoteCompositionBoxBottom has ever seen a font (e.g. Consolas/-16 right after toggling raw-source mode), predict its initial bottom
+    // from the GDI composition font metrics and the current composition form's top so the very first candidate list does not jump (issue #5).
+    if(!KoreanLayout()&&CjkLayout()){
+        string fontKey;ImeFont compFont;bool hasFormTop;int formTop;
+        if(!ReadCjkCompositionState(hwnd,out fontKey,out compFont,out hasFormTop,out formTop))fontKey=null; /* an unreadable font is no key: it neither records nor matches */
+        imeLastAnswerTop=at.Y;imeLastAnswerFont=fontKey;int bottom;
+        if(fontKey!=null&&imeCompBoxBottoms.TryGetValue(fontKey,out bottom)){
+            if(bottom>0&&Math.Abs(bottom-height)<=height/2)height=bottom;
+        }else if(fontKey!=null&&hasFormTop){
+            int gap=formTop-at.Y;
+            if(gap>=0&&gap<=height/4){
+                int box=EstimateGdiBoxHeight(hwnd,fontKey,ref compFont);
+                int predicted=gap+box;
+                if(box>0&&predicted>0&&predicted<height&&Math.Abs(predicted-height)<=height/2)height=predicted;
+            }
+        }
+    }
     info.pt=at;info.cLineHeight=height;info.rcDocument.Left=docTop.X;info.rcDocument.Top=docTop.Y;info.rcDocument.Right=docBottom.X;info.rcDocument.Bottom=docBottom.Y;
     System.Runtime.InteropServices.Marshal.StructureToPtr(info,lParam,false);
-    if(ImeTrace.Enabled)ImeTrace.Write("ime charposition pos="+info.dwCharPos+" at="+at.X+","+at.Y+" height="+height+" saved="+saved);
+    if(ImeTrace.Enabled)ImeTrace.Write("ime charposition pos="+info.dwCharPos+" at="+at.X+","+at.Y+" height="+height+" saved="+saved+" path="+path);
     return true;
 }
 // The IMR_QUERYCHARPOSITION answer in the window's client device pixels: the caret (the start of a drawn composition string, RectFromCharacterIndex atImeStart) top-left,
 // its height, and the editor as the document rectangle. saved: the caret line had no rectangle, the caret form saved when the form was parked stands in. Probe-readable.
 internal bool ImeCharPositionClient(System.Windows.Interop.HwndSource source,int charPos,out ImeScreenPoint at,out int height,out ImeScreenPoint docTop,out ImeScreenPoint docBottom,out bool saved){
-    at=new ImeScreenPoint();docTop=new ImeScreenPoint();docBottom=new ImeScreenPoint();height=0;saved=false;
+    string path;
+    return ImeCharPositionClientCore(source,charPos,out at,out height,out docTop,out docBottom,out saved,out path);
+}
+bool ImeCharPositionClientCore(System.Windows.Interop.HwndSource source,int charPos,out ImeScreenPoint at,out int height,out ImeScreenPoint docTop,out ImeScreenPoint docBottom,out bool saved,out string path){
+    at=new ImeScreenPoint();docTop=new ImeScreenPoint();docBottom=new ImeScreenPoint();height=0;saved=false;path="none";
     if(source==null||source.IsDisposed||source.RootVisual==null||source.CompositionTarget==null)return false;
+    if(!source.RootVisual.IsAncestorOf(this))return false;
     var toRoot=TransformToAncestor(source.RootVisual);var toDevice=source.CompositionTarget.TransformToDevice;
+    // ja/zh on a table row: the cell-aware point the composition form is written at (LiveCompositionGeometry.Position: string start in the cell, or the drawn
+    // table caret), so the answer and the form never disagree; the old path answered the previous syllable's remembered start first (issue #5, 11-22 VM: 14/14 moved).
+    bool korean=KoreanLayout();bool inTable=!korean&&InTableRow(); /* asked once: InTableRow may construct the caret line */
+    if(inTable&&CjkLayout()){
+        double cellSize;System.Windows.Media.Typeface cellFace;Point cellPoint=LiveCompositionGeometry.Position(this,out cellSize,out cellFace);
+        if(Double.IsNaN(cellPoint.X)||Double.IsNaN(cellPoint.Y))return false;
+        Point cellDevice=LiveCompositionGeometry.ToDevice(this,source,cellPoint);
+        at.X=(int)cellDevice.X;at.Y=(int)cellDevice.Y;height=Math.Max(1,(int)Math.Round(LiveCompositionGeometry.Metric(cellFace,cellSize).Height*toDevice.M22));path="cell";
+        Point cellA=toDevice.Transform(toRoot.Transform(new Point(0,0))),cellB=toDevice.Transform(toRoot.Transform(new Point(ActualWidth,ActualHeight)));
+        docTop.X=(int)cellA.X;docTop.Y=(int)cellA.Y;docBottom.X=(int)cellB.X;docBottom.Y=(int)cellB.Y;
+        return true;
+    }
+    bool legacyPath=korean||inTable;
     Rect caret=RectFromCharacterIndex(CaretOffset,false,true);
     ImeInlineElement drawn=caret.IsEmpty?null:ImeDrawnElement();
     if(drawn!=null){
@@ -917,16 +991,66 @@ internal bool ImeCharPositionClient(System.Windows.Interop.HwndSource source,int
         Point top=toDevice.Transform(toRoot.Transform(caret.TopLeft));Point bottom=toDevice.Transform(toRoot.Transform(caret.BottomLeft));
         height=Math.Max(1,(int)Math.Round(bottom.Y-top.Y));
         at.X=(int)(top.X+ImeCharOffset(drawn.DrawnLine,drawn.Text==null?0:drawn.Text.Length,charPos,toDevice.M11));at.Y=(int)top.Y;
-        RememberImeStart(top,bottom.Y-top.Y,drawn);
+        if(legacyPath)RememberImeStart(top,bottom.Y-top.Y,drawn);
+        path="drawn";
     }
-    // Lines being rebuilt (right after a string change or a commit), or the syllable just committed (Hanja / symbol lists open now): the start measured last.
-    else if(ImeStartRecent()){at.X=(int)(imeStartClient.X+ImeCharOffset(imeStartDrawn,imeStartLength,charPos,toDevice.M11));at.Y=(int)imeStartClient.Y;height=Math.Max(1,(int)Math.Round(imeStartHeight));}
-    else if(!caret.IsEmpty){Point top=toDevice.Transform(toRoot.Transform(caret.TopLeft));Point bottom=toDevice.Transform(toRoot.Transform(caret.BottomLeft));at.X=(int)top.X;at.Y=(int)top.Y;height=Math.Max(1,(int)Math.Round(bottom.Y-top.Y));}
-    else if(imeCaretFormSaved){saved=true;at=imeCaretForm.ptCurrentPos;height=Math.Max(1,(int)Math.Round(TextArea.TextView.DefaultLineHeight*toDevice.M22));}
+    // Korean (and a non-CJK layout on a table row) keeps the remembered-start and saved-form fallbacks; ja/zh never use stale or parked state.
+    else if(legacyPath&&ImeStartRecent()){at.X=(int)(imeStartClient.X+ImeCharOffset(imeStartDrawn,imeStartLength,charPos,toDevice.M11));at.Y=(int)imeStartClient.Y;height=Math.Max(1,(int)Math.Round(imeStartHeight));path="remembered";}
+    else if(!caret.IsEmpty){Point top=toDevice.Transform(toRoot.Transform(caret.TopLeft));Point bottom=toDevice.Transform(toRoot.Transform(caret.BottomLeft));at.X=(int)top.X;at.Y=(int)top.Y;height=Math.Max(1,(int)Math.Round(bottom.Y-top.Y));path="caret";}
+    else if(!legacyPath){
+        Rect constructed;ImeInlineElement constructedDrawn;
+        if(!ConstructCaretCharRect(out constructed,out constructedDrawn))return false;
+        Point top=toDevice.Transform(toRoot.Transform(constructed.TopLeft));Point bottom=toDevice.Transform(toRoot.Transform(constructed.BottomLeft));
+        height=Math.Max(1,(int)Math.Round(bottom.Y-top.Y));
+        double charOffset=constructedDrawn!=null?ImeCharOffset(constructedDrawn.DrawnLine,constructedDrawn.Text==null?0:constructedDrawn.Text.Length,charPos,toDevice.M11):0;
+        at.X=(int)(top.X+charOffset);at.Y=(int)top.Y;
+        path="constructed";
+    }
+    else if(imeCaretFormSaved){saved=true;at=imeCaretForm.ptCurrentPos;height=Math.Max(1,(int)Math.Round(TextArea.TextView.DefaultLineHeight*toDevice.M22));path="saved";}
     else return false;
     Point a=toDevice.Transform(toRoot.Transform(new Point(0,0))),b=toDevice.Transform(toRoot.Transform(new Point(ActualWidth,ActualHeight)));
     docTop.X=(int)a.X;docTop.Y=(int)a.Y;docBottom.X=(int)b.X;docBottom.Y=(int)b.Y;
     return true;
+}
+// Computes the caret's (x, y, height) by constructing only the caret's own visual line when VisualLinesValid is false or the caret rect is empty.
+bool ConstructCaretCharRect(out Rect rect,out ImeInlineElement drawn){
+    rect=Rect.Empty;drawn=null;
+    var document=Document;var view=TextArea.TextView;
+    if(document==null||view==null||view.Document!=document||document.IsInUpdate||!IsAncestorOf(view))return false;
+    int offset=Math.Max(0,Math.Min(CaretOffset,document.TextLength));
+    DocumentLine docLine=document.GetLineByOffset(offset);
+    VisualLine visual=null;
+    try{visual=view.GetOrConstructVisualLine(docLine);}
+    catch(InvalidOperationException){return false;}
+    catch(ArgumentException){return false;}
+    catch(NullReferenceException){return false;}
+    if(visual==null||visual.IsDisposed||visual.TextLines==null||visual.TextLines.Count==0)return false;
+    var gen=imeInline;
+    if(gen!=null&&gen.Text!=null&&visual.Elements!=null){
+        for(int i=0;i<visual.Elements.Count;i++){
+            var ime=visual.Elements[i] as ImeInlineElement;
+            if(ime!=null&&ime.BuiltOffset==offset){drawn=ime;break;}
+        }
+    }
+    int column;
+    if(drawn!=null){
+        column=drawn.VisualColumn;
+    }else{
+        int relative=offset-visual.FirstDocumentLine.Offset;
+        if(relative<0)relative=0;
+        column=visual.GetVisualColumn(relative);
+    }
+    if(column<0||column>visual.VisualLength)return false;
+    System.Windows.Media.TextFormatting.TextLine textLine=visual.GetTextLine(column,false);
+    if(textLine==null)return false;
+    double x=visual.GetTextLineVisualXPosition(textLine,column);
+    double yTop=visual.GetTextLineVisualYPosition(textLine,VisualYPosition.LineTop);
+    double yBottom=visual.GetTextLineVisualYPosition(textLine,VisualYPosition.LineBottom);
+    if(Double.IsNaN(x)||Double.IsNaN(yTop)||Double.IsNaN(yBottom))return false;
+    Point top=view.TranslatePoint(new Point(x,yTop)-view.ScrollOffset,this);
+    Point bottom=view.TranslatePoint(new Point(x,yBottom)-view.ScrollOffset,this);
+    rect=new Rect(top.X,top.Y,0,Math.Max(1,bottom.Y-top.Y));
+    return !rect.IsEmpty;
 }
 // State half of WM_IME_COMPOSITION; the probe supplies the native result text and composition
 // string the IME would report, so message ordering can be exercised without an installed IME.
@@ -938,7 +1062,7 @@ internal bool ImeCharPositionClient(System.Windows.Interop.HwndSource source,int
 // characters it delivers left one unit pending forever, which also parks undo behind ImeBusy.
 void NoteImeComposition(long flags,string resultText,int compositionLength){
     int resultLength=NormalizedImeLength(resultText);
-    if(resultLength>0){imeCommitPending+=resultLength;imeCommitPendingTick=Environment.TickCount;imeResultDelivered=false;}
+    if(resultLength>0){imeCommitPending+=resultLength;imeCommitPendingTick=Environment.TickCount;imeResultDelivered=false;if(compositionLength==0)ArmImeTimeout();}
     if(compositionLength>0){imeComposing=true;imeCompositionEnded=false;imeResultDelivered=false;if(!imeSessionOpen)BeginImeSession();StartPressWatch();return;}
     if(compositionLength==0){
         imeComposing=false;imeCompositionEnded=true;imeCompositionFreeTick=Environment.TickCount;
@@ -975,10 +1099,14 @@ void QueueCompositionFont(IntPtr hwnd){Dispatcher.BeginInvoke(System.Windows.Thr
 // the first priority below Normal, and only when the IME font actually differs (the apply itself
 // can make the IME trivially notify, and the WM_IME_NOTIFY branch above feeds this same queue).
 void ScheduleCompositionFont(){if(imeFontScheduled)return;imeFontScheduled=true;Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,new Action(delegate{imeFontScheduled=false;var window=imeSource;if(window!=null)EnsureCompositionFont(window.Handle);}));}
-void EnsureCompositionFont(IntPtr hwnd){if(!TextArea.IsKeyboardFocused)return;var font=CompositionFont();IntPtr context=ImmGetContext(hwnd);if(context==IntPtr.Zero)return;try{ImeFont current;if(ImmGetCompositionFontW(context,out current)&&current.lfHeight==font.lfHeight&&current.lfWeight==font.lfWeight&&current.lfQuality==font.lfQuality&&String.Equals(current.lfFaceName,font.lfFaceName))return;ImmSetCompositionFontW(context,ref font);}finally{ImmReleaseContext(hwnd,context);}}
+void EnsureCompositionFont(IntPtr hwnd){if(!TextArea.IsKeyboardFocused)return;if(!TextArea.TextView.VisualLinesValid&&!KoreanLayout()&&CjkLayout())return;var font=CompositionFont();IntPtr context=ImmGetContext(hwnd);if(context==IntPtr.Zero)return;try{ImeFont current;if(ImmGetCompositionFontW(context,out current)&&current.lfHeight==font.lfHeight&&current.lfWeight==font.lfWeight&&current.lfQuality==font.lfQuality&&String.Equals(current.lfFaceName,font.lfFaceName))return;ImmSetCompositionFontW(context,ref font);}finally{ImmReleaseContext(hwnd,context);}}
 // AvalonEdit sizes the IME font from the caret's line box (line spacing included), so the
 // composing syllable looked larger than the text. Use the em size of the text at the caret.
-void ApplyCompositionFont(IntPtr hwnd){if(!TextArea.IsKeyboardFocused)return;var font=CompositionFont();IntPtr context=ImmGetContext(hwnd);if(context==IntPtr.Zero)return;try{ImmSetCompositionFontW(context,ref font);}finally{ImmReleaseContext(hwnd,context);}}
+// ja/zh: while the caret line is being rebuilt CompositionFont() can only fall back to the editor's body size, and on a heading that shrank the
+// hidden composition box for one pass, so Rime/Weasel's list jumped (issue #5, 11-22 trace: -32 at the start, -16 on every update). The font
+// written while the lines were valid stays; the measured one is written after the redraw (VisualLinesChanged -> ScheduleCompositionFont at Background; QueueCompositionFont
+// runs at Send, still before the render, and skips too). Korean keeps its old writes.
+void ApplyCompositionFont(IntPtr hwnd){if(!TextArea.IsKeyboardFocused)return;if(!TextArea.TextView.VisualLinesValid&&!KoreanLayout()&&CjkLayout())return;var font=CompositionFont();if(ImeTrace.Enabled)ImeTrace.Write("ime apply font "+font.lfFaceName+"/"+font.lfHeight+" linesValid="+TextArea.TextView.VisualLinesValid);IntPtr context=ImmGetContext(hwnd);if(context==IntPtr.Zero)return;try{ImmSetCompositionFontW(context,ref font);}finally{ImmReleaseContext(hwnd,context);}}
 ImeFont CompositionFont(){double size=FontSize;Typeface face=new Typeface(FontFamily,FontStyle,FontWeight,FontStretch);var view=TextArea.TextView;var line=view.VisualLinesValid?view.GetVisualLine(TextArea.Caret.Line):null;if(line!=null){int column=line.GetVisualColumn(Math.Max(0,TextArea.Caret.Offset-line.FirstDocumentLine.Offset));VisualLineElement best=null;foreach(var element in line.Elements){if(element.DocumentLength==0)continue;if(best==null||element.VisualColumn<column)best=element;else break;}if(best!=null&&best.TextRunProperties!=null){size=best.TextRunProperties.FontRenderingEmSize;face=best.TextRunProperties.Typeface;}}var dpi=VisualTreeHelper.GetDpi(this);string name=face.FontFamily.Source;int comma=name.IndexOf(',');if(comma>0)name=name.Substring(0,comma).Trim();return new ImeFont{lfHeight=-(int)Math.Round(size*dpi.DpiScaleY),lfWeight=face.Weight.ToOpenTypeWeight(),lfItalic=(byte)(face.Style==FontStyles.Normal?0:1),lfCharSet=1,lfQuality=4,lfFaceName=name.Length>31?name.Substring(0,31):name};}
 // MDNote: Korean IME composing syllable, drawn inline instead of by the OS composition window.
 // The OS window paints the syllable on a white box that covers the character right of the caret,
@@ -1091,6 +1219,7 @@ static void WatchImeBoxEvents(){
 static void OnImeBoxEvent(IntPtr hook,int eventType,IntPtr hwnd,int idObject,int idChild,int thread,int time){try{ImeBoxEvent(eventType,hwnd,idObject,idChild);}catch(Exception){}}
 static void ImeBoxEvent(int eventType,IntPtr hwnd,int idObject,int idChild){
     if(hwnd==IntPtr.Zero||idObject!=0||idChild!=0)return; /* OBJID_WINDOW / CHILDID_SELF only: caret moves arrive as OBJID_CARET */
+    if(hwnd==imeCompBoxNoted&&(eventType==0x8001||eventType==0x8002))imeCompBoxNoted=IntPtr.Zero; /* destroyed, or shown again for a new composition */
     if(eventType==0x8001){imeBoxesHidden.Remove(hwnd);imeCompBoxesHidden.Remove(hwnd);if(hwnd==imeBoxUnmovable)imeBoxUnmovable=IntPtr.Zero;if(hwnd==imeBoxMoved)imeBoxMoved=IntPtr.Zero;return;}
     CheckImeBox(hwnd);
 }
@@ -1113,6 +1242,7 @@ static void CheckCompositionBox(IntPtr hwnd,string cls){
     const int want=0x80000|0x20; /* WS_EX_LAYERED | WS_EX_TRANSPARENT */
     bool hidden=imeCompBoxesHidden.ContainsKey(hwnd);int ex=GetWindowLongW(hwnd,-20); /* GWL_EXSTYLE */
     if(imeHideCompBoxes){
+        NoteCompositionBoxBottom(hwnd);
         /* The alpha is set again on every check: the IME may reset it while the style bits stay. */
         if(!hidden)imeCompBoxesHidden[hwnd]=want&~ex;
         if((ex&want)!=want)SetWindowLongW(hwnd,-20,ex|want);
@@ -1123,6 +1253,82 @@ static void CheckCompositionBox(IntPtr hwnd,string cls){
         if(added!=0)SetWindowLongW(hwnd,-20,GetWindowLongW(hwnd,-20)&~added);
         if(ImeTrace.Enabled)ImeTrace.Write("ime comp box restored 0x"+hwnd.ToInt64().ToString("X"));
     }
+}
+// Issue #5 (Rime/Weasel, measured 11-22 in the VM): the IME places its list under our IMR_QUERYCHARPOSITION box first and then under this hidden
+// "MSCTFIME Composition" box (its bottom + 6 px both times). The box starts at our answer's top but is one composition-font line tall: 23 px in edit
+// mode (= our 24 px line box, 1 px lower), 21 px in source mode, so there the list moved up 3 px right after every composition started. The box's
+// bottom below our last answer is kept per composition font and the next answers end there (CjkAnswerHeight).
+// One entry per font (body, heading, code, source mode...): a single slot was overwritten on every switch, so the first composition after it moved again (Neon review 11-22).
+static int imeLastAnswerTop=Int32.MinValue;static string imeLastAnswerFont;
+static readonly System.Collections.Generic.Dictionary<string,int> imeCompBoxBottoms=new System.Collections.Generic.Dictionary<string,int>();
+[System.Runtime.InteropServices.DllImport("user32.dll")]static extern bool IsWindowVisible(IntPtr hwnd);
+// Only the box's first visible position counts (each composition gets a new box): it is shown under our answer, then follows the form a few
+// px lower once PlaceImeCandidate writes it, and the IME does not read it again there (11-22 source-mode trace: 283..304, then 287..308; list stayed at 310).
+static IntPtr imeCompBoxNoted;
+static void NoteCompositionBoxBottom(IntPtr hwnd){
+    if(hwnd==imeCompBoxNoted||imeLastAnswerFont==null||imeLastAnswerTop==Int32.MinValue||!IsWindowVisible(hwnd))return;
+    /* A box still without a real size is not its first position yet: wait for its LOCATIONCHANGE. */
+    ImeRect r;if(!GetWindowRect(hwnd,out r)||r.Bottom-r.Top<4||r.Bottom-r.Top>200)return;
+    imeCompBoxNoted=hwnd;
+    if(Math.Abs(r.Top-imeLastAnswerTop)>2)return; /* measured gap 0 (source) / 1 (edit); the form move after it is 4 */ /* a box left elsewhere (another line, a stale position) says nothing about this one */
+    int offset=r.Bottom-imeLastAnswerTop,known;
+    if(!imeCompBoxBottoms.TryGetValue(imeLastAnswerFont,out known)||known!=offset){
+        if(imeCompBoxBottoms.Count>=16&&!imeCompBoxBottoms.ContainsKey(imeLastAnswerFont))imeCompBoxBottoms.Clear();
+        imeCompBoxBottoms[imeLastAnswerFont]=offset;if(ImeTrace.Enabled)ImeTrace.Write("ime comp box bottom offset="+offset+" font="+imeLastAnswerFont);
+    }
+}
+// Reads the current IMM composition font (key + LOGFONT) and, when on-screen, the composition form's screen Y.
+static bool ReadCjkCompositionState(IntPtr hwnd,out string fontKey,out ImeFont font,out bool hasFormTop,out int formTop){
+    fontKey=null;font=new ImeFont();hasFormTop=false;formTop=0;
+    IntPtr context=ImmGetContext(hwnd);if(context==IntPtr.Zero)return false;
+    try{
+        if(!ImmGetCompositionFontW(context,out font)||String.IsNullOrEmpty(font.lfFaceName)||font.lfHeight==0)return false;
+        fontKey=font.lfFaceName+"/"+font.lfHeight+"/"+font.lfWeight;
+        ImeCompForm form;
+        if(ImmGetCompositionWindow(context,out form)&&form.dwStyle!=0&&form.ptCurrentPos.X!=-32000){
+            ImeScreenPoint pt=form.ptCurrentPos;
+            if(ClientToScreen(hwnd,ref pt)){hasFormTop=true;formTop=pt.Y;}
+        }
+        return true;
+    }finally{ImmReleaseContext(hwnd,context);}
+}
+// Cold-start height of the hidden "MSCTFIME Composition" box for one LOGFONT before NoteCompositionBoxBottom has ever observed it:
+// GDI tmHeight + 2 px (measured: Consolas/-16 -> 19+2 = 21, Malgun Gothic/-16 -> 21+2 = 23). Cached per font key (O(1) after first lookup).
+static readonly System.Collections.Generic.Dictionary<string,int> imeFontBoxHeights=new System.Collections.Generic.Dictionary<string,int>();
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential,CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+struct ImeTextMetric{public int tmHeight,tmAscent,tmDescent,tmInternalLeading,tmExternalLeading,tmAveCharWidth,tmMaxCharWidth,tmWeight,tmOverhang,tmDigitizedAspectX,tmDigitizedAspectY;public char tmFirstChar,tmLastChar,tmDefaultChar,tmBreakChar;public byte tmItalic,tmUnderlined,tmStruckOut,tmPitchAndFamily,tmCharSet;}
+[System.Runtime.InteropServices.DllImport("user32.dll")]static extern IntPtr GetDC(IntPtr hwnd);
+[System.Runtime.InteropServices.DllImport("user32.dll")]static extern int ReleaseDC(IntPtr hwnd,IntPtr hdc);
+[System.Runtime.InteropServices.DllImport("gdi32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode)]static extern IntPtr CreateFontIndirectW(ref ImeFont font);
+[System.Runtime.InteropServices.DllImport("gdi32.dll")]static extern IntPtr SelectObject(IntPtr hdc,IntPtr obj);
+[System.Runtime.InteropServices.DllImport("gdi32.dll")]static extern bool DeleteObject(IntPtr obj);
+[System.Runtime.InteropServices.DllImport("gdi32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode)]static extern bool GetTextMetricsW(IntPtr hdc,out ImeTextMetric metrics);
+static int EstimateGdiBoxHeight(IntPtr hwnd,string fontKey,ref ImeFont font){
+    int cached;
+    if(imeFontBoxHeights.TryGetValue(fontKey,out cached))return cached;
+    int box=0;
+    IntPtr hFont=CreateFontIndirectW(ref font);
+    if(hFont!=IntPtr.Zero){
+        try{
+            IntPtr hdc=GetDC(hwnd);
+            if(hdc!=IntPtr.Zero){
+                try{
+                    IntPtr old=SelectObject(hdc,hFont);
+                    if(old!=IntPtr.Zero){
+                        try{
+                            ImeTextMetric tm;
+                            if(GetTextMetricsW(hdc,out tm)&&tm.tmHeight>0)box=tm.tmHeight+2;
+                        }finally{SelectObject(hdc,old);}
+                    }
+                }finally{ReleaseDC(hwnd,hdc);}
+            }
+        }finally{DeleteObject(hFont);}
+    }
+    if(box>0){
+        if(imeFontBoxHeights.Count>=16)imeFontBoxHeights.Clear();
+        imeFontBoxHeights[fontKey]=box;
+    }
+    return box;
 }
 static IntPtr imeBoxMoved,imeBoxUnmovable;static int imeBoxMovedTick;
 static void CheckImeBox(IntPtr hwnd){
@@ -1576,20 +1782,22 @@ internal sealed class ImeInlineElement:FormattedTextElement{
 }
 // A style armed for the next input (B / I / S / highlight / code / colour / size pressed with no selection): the pair is written only when the first syllable commits,
 // so while it composes nothing around the caret carries the style yet. The host answers it (SourceEditor.PendingImeStyle) and the syllable is drawn in it.
-internal sealed class ImePendingStyle{internal bool Bold,Italic,Strike,Highlight,Code;internal Brush Color;internal double Size;internal FontFamily CodeFamily;internal Brush CodeBackground;internal Brush HighlightBackground;}
+internal sealed class ImePendingStyle{internal bool Bold,Italic,Strike,Highlight,Code;internal Brush Color;internal double Size;internal FontFamily CodeFamily;internal Brush CodeBackground;internal Brush HighlightBackground;
+    // 11-22: a style the toggle just ended at the caret (MarkdownLivePreview closeEndCaret): the run around the caret has it, the commit will not.
+    internal bool NoBold,NoItalic,NoStrike,NoHighlight;}
 internal sealed class ImePendingProps:System.Windows.Media.TextFormatting.TextRunProperties{
     readonly System.Windows.Media.TextFormatting.TextRunProperties baseProps;readonly ImePendingStyle style;readonly Typeface face;readonly TextDecorationCollection decorations;
     internal ImePendingProps(System.Windows.Media.TextFormatting.TextRunProperties baseProps,ImePendingStyle style,TextDecorationCollection strike){
         this.baseProps=baseProps;this.style=style;var old=baseProps.Typeface;
-        face=new Typeface(style.Code&&style.CodeFamily!=null?style.CodeFamily:old.FontFamily,style.Italic?FontStyles.Italic:old.Style,style.Bold?FontWeights.Bold:old.Weight,old.Stretch);
-        decorations=style.Strike?strike:baseProps.TextDecorations;
+        face=new Typeface(style.Code&&style.CodeFamily!=null?style.CodeFamily:old.FontFamily,style.Italic?FontStyles.Italic:(style.NoItalic?FontStyles.Normal:old.Style),style.Bold?FontWeights.Bold:(style.NoBold?FontWeights.Normal:old.Weight),old.Stretch);
+        decorations=style.Strike?strike:(style.NoStrike?null:baseProps.TextDecorations);
     }
     public override Typeface Typeface{get{return face;}}
     public override double FontRenderingEmSize{get{return style.Size>0?style.Size:baseProps.FontRenderingEmSize;}}
     public override double FontHintingEmSize{get{return style.Size>0?style.Size:baseProps.FontHintingEmSize;}}
     public override TextDecorationCollection TextDecorations{get{return decorations;}}
     public override Brush ForegroundBrush{get{return style.Color??baseProps.ForegroundBrush;}}
-    public override Brush BackgroundBrush{get{return style.Code&&style.CodeBackground!=null?style.CodeBackground:(style.Highlight&&style.HighlightBackground!=null?style.HighlightBackground:baseProps.BackgroundBrush);}}
+    public override Brush BackgroundBrush{get{return style.Code&&style.CodeBackground!=null?style.CodeBackground:(style.Highlight&&style.HighlightBackground!=null?style.HighlightBackground:(style.NoHighlight?null:baseProps.BackgroundBrush));}}
     public override System.Globalization.CultureInfo CultureInfo{get{return baseProps.CultureInfo;}}
     public override TextEffectCollection TextEffects{get{return baseProps.TextEffects;}}
 }

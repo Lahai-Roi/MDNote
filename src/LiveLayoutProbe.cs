@@ -93,6 +93,9 @@ internal static class LiveLayoutProbeRunner {
             CheckCellKbdNoWrap();
             CheckCellKbdWrapLayout();
             CheckCellKbdCases();
+            CheckTableLongTokenPasteStability();
+            CheckLargeTableTypingBeforeSampleCompletes();
+            CheckTableTypedTokenContinuity();
         } catch (Exception ex) { Check("exception", false, ex.ToString()); }
         report.Append("TOTAL PASS=").Append(passes).Append(" FAIL=").Append(failures).Append('\n');
         File.WriteAllText(Path.Combine(directory, "livelayout-probe.txt"), report.ToString(), new UTF8Encoding(false));
@@ -1395,6 +1398,378 @@ internal static class LiveLayoutProbeRunner {
         }
 
         Check("cell-kbd-cases", allOk, details.ToString());
+    }
+    // Independent plain-text measurement for the Bug A / Bug B probes: WPF FormattedText only,
+    // never MarkdownLivePreview's own width or metric methods, so the table layout is never
+    // validated against itself.
+    static double IndependentPlainTextWidth(string text, bool bold, TextFormattingMode mode) {
+        if (String.IsNullOrEmpty(text)) return 0;
+        var ft=new FormattedText(text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
+            new Typeface(new FontFamily("Malgun Gothic"), FontStyles.Normal, bold ? FontWeights.Bold : FontWeights.Normal, FontStretches.Normal),
+            16.0, Brushes.Black, null, mode);
+        return ft.WidthIncludingTrailingWhitespace;
+    }
+    static double IndependentWidestWordWidth(string cellPlainText, bool bold, TextFormattingMode mode) {
+        if (String.IsNullOrEmpty(cellPlainText)) return 0;
+        double widest=0; int wordStart=-1;
+        for (int p=0;p<=cellPlainText.Length;p++) {
+            bool gap=p==cellPlainText.Length || char.IsWhiteSpace(cellPlainText[p]);
+            if (!gap) { if (wordStart<0) wordStart=p; continue; }
+            if (wordStart<0) continue;
+            double width=IndependentPlainTextWidth(cellPlainText.Substring(wordStart,p-wordStart), bold, mode);
+            if (width>widest) widest=width;
+            wordStart=-1;
+        }
+        return widest;
+    }
+    // Bug A: pasting a URL about twice the window width into the first column must publish one
+    // stable column grid. On the old code the other columns collapsed to one syllable while
+    // typing and leaving the caret jumped every column by more than 200 px; here the caret-in-cell
+    // widths and the idle-settled widths must agree within 1 px and keep every other column's
+    // independently measured widest word.
+    static void CheckTableLongTokenPasteStability() {
+        const double winWidth=600.0;
+        const TextFormattingMode mode=TextFormattingMode.Display;
+        string urlPlain="https://example.com/";
+        while (IndependentPlainTextWidth(urlPlain,false,mode)<winWidth*2.0) urlPlain+="abcdefghij";
+        string urlHyphen="https://docs.example.com/guide-part-one/";
+        while (IndependentPlainTextWidth(urlHyphen,false,mode)<winWidth*2.0) urlHyphen+="guide-part-two-";
+        string[] urls=new string[] { urlPlain, urlHyphen };
+        string[] urlNames=new string[] { "plain", "hyphen" };
+        string[] fixtures=new string[] {
+            "| 항목 | 설명 |\n|---|---|\n| init | 한국어 단어테스트 문장입니다 |\n\nend\n",
+            "| 항목 | 영문 | 설명 |\n|---|---|---|\n| init | Supercalifragilisticexpialidocious summary | 한국어 단어테스트 문장입니다 |\n\nend\n"
+        };
+        int[] cols=new int[] { 2, 3 };
+        string[][] headers=new string[][] {
+            new string[] { "항목", "설명" },
+            new string[] { "항목", "영문", "설명" }
+        };
+        string[][] dataCells=new string[][] {
+            new string[] { "init", "한국어 단어테스트 문장입니다" },
+            new string[] { "init", "Supercalifragilisticexpialidocious summary", "한국어 단어테스트 문장입니다" }
+        };
+        bool[] fixtureOk=new bool[] { true, true };
+        var details=new StringBuilder[] { new StringBuilder(), new StringBuilder() };
+        for (int f=0;f<fixtures.Length;f++) for (int u=0;u<urls.Length;u++) for (int hideIndex=0;hideIndex<2;hideIndex++) {
+            bool hide=hideIndex==0;
+            int count=cols[f];
+            string url=urls[u];
+            string label=urlNames[u]+"/"+(hide ? "hide" : "live");
+            bool ok=true;
+            double typingLast=0, settledLast=0, worstJump=0, worstWordGap=double.MaxValue;
+            var editor=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+            editor.TextArea.TextView.LineHeight=double.NaN; editor.Text=fixtures[f];
+            var session=MarkdownLivePreview.Attach(editor, new MarkdownLivePreview.Settings { FontSize=16, Family="Malgun Gothic", LinePercent=150, WordWrap=true, HideMarkers=hide });
+            Window win=Host(editor, winWidth);
+            TextOptions.SetTextFormattingMode(win, mode);
+            try {
+                win.Show(); Pump(editor);
+                DocumentLine line3=editor.Document.GetLineByNumber(3);
+                int at=line3.Offset+session.Info(line3).Cells[0].End;
+                editor.TextArea.Caret.Offset=at;
+                editor.Document.Insert(at, " "+url);
+                editor.TextArea.Caret.Offset=at+1+url.Length;
+                Pump(editor);
+                if (editor.TextArea.Caret.Line!=3) { ok=false; label+=" caret="+editor.TextArea.Caret.Line; }
+                var rowTyping=session.Info(editor.Document.GetLineByNumber(3)).Row;
+                if (rowTyping==null) { ok=false; label+=" noTypingRow"; }
+                else {
+                    if (rowTyping.Boundaries[count]>editor.TextArea.TextView.ActualWidth+1) {
+                        ok=false; label+=" wide="+N(rowTyping.Boundaries[count])+"/"+N(editor.TextArea.TextView.ActualWidth);
+                    }
+                    double[] typingW=new double[count];
+                    for (int c=0;c<count;c++) typingW[c]=rowTyping.Boundaries[c+1]-rowTyping.Boundaries[c];
+                    typingLast=typingW[0];
+                    editor.TextArea.Caret.Line=editor.Document.LineCount; Pump(editor);
+                    typeof(MarkdownLivePreview.Session).GetMethod("TableIdle",Members).Invoke(session,new object[] {null,EventArgs.Empty}); Pump(editor);
+                    var rowSettled=session.Info(editor.Document.GetLineByNumber(3)).Row;
+                    if (rowSettled==null) { ok=false; label+=" noSettledRow"; }
+                    else {
+                        double[] settledW=new double[count];
+                        for (int c=0;c<count;c++) settledW[c]=rowSettled.Boundaries[c+1]-rowSettled.Boundaries[c];
+                        settledLast=settledW[0];
+                        for (int c=0;c<count;c++) {
+                            double jump=Math.Abs(typingW[c]-settledW[c]);
+                            if (jump>worstJump) worstJump=jump;
+                            if (jump>1.0) ok=false;
+                        }
+                        for (int c=1;c<count;c++) {
+                            double widestWord=Math.Max(IndependentWidestWordWidth(headers[f][c],true,mode), IndependentWidestWordWidth(dataCells[f][c],false,mode));
+                            // A word is owed its whole width unless that takes another column under its floor
+                            // (TableWidths keeps every floor first, then pays wider minima from the rest); every
+                            // column is owed its floor.
+                            // Beside the unbroken URL (u==0, wider than the view) a word wider than its floor shares the
+                            // rest above the floors with it at one level (the typed column never narrows), so only the
+                            // floor is owed there (documented limit in HANDOFF).
+                            double floorW=MarkdownLivePreview.ColumnFloor(editor.TextArea.TextView.ActualWidth,count);
+                            widestWord=Math.Min(widestWord,u==0 ? floorW-rowTyping.Padding*2 : (editor.TextArea.TextView.ActualWidth-4)-(count-1)*floorW-rowTyping.Padding*2);
+                            if (settledW[c]<floorW-1 || typingW[c]<floorW-1) { ok=false; label+=" floor"+c+"="+N(settledW[c]); }
+                            double typingGap=(typingW[c]-rowTyping.Padding*2)-(widestWord-1.0);
+                            double settledGap=(settledW[c]-rowSettled.Padding*2)-(widestWord-1.0);
+                            if (typingGap<worstWordGap) worstWordGap=typingGap;
+                            if (settledGap<worstWordGap) worstWordGap=settledGap;
+                            if (typingGap<0 || settledGap<0) ok=false;
+                        }
+                    }
+                }
+                double urlWidth=IndependentPlainTextWidth(url,false,mode);
+                if (urlWidth<winWidth*1.95) ok=false;
+                label+=" url="+N(urlWidth)+" w0="+N(typingLast)+"/"+N(settledLast)+" jump="+N(worstJump)+" wordGap="+N(worstWordGap);
+            } finally { session.Dispose(); win.Close(); }
+            fixtureOk[f]&=ok;
+            details[f].Append(label).Append(ok ? "=PASS " : "=FAIL ");
+        }
+        Check("table-long-url-2col",fixtureOk[0],details[0].ToString());
+        Check("table-long-url-3col",fixtureOk[1],details[1].ToString());
+    }
+    // Bug B: a 48-row table is measured in 7 slices of 8 rows. Typing in a cell before the sample
+    // finishes must never publish a narrower column, and the in-flight sample completing while the
+    // caret is still in the typed cell must keep the typing-raised minimum. On the old code
+    // CompleteTable dropped Minima[0] and cleared Grow, narrowing column 0 by more than 80 px.
+    static void CheckLargeTableTypingBeforeSampleCompletes() {
+        var fixture=new StringBuilder();
+        fixture.Append("| Col1 | Col2 |\n|---|---|\n");
+        for (int i=0;i<48;i++) fixture.Append("| init | This second column holds a long sentence so it wants plenty of width across the table view. |\n");
+        fixture.Append("\nend\n");
+        string text=fixture.ToString();
+        bool monotonicOk=true, completeOk=true;
+        var monotonicDetail=new StringBuilder(); var completeDetail=new StringBuilder();
+
+        var editorA=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+        editorA.TextArea.TextView.LineHeight=double.NaN; editorA.Text=text;
+        var sessionA=MarkdownLivePreview.Attach(editorA, new MarkdownLivePreview.Settings { FontSize=16, Family="Malgun Gothic", LinePercent=150, WordWrap=true, HideMarkers=true });
+        Window winA=Host(editorA, 540);
+        TextOptions.SetTextFormattingMode(winA, TextFormattingMode.Display);
+        try {
+            winA.Show(); editorA.UpdateLayout(); editorA.TextArea.TextView.EnsureVisualLines();
+            DocumentLine line3=editorA.Document.GetLineByNumber(3);
+            var info=sessionA.Info(line3);
+            object table=info.Row!=null ? info.Row.Table : null;
+            bool unfinished=table!=null && Field(table,"Next")!=null;
+            if (!unfinished) { monotonicOk=false; monotonicDetail.Append("next=null "); }
+            editorA.TextArea.Caret.Offset=line3.Offset+info.Cells[0].End;
+            editorA.UpdateLayout(); editorA.TextArea.TextView.EnsureVisualLines();
+            var rowStart=sessionA.Info(editorA.Document.GetLineByNumber(3)).Row;
+            double startWidth=rowStart!=null ? rowStart.Boundaries[1]-rowStart.Boundaries[0] : 0;
+            double prevWidth=startWidth;
+            const string typed=" alpha beta gamma delta Supercalifragilisticexpialidocious";
+            bool neverNarrower=true;
+            for (int i=0;i<typed.Length;i++) {
+                editorA.TextArea.PerformTextInput(typed[i].ToString());
+                editorA.UpdateLayout(); editorA.TextArea.TextView.EnsureVisualLines();
+                if ((i+1)%10==0) {
+                    var frame=new DispatcherFrame();
+                    Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate { frame.Continue=false; }));
+                    Dispatcher.PushFrame(frame);
+                }
+                var rowNow=sessionA.Info(editorA.Document.GetLineByNumber(3)).Row;
+                double widthNow=rowNow!=null ? rowNow.Boundaries[1]-rowNow.Boundaries[0] : 0;
+                if (widthNow<prevWidth-0.5) neverNarrower=false;
+                prevWidth=widthNow;
+            }
+            if (!neverNarrower || prevWidth<=startWidth+50) monotonicOk=false;
+            monotonicDetail.Append("next=").Append(unfinished).Append(" start=").Append(N(startWidth)).Append(" final=").Append(N(prevWidth));
+        } finally { sessionA.Dispose(); winA.Close(); }
+
+        var editorB=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+        editorB.TextArea.TextView.LineHeight=double.NaN; editorB.Text=text;
+        var sessionB=MarkdownLivePreview.Attach(editorB, new MarkdownLivePreview.Settings { FontSize=16, Family="Malgun Gothic", LinePercent=150, WordWrap=true, HideMarkers=true });
+        Window winB=Host(editorB, 540);
+        TextOptions.SetTextFormattingMode(winB, TextFormattingMode.Display);
+        try {
+            winB.Show(); editorB.UpdateLayout(); editorB.TextArea.TextView.EnsureVisualLines();
+            DocumentLine line3=editorB.Document.GetLineByNumber(3);
+            var info=sessionB.Info(line3);
+            object table=info.Row!=null ? info.Row.Table : null;
+            bool unfinished=table!=null && Field(table,"Next")!=null;
+            editorB.TextArea.Caret.Offset=line3.Offset+info.Cells[0].End;
+            editorB.Document.Insert(editorB.TextArea.Caret.Offset, " alpha beta gamma Supercalifragilisticexpialidocious");
+            editorB.UpdateLayout(); editorB.TextArea.TextView.EnsureVisualLines();
+            var rowBefore=sessionB.Info(editorB.Document.GetLineByNumber(3)).Row;
+            double widthBefore=rowBefore!=null ? rowBefore.Boundaries[1]-rowBefore.Boundaries[0] : 0;
+            double wordWidth=IndependentPlainTextWidth("Supercalifragilisticexpialidocious",false,TextFormattingMode.Display);
+            bool ok=unfinished && wordWidth>200 && widthBefore>240;
+            if (table==null) { ok=false; completeDetail.Append("table=null "); }
+            else {
+                SetField(table,"PendingRemeasure",false);
+                typeof(MarkdownLivePreview.Session).GetMethod("ScheduleTables",Members).Invoke(sessionB,null);
+                Pump(editorB);
+                bool sampleFinished=Field(table,"Next")==null;
+                var rowSample=sessionB.Info(editorB.Document.GetLineByNumber(3)).Row;
+                double widthSample=rowSample!=null ? rowSample.Boundaries[1]-rowSample.Boundaries[0] : 0;
+                bool caretInRow=editorB.TextArea.Caret.Line==3;
+                editorB.TextArea.PerformTextInput("z"); Pump(editorB);
+                var rowKey=sessionB.Info(editorB.Document.GetLineByNumber(3)).Row;
+                double widthKey=rowKey!=null ? rowKey.Boundaries[1]-rowKey.Boundaries[0] : 0;
+                if (!sampleFinished || !caretInRow || widthSample<widthBefore-0.5 || widthKey<widthSample-0.5) ok=false;
+                completeDetail.Append("next=").Append(unfinished).Append(" word=").Append(N(wordWidth)).Append(" w=").Append(N(widthBefore))
+                    .Append("->").Append(N(widthSample)).Append("->").Append(N(widthKey)).Append(" caret=").Append(caretInRow).Append(" done=").Append(sampleFinished);
+            }
+            completeOk=ok;
+        } finally { sessionB.Dispose(); winB.Close(); }
+
+        Check("large-table-typing-monotonic",monotonicOk,monotonicDetail.ToString());
+        Check("large-table-sample-complete-while-typing",completeOk,completeDetail.ToString());
+    }
+    // Column widths of row 3 (Boundaries differences), or null.
+    static double[] RowThreeWidths(SourceEditor editor,MarkdownLivePreview.Session session,int count) {
+        var row=session.Info(editor.Document.GetLineByNumber(3)).Row;
+        if (row==null || row.Boundaries==null || row.Boundaries.Length<=count) return null;
+        var widths=new double[count];
+        for (int c=0;c<count;c++) widths[c]=row.Boundaries[c+1]-row.Boundaries[c];
+        return widths;
+    }
+    // Opus review 11-22, the cases the paste probes miss. (a) One key that takes a typed word's minimum
+    // over its column floor must not reshuffle the OTHER columns of a 3-column table: they may only give
+    // what the typed column takes (sum of their moves <= its move + 1.5 px). (b) A token typed one key at
+    // a time past what the view can pay (not pasted) must look the same before and after the caret leaves.
+    static void CheckTableTypedTokenContinuity() {
+        const TextFormattingMode mode=TextFormattingMode.Display;
+        // (a)
+        {
+            const string fixture="| 항목 | 설명 | 비고 |\n|---|---|---|\n| a | 한국어 단어테스트 문장입니다 한국어 단어테스트 문장입니다 한국어 단어테스트 문장입니다 한국어 | 짧은 한국어 문장 테스트입니다 짧은 문장 |\n\nend\n";
+            bool ok=true;double worstExcess=0,startW0=0,endW0=0;int keys=0;string why="";
+            var editor=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+            editor.TextArea.TextView.LineHeight=double.NaN; editor.Text=fixture;
+            var session=MarkdownLivePreview.Attach(editor, new MarkdownLivePreview.Settings { FontSize=16, Family="Malgun Gothic", LinePercent=150, WordWrap=true, HideMarkers=true });
+            Window win=Host(editor, 600);
+            TextOptions.SetTextFormattingMode(win, mode);
+            try {
+                win.Show(); Pump(editor);
+                DocumentLine line3=editor.Document.GetLineByNumber(3);
+                editor.TextArea.Caret.Offset=line3.Offset+session.Info(line3).Cells[0].End;
+                editor.TextArea.PerformTextInput(" "); Pump(editor);
+                double[] prev=RowThreeWidths(editor,session,3);
+                if (prev==null) { ok=false; why=" noRow"; }
+                else {
+                    startW0=prev[0];
+                    const string word="Supercalifragilisticexpialidocious";
+                    for (int i=0;i<word.Length && ok;i++) {
+                        editor.TextArea.PerformTextInput(word[i].ToString());
+                        editor.UpdateLayout(); editor.TextArea.TextView.EnsureVisualLines();
+                        double[] now=RowThreeWidths(editor,session,3);
+                        if (now==null) { ok=false; why=" noRow@"+i; break; }
+                        double excess=Math.Abs(now[1]-prev[1])+Math.Abs(now[2]-prev[2])-Math.Abs(now[0]-prev[0]);
+                        if (excess>worstExcess) { worstExcess=excess; why=" at"+i+"="+N(prev[0])+"/"+N(prev[1])+"/"+N(prev[2])+"->"+N(now[0])+"/"+N(now[1])+"/"+N(now[2]); }
+                        prev=now;keys++;
+                    }
+                    endW0=prev[0];
+                    if (worstExcess>1.5) ok=false;
+                    if (IndependentPlainTextWidth(word,false,mode)<200) { ok=false; why+=" shortWord"; }
+                    double[] typing=prev;
+                    editor.TextArea.Caret.Line=editor.Document.LineCount; Pump(editor);
+                    typeof(MarkdownLivePreview.Session).GetMethod("TableIdle",Members).Invoke(session,new object[] {null,EventArgs.Empty}); Pump(editor);
+                    double[] settled=RowThreeWidths(editor,session,3);
+                    if (settled==null) { ok=false; why+=" noSettled"; }
+                    // Half a character: GrowTypingColumn does not publish a growth smaller than that (it
+                    // would redraw every row per key for a boundary that stops no wrap), the idle sample does.
+                    else for (int c=0;c<3;c++) if (Math.Abs(settled[c]-typing[c])>8.0) { ok=false; why+=" leave"+c+"="+N(typing[c])+"/"+N(settled[c]); }
+                }
+            } finally { session.Dispose(); win.Close(); }
+            Check("table-word-cross-floor-3col",ok,"keys="+keys+" w0="+N(startW0)+"->"+N(endW0)+" worstExcess="+N(worstExcess)+why);
+        }
+        // (b)
+        string[] fixtures=new string[] {
+            "| 항목 | 설명 |\n|---|---|\n| init | 한국어 단어테스트 문장입니다 |\n\nend\n",
+            "| 항목 | 영문 | 설명 |\n|---|---|---|\n| init | Supercalifragilisticexpialidocious summary | 한국어 단어테스트 문장입니다 |\n\nend\n"
+        };
+        string[][] headers=new string[][] { new string[] { "항목", "설명" }, new string[] { "항목", "영문", "설명" } };
+        string[][] dataCells=new string[][] { new string[] { "init", "한국어 단어테스트 문장입니다" }, new string[] { "init", "Supercalifragilisticexpialidocious summary", "한국어 단어테스트 문장입니다" } };
+        var detail=new StringBuilder();bool allOk=true;
+        for (int f=0;f<fixtures.Length;f++) {
+            int count=f==0 ? 2 : 3;bool ok=true;string why="";double worstJump=0,worstGap=double.MaxValue;int keys=0;
+            var editor=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+            editor.TextArea.TextView.LineHeight=double.NaN; editor.Text=fixtures[f];
+            var session=MarkdownLivePreview.Attach(editor, new MarkdownLivePreview.Settings { FontSize=16, Family="Malgun Gothic", LinePercent=150, WordWrap=true, HideMarkers=true });
+            Window win=Host(editor, 600);
+            TextOptions.SetTextFormattingMode(win, mode);
+            try {
+                win.Show(); Pump(editor);
+                DocumentLine line3=editor.Document.GetLineByNumber(3);
+                editor.TextArea.Caret.Offset=line3.Offset+session.Info(line3).Cells[0].End;
+                editor.TextArea.PerformTextInput(" ");
+                editor.UpdateLayout(); editor.TextArea.TextView.EnsureVisualLines();
+                var token=new StringBuilder();double[] last=RowThreeWidths(editor,session,count);double worstExcess=0,worstNarrow=0;
+                while (IndependentPlainTextWidth(token.ToString(),false,mode)<1200 && keys<400) {
+                    string key=((char)('a'+keys%10)).ToString();
+                    editor.TextArea.PerformTextInput(key);token.Append(key);keys++;
+                    editor.UpdateLayout(); editor.TextArea.TextView.EnsureVisualLines();
+                    // Per key (Neon review 11-22): the typed column never narrows, the others only give
+                    // what it takes; the all-or-nothing payment snapped both by ~260 px on one key.
+                    double[] now=RowThreeWidths(editor,session,count);
+                    if (now!=null && last!=null) {
+                        double others=0;for (int c=1;c<count;c++) others+=Math.Abs(now[c]-last[c]);
+                        double excess=others-Math.Abs(now[0]-last[0]);
+                        if (excess>worstExcess) worstExcess=excess;
+                        if (last[0]-now[0]>worstNarrow) worstNarrow=last[0]-now[0];
+                    }
+                    last=now;
+                }
+                if (worstExcess>1.5 || worstNarrow>0.5) ok=false;
+                why+=" excess="+N(worstExcess)+" narrow="+N(worstNarrow);
+                Pump(editor);
+                if (editor.TextArea.Caret.Line!=3) { ok=false; why+=" caret="+editor.TextArea.Caret.Line; }
+                double[] typing=RowThreeWidths(editor,session,count);
+                editor.TextArea.Caret.Line=editor.Document.LineCount; Pump(editor);
+                typeof(MarkdownLivePreview.Session).GetMethod("TableIdle",Members).Invoke(session,new object[] {null,EventArgs.Empty}); Pump(editor);
+                double[] settled=RowThreeWidths(editor,session,count);
+                var rowSettled=session.Info(editor.Document.GetLineByNumber(3)).Row;
+                if (typing==null || settled==null || rowSettled==null) { ok=false; why+=" noRow"; }
+                else {
+                    for (int c=0;c<count;c++) { double jump=Math.Abs(typing[c]-settled[c]); if (jump>worstJump) worstJump=jump; if (jump>1.0) ok=false; }
+                    for (int c=1;c<count;c++) {
+                        double widest=Math.Max(IndependentWidestWordWidth(headers[f][c],true,mode),IndependentWidestWordWidth(dataCells[f][c],false,mode));
+                        double floorW=MarkdownLivePreview.ColumnFloor(editor.TextArea.TextView.ActualWidth,count);
+                        widest=Math.Min(widest,floorW-rowSettled.Padding*2); /* the typed token is unbroken and wider than the view: only the floor is owed beside it */
+                        if (settled[c]<floorW-1) { ok=false; why+=" floor"+c+"="+N(settled[c]); }
+                        double gap=(settled[c]-rowSettled.Padding*2)-(widest-1.0);
+                        if (gap<worstGap) worstGap=gap;
+                        if (gap<0) ok=false;
+                    }
+                    if (rowSettled.Boundaries[count]>editor.TextArea.TextView.ActualWidth+1) { ok=false; why+=" wide="+N(rowSettled.Boundaries[count]); }
+                }
+            } finally { session.Dispose(); win.Close(); }
+            allOk&=ok;
+            detail.Append(count).Append("col keys=").Append(keys).Append(" jump=").Append(N(worstJump)).Append(" wordGap=").Append(N(worstGap)).Append(why).Append(ok ? "=PASS " : "=FAIL ");
+        }
+        Check("table-long-token-typed",allOk,detail.ToString());
+        // (c) Neon review 11-22: a short first column ("1") beside an over-long URL and Korean prose. The
+        // short column's floor was reserved at its content width, so the Korean column ended 54 px under its floor.
+        {
+            const string fixture="| # | 주소 | 설명 |\n|---|---|---|\n| 1 | x | 한국어 단어테스트 문장입니다 |\n\nend\n";
+            string url="https://example.com/";
+            while (IndependentPlainTextWidth(url,false,mode)<1200) url+="abcdefghij";
+            bool ok=true;string why="";
+            var editor=new SourceEditor { FontFamily=new FontFamily("Malgun Gothic"), FontSize=16, WordWrap=true, Foreground=Brushes.Black, Background=Brushes.White, BorderThickness=new Thickness(0), Padding=new Thickness(0) };
+            editor.TextArea.TextView.LineHeight=double.NaN; editor.Text=fixture;
+            var session=MarkdownLivePreview.Attach(editor, new MarkdownLivePreview.Settings { FontSize=16, Family="Malgun Gothic", LinePercent=150, WordWrap=true, HideMarkers=true });
+            Window win=Host(editor, 600);
+            TextOptions.SetTextFormattingMode(win, mode);
+            try {
+                win.Show(); Pump(editor);
+                DocumentLine line3=editor.Document.GetLineByNumber(3);
+                int at=line3.Offset+session.Info(line3).Cells[1].End;
+                editor.TextArea.Caret.Offset=at;
+                editor.Document.Insert(at,url);
+                editor.TextArea.Caret.Offset=at+url.Length;
+                Pump(editor);
+                double[] typing=RowThreeWidths(editor,session,3);
+                editor.TextArea.Caret.Line=editor.Document.LineCount; Pump(editor);
+                typeof(MarkdownLivePreview.Session).GetMethod("TableIdle",Members).Invoke(session,new object[] {null,EventArgs.Empty}); Pump(editor);
+                double[] settled=RowThreeWidths(editor,session,3);
+                double floorW=MarkdownLivePreview.ColumnFloor(editor.TextArea.TextView.ActualWidth,3);
+                if (typing==null || settled==null) { ok=false; why=" noRow"; }
+                else {
+                    for (int c=0;c<3;c++) {
+                        if (Math.Abs(typing[c]-settled[c])>1.0) { ok=false; why+=" leave"+c; }
+                        if (settled[c]<floorW-1) { ok=false; why+=" floor"+c; }
+                    }
+                    why+=" w="+N(settled[0])+"/"+N(settled[1])+"/"+N(settled[2])+" floor="+N(floorW);
+                }
+            } finally { session.Dispose(); win.Close(); }
+            Check("table-short-column-beside-url",ok,why);
+        }
     }
     static bool CheckKbdBoxAndLeftHighlight(byte[] pixels, int stride, int bmpW, int bmpH,
         double keyLeft, double keyRight, double boxLeft, double bandTop, double bandBottom,

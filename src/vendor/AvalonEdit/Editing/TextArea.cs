@@ -44,6 +44,8 @@ namespace ICSharpCode.AvalonEdit.Editing
 	public class TextArea : Control, IScrollInfo, IWeakEventListener, ITextEditorComponent, IServiceProvider
 	{
 		internal readonly ImeSupport ime;
+		// MDNote: lets the owning editor keep the IME composition window where it placed it (true = skip the caret write).
+		public Func<bool> KeepImeCompositionWindow { get { return ime.KeepCompositionWindow; } set { ime.KeepCompositionWindow = value; } }
 
 		#region Constructor
 		static TextArea()

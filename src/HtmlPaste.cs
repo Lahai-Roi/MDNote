@@ -36,7 +36,7 @@ static string HtmlInline(List<PasteNode> nodes,PasteStyle style){var chunks=new 
         // right-flanking, so "**Word **" renders literal stars). Leading/trailing whitespace moves
         // outside the markers, and a run that is only whitespace keeps its text but loses the pair.
         string lead="",trail="",rendered;
-        if(chunk.Code)rendered=MarkdownWriter.Code(text);
+        if(chunk.Code)rendered=(pasteInTableCell&&MarkdownWriter.HasOddBackslashPipe(text))?MarkdownWriter.HtmlTableCode(text):MarkdownWriter.Code(text);
         else{
             int first=0,last=text.Length;
             while(first<last&&char.IsWhiteSpace(text[first]))first++;
@@ -79,6 +79,7 @@ static string HtmlBlock(PasteNode node,PasteStyle parent,int depth){if(PasteHidd
 // from drawing a table at all. The table is laid out on the full grid: a horizontal span fills its
 // extra columns with empty cells and a vertical span keeps its columns empty on the rows it
 // continues into, so the header, the delimiter row and every body row have the same cell count.
+[ThreadStatic] static bool pasteInTableCell;
 static string HtmlTable(PasteNode node,PasteStyle style,int depth){
     var rows=new List<PasteNode>();HtmlRows(node,rows);
     var grids=new List<Dictionary<int,string>>();var carry=new Dictionary<int,int>();int columns=0;
@@ -87,7 +88,12 @@ static string HtmlTable(PasteNode node,PasteStyle style,int depth){
         foreach(var cell in row.Children){
             if(cell.Tag!="td"&&cell.Tag!="th")continue;
             int held;while(carry.TryGetValue(column,out held)&&held>0){placed[column]="";if(held>1)carry[column]=held-1;else carry.Remove(column);column++;}
-            string text=PasteTablePipes(HtmlChildren(cell,HtmlStyle(cell,style),depth)).Replace("\n","<br>");
+            bool prevInCell=pasteInTableCell;
+            pasteInTableCell=true;
+            string cellMarkdown;
+            try{cellMarkdown=HtmlChildren(cell,HtmlStyle(cell,style),depth);}
+            finally{pasteInTableCell=prevInCell;}
+            string text=PasteTablePipes(cellMarkdown).Replace("\n","<br>");
             int colspan=PasteSpan(cell,"colspan"),rowspan=PasteSpan(cell,"rowspan");
             for(int k=0;k<colspan;k++){placed[column+k]=k==0?text:"";if(rowspan>1)carry[column+k]=rowspan-1;}
             column+=colspan;
@@ -100,25 +106,15 @@ static string HtmlTable(PasteNode node,PasteStyle style,int depth){
     if(lines.Count>0){var separators=new string[columns];for(int i=0;i<columns;i++)separators[i]="---";lines.Insert(1,"| "+String.Join(" | ",separators)+" |");}
     return String.Join("\n",lines);
 }
-// A table cell's own "|" is written as "\|" so the row keeps its columns, but only where the
-// renderer reads it as structure. The cell splitter (MarkdownLivePreview.TablePipes) skips "\x"
-// pairs and code spans, whose closing backtick run has the same length; ParseInline never hides an
-// escape inside a code span, so a `<code>a | b</code>` cell must keep "`a | b`" (writing
-// "`a \| b`" draws the backslash).
+// A table cell's own "|" is written as "\|" so the row keeps its columns (GFM splits on every
+// unescaped pipe, including inside `code` spans). Skip "\x" pairs so an already-escaped "\|" is
+// not double-escaped while "\\|" becomes "\\\|".
 static string PasteTablePipes(string markdown){
     if(markdown.IndexOf('|')<0)return markdown;
     var result=new StringBuilder(markdown.Length+8);
-    int budget=markdown.Length*3;
     for(int p=0;p<markdown.Length;p++){
         char c=markdown[p];
         if(c=='\\'){result.Append(c);if(p+1<markdown.Length)result.Append(markdown[++p]);continue;}
-        if(c=='`'&&budget>0){
-            int run=1;while(p+run<markdown.Length&&markdown[p+run]=='`')run++;
-            int close=PasteCodeClose(markdown,p+run,run,ref budget);
-            if(close>=0){result.Append(markdown,p,close+run-p);p=close+run-1;continue;}
-            result.Append(markdown,p,run);p+=run-1;continue;
-        }
-        budget-=2;
         if(c=='|'){result.Append("\\|");continue;}
         result.Append(c);
     }

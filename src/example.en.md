@@ -125,7 +125,7 @@ Keep only the main route in the table. Write detailed plans that might change se
 > - You can also click **Table** and pick the number of columns and rows. The table above has 4 columns and 5 rows.
 > - Place the cursor inside a table to show the table toolbar: left, center, and right alignment, ![row-add](guide-row-add.png) **Add row**, ![row-remove](guide-row-remove.png) **Remove row**, ![column-add](guide-column-add.png) **Add column**, ![column-remove](guide-column-remove.png) **Remove column**, ![table-delete](guide-table-delete.png) **Delete table**, Add paragraph below, and indent/outdent.
 >
-> Because the second row (`---`) of a table cannot be edited directly in the editing screen, use the alignment buttons on the table toolbar (or the Source view) to change column alignment. Typing `|` inside a cell automatically inserts `\|`, while `|` inside `code` is kept as-is.
+> Because the second row (`---`) of a table cannot be edited directly in the editing screen, use the alignment buttons on the table toolbar (or the Source view) to change column alignment. Typing `|` inside a cell automatically inserts `\|`, even inside `code`.
 >
 > Inside a table, press Tab/Shift+Tab to move to the next/previous cell and select its text; pressing Tab in the last cell adds a new row. If cells or text are selected, pressing Tab moves without deleting the text.
 >

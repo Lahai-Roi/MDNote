@@ -21,6 +21,15 @@ public partial class MainWindow {
                 CommandResult result=command(document,source.SelectionStart,source.SelectionLength);
                 if(result!=null)ApplyCommandResult(result);
                 source.Focus();
+                // A caret-only toggle on a run's inner closing edge stepped past the closer: the style
+                // ends here, so the next character is written outside and the button goes off.
+                // Inline code keeps its own documented edge rule (typing at a basic-mode code end goes inside, button off): not recorded.
+                if(result!=null&&!String.IsNullOrEmpty(result.SteppedPast)&&result.SteppedPast!="`"&&LivePreviewAttached&&livePreview!=null&&source!=null&&source.SelectionLength==0){
+                    livePreview.NoteStyleEnded(source.CaretIndex,result.SteppedPast);
+                    ApplyPendingImeStyle();
+                    UpdateTools();
+                    if(ImeTrace.Enabled)ImeTrace.Write("style ended "+result.SteppedPast+" at="+source.CaretIndex);
+                }
             }catch(Exception ex){ReportCommandFailure(ex);}
         });}catch(Exception ex){ReportCommandFailure(ex);}
         return true;
@@ -143,7 +152,12 @@ public partial class MainWindow {
         typingOpen=CombinedTypingOpen();typingClose=CombinedTypingClose();
         typingAt=Math.Max(0,Math.Min(result.SelectionStart,source.Document.TextLength));
         typingDocument=source.Document;typingVersion=source.Document.Version;
+        if(ImeTrace.Enabled)ImeTrace.Write("arm open="+typingOpen+" at="+typingAt+" caret="+source.CaretIndex);
         HookTypingStyleCaret();
+        ApplyPendingImeStyle();
+    }
+    void ApplyPendingImeStyle(){
+        if(source==null)return;
         source.PendingImeStyle=PendingImeStyleNow;
         // 11-08 user: a size picked before typing left the caret at the old height until the first syllable composed.
         source.TextArea.Caret.PendingEmSize=PendingTypingSize;source.TextArea.Caret.Refresh();
@@ -152,9 +166,13 @@ public partial class MainWindow {
     // Every armed style shows on the composition string together (size and bold both), read from
     // the same pairs the commit writes; null when nothing is armed.
     ImePendingStyle PendingImeStyleNow(){
-        if(!TypingStyleArmed||typingArmed==null)return null;
+        // 11-22: styles the toggle ended at the caret draw off on the composition too (the commit is written outside those pairs).
+        bool armed=TypingStyleArmed&&typingArmed!=null;
+        string unusedEnded;
+        bool hasEnded=LivePreviewAttached&&livePreview!=null&&source!=null&&livePreview.StyleEndedAt(source.CaretIndex,out unusedEnded);
+        if(!armed&&!hasEnded)return null;
         var style=new ImePendingStyle();
-        for(int i=0;i<typingArmed.Count;i++){
+        if(armed)for(int i=0;i<typingArmed.Count;i++){
             ArmedPair pair=typingArmed[i];
             if(pair.Marker=="**")style.Bold=true;
             else if(pair.Marker=="*")style.Italic=true;
@@ -169,7 +187,9 @@ public partial class MainWindow {
         style.Size=PendingTypingSize();
         if(style.Code){style.CodeFamily=MarkdownLivePreview.InlineCodeFamily;if(LivePreviewAttached)style.CodeBackground=livePreview.Colors.InlineCode;}
         if(style.Highlight&&LivePreviewAttached)style.HighlightBackground=livePreview.Colors.Highlight;
-        if(!style.Bold&&!style.Italic&&!style.Strike&&!style.Highlight&&!style.Code&&style.Color==null&&style.Size<=0)return null;
+        if(hasEnded)livePreview.ApplyEndedToImeStyle(source.CaretIndex,style);
+        if(!style.Bold&&!style.Italic&&!style.Strike&&!style.Highlight&&!style.Code&&style.Color==null&&style.Size<=0&&
+            !style.NoBold&&!style.NoItalic&&!style.NoStrike&&!style.NoHighlight)return null;
         return style;
     }
     // A caret that leaves the armed spot (a click, Home/End, an arrow, a selection) cancels the
@@ -198,6 +218,7 @@ public partial class MainWindow {
             // The closing-edge step the armed code pair survives is not a real caret move (see
             // ClosingEdgeArmSpot); every other move ends the arm.
             if(source!=null&&source.SelectionLength==0&&ClosingEdgeArmSpot())return;
+            if(ImeTrace.Enabled)ImeTrace.Write("arm cleared by caret "+typingAt+"->"+(source==null?-1:source.CaretIndex));
             ClearTypingStyle();UpdateTools();
         }
     }
@@ -226,6 +247,17 @@ public partial class MainWindow {
     // The armed pairs written around the first input, applied as the same command path every
     // toolbar command takes: one history entry holding the markers and the typed text together.
     bool WrapTypingStyle(string text){
+        if(LivePreviewAttached&&livePreview!=null){
+            int placedCaret;
+            if(livePreview.CommitArmedWithCloseSpace(typingAt,typingOpen,text,typingClose,out placedCaret)){
+                ClearTypingStyle();
+                source.EndTypingRun();
+                ApplyPendingImeStyle();
+                UpdateTools();
+                MarkdownLivePreview.Session.SafeBringCaretToView(source.TextArea);
+                return true;
+            }
+        }
         string exclusive=null;
         if(typingArmed!=null)foreach(ArmedPair pair in typingArmed)if(pair.Marker=="=="||pair.Marker=="`")exclusive=pair.Marker;
         CommandResult wrapped=MarkdownCommands.WrapTyped(source.Document,typingAt,typingOpen,typingClose,text,exclusive);
@@ -316,10 +348,9 @@ public partial class MainWindow {
         if(LivePreviewAttached&&livePreview!=null&&livePreview.SelectionBreaksFence())return true;
         /* A paste at a caret inside a table cell belongs at that caret. The hidden-marker paste snap
            pulls a caret on a closing bold, span or backtick run's outer edge back inside the pair so pasted text
-           keeps the style, but a cell is the input unit: H10 gives typed text the same exemption
-           (MarkdownLivePreview.HiddenCloseTypingEntering) and the cell command below reads the
-           selection before it inserts. When the snap moved a caret that is a valid position in the
-           cell's own text, put it back so the paste lands on the spot the user's caret was on. */
+           keeps the style, while the cell command below reads the selection before it inserts. When the
+           snap moved a caret that is a valid position in the cell's own text (other than a closer edge
+           kept by the rule below), put it back so the paste lands on the spot the user's caret was on. */
         int pasteStart=source.SelectionStart,pasteLength=source.SelectionLength;
         /* Ctrl+V does not go through ApplicationCommands.Paste, so the hidden-marker step runs here: an endpoint inside a marker moves to its edge. The pairs the selection cuts are not widened any more (2.3.1 D1); the markers it cut off are written back with the paste (RebalancedReplace). */
         if(LivePreviewAttached&&livePreview!=null)livePreview.PrepareHiddenPasteSelection();
@@ -787,7 +818,7 @@ public partial class MainWindow {
     // P5: Enter/Tab/Shift+Tab/Backspace on list, quote and code lines. During IME composition
     // keys arrive as Key.ImeProcessed and are never handled here.
     void SourceStructuralKeys(object sender,System.Windows.Input.KeyEventArgs e){
-        if(e.Handled||!LiveFormat||source==null||!Object.ReferenceEquals(sender,source.TextArea))return;
+        if(e.Handled||!LiveFormat||source==null||source.ImeComposing||!Object.ReferenceEquals(sender,source.TextArea))return;
         var modifiers=System.Windows.Input.Keyboard.Modifiers;CommandResult result=null;
         bool back=e.Key==System.Windows.Input.Key.Back&&(modifiers==System.Windows.Input.ModifierKeys.None||modifiers==System.Windows.Input.ModifierKeys.Shift);
         bool delete=e.Key==System.Windows.Input.Key.Delete&&modifiers==System.Windows.Input.ModifierKeys.None;
@@ -827,7 +858,13 @@ public partial class MainWindow {
             // newline either, which would leave the header without its delimiter and end the table.
             CommandResult delimiter=DelimiterRowSelectionEnter();
             if(delimiter!=null)return delimiter;
-            CommandResult table=MarkdownTableCommands.EnterOutsideTable(source.Document,source.SelectionStart,source.SelectionLength,keyEnter);
+            int drawnCells=-1;
+            if(LivePreviewAttached&&livePreview!=null&&livePreview.Options!=null&&livePreview.Options.HideMarkers){
+                var caretLine=source.Document.GetLineByOffset(Math.Max(0,Math.Min(source.SelectionStart,source.Document.TextLength)));
+                var caretInfo=livePreview.Info(caretLine);
+                if(caretInfo!=null&&caretInfo.Table&&!caretInfo.Delimiter)drawnCells=livePreview.DrawnCellCount(caretLine,caretInfo);
+            }
+            CommandResult table=MarkdownTableCommands.EnterOutsideTable(source.Document,source.SelectionStart,source.SelectionLength,keyEnter,drawnCells);
             if(table!=null)return table;
             // Stage 4: Enter/Shift+Enter inside a cell is the basic view's paragraph break, saved
             // as "<br>", never a new source line that would split the table row.
@@ -1078,7 +1115,9 @@ public partial class MainWindow {
             if(neighbour==null)return StayTab();
             var neighbourInfo=livePreview.Info(neighbour);
             if(neighbourInfo==null||!neighbourInfo.Table||neighbourInfo.Cells==null||neighbourInfo.Cells.Count==0)return StayTab();
-            int cell=shift?neighbourInfo.Cells.Count-1:0;
+            int neighbourDrawn=Math.Min(neighbourInfo.Cells.Count,livePreview.DrawnCellCount(neighbour,neighbourInfo,true));
+            if(neighbourDrawn<=0)return StayTab();
+            int cell=shift?neighbourDrawn-1:0;
             CommandResult moved=new CommandResult();
             moved.SelectionStart=neighbour.Offset+neighbourInfo.Cells[cell].Start;
             moved.SelectionLength=Math.Max(0,neighbourInfo.Cells[cell].End-neighbourInfo.Cells[cell].Start);
@@ -1088,19 +1127,23 @@ public partial class MainWindow {
         var cells=info.Cells;
         int relative=offset-line.Offset;
         if(cells!=null&&cells.Count>0){
+            int drawn=Math.Max(1,Math.Min(cells.Count,livePreview.DrawnCellCount(line,info,true)));
             // A cell's own padding is that cell (MarkdownTableCommands.CellIndexAtPadding): the
             // stop inside an empty cell, and a space typed after a cell's text, must not read as
             // "past the row's last cell" - that sent Tab on to the next row instead of leaving the
             // cell the move had just selected.
-            if(MarkdownTableCommands.CellIndexAtPadding(document.GetText(line.Offset,line.Length),cells,relative)>=0)return result;
-            // A backward move onto a row's trailing-pipe slot lands on that row's last real cell.
-            if(shift)return CellTarget(line,cells[cells.Count-1]);
-            // A forward move past the row's last cell continues on the next row, skipping |---|.
+            int targetCell=MarkdownTableCommands.CellIndexAtPadding(document.GetText(line.Offset,line.Length),cells,relative);
+            if(targetCell>=0&&targetCell<drawn)return result;
+            // A backward move onto a row's trailing-pipe slot or undrawn overflow cell lands on that row's last drawn cell.
+            if(shift)return CellTarget(line,cells[drawn-1]);
+            // A forward move past the row's last drawn cell continues on the next row, skipping |---|.
             for(var next=line.NextLine;next!=null;next=next.NextLine){
                 var nextInfo=livePreview.Info(next);
                 if(nextInfo==null||!nextInfo.Table)break;
                 if(!nextInfo.Delimiter&&nextInfo.Cells!=null&&nextInfo.Cells.Count>0)return CellTarget(next,nextInfo.Cells[0]);
             }
+            CommandResult added=MarkdownTableCommands.AddRowAtEnd(document,line.Offset);
+            if(added!=null)return added;
         }
         return StayTab();
     }
@@ -1232,10 +1275,18 @@ public partial class MainWindow {
         // folds it, live mode reveals it): the row keeps its text and its line break, and the
         // selection stays so the user can see which edit was refused.
         if(SelectionTouchesDelimiter())return KeepSelection();
-        int offset=source.SelectionStart;
+        int offset=source.SelectionStart,length=source.SelectionLength;
+        if(length<=0)return null;
         var cells=SourceRowCells(offset);
-        if(cells==null||!MarkdownTableCommands.SpansCellBoundary(source.Document,offset,source.SelectionLength,cells))return null;
-        return MarkdownTableCommands.ClearCellSelection(source.Document,offset,source.SelectionLength,cells);
+        if(cells!=null&&MarkdownTableCommands.SpansCellBoundary(source.Document,offset,length,cells)){
+            CommandResult clear=MarkdownTableCommands.ClearCellSelection(source.Document,offset,length,cells);
+            if(clear!=null)return clear;
+        }
+        // Cross-table-boundary selection (table -> paragraph below, or paragraph above -> table):
+        // clears affected cells and selected paragraph text while keeping pipes and line breaks.
+        if(!MarkdownTableCommands.SelectionCoversWholeTables(source.Document,offset,length))
+            return MarkdownTableCommands.ClearBoundarySelection(source.Document,offset,length);
+        return null;
     }
     // A whole-table selection that ends (or starts) inside a paragraph: the raw removal would cut a
     // pair of that paragraph in half ("**a b**" minus "**a " left "b**"). The paragraph's part goes
@@ -1786,7 +1837,9 @@ public partial class MainWindow {
             // styles ends that run at the word instead of opening a second pair. Nothing is edited
             // and no undo step is recorded; the toolbar drops the lit button (UpdateTools) and the
             // next character is written after the space, outside the pair.
-            if(marker!="`"&&LivePreviewAttached&&livePreview.EndPendingCloseStyle(marker)){UpdateTools();handled=true;return;}
+            if(marker!="`"&&LivePreviewAttached&&livePreview!=null&&livePreview.EndPendingCloseStyle(marker)){ApplyPendingImeStyle();UpdateTools();handled=true;return;}
+            // 11-22: the same toggle again on the spot where it ended its run resumes the style there.
+            if(marker!="`"&&LivePreviewAttached&&livePreview!=null&&livePreview.ResumeEndedStyle(marker)){ApplyPendingImeStyle();UpdateTools();handled=true;return;}
             handled=RunLiveCommand(delegate(TextDocument d,int s,int l){return MarkdownCommands.ToggleInline(d,s,l,marker);});
         });
         return parked||handled;
@@ -1854,7 +1907,18 @@ public partial class MainWindow {
     }
     bool LiveColor(Color? color){
         string css=color.HasValue?String.Format("#{0:X2}{1:X2}{2:X2}",color.Value.R,color.Value.G,color.Value.B):null;
-        return RunLiveCommand(delegate(TextDocument d,int s,int l){return MarkdownCommands.SetSpanColor(d,s,l,css);});
+        return RunLiveCommand(delegate(TextDocument d,int s,int l){
+            CommandResult result=MarkdownCommands.SetSpanColor(d,s,l,css);
+            if(result==null&&!color.HasValue&&TypingStyleArmed&&typingArmed!=null){
+                int removed=typingArmed.RemoveAll(delegate(ArmedPair pair){return String.Equals(ArmedSpanProperty(pair.Open),"color",StringComparison.Ordinal);});
+                if(removed>0){
+                    if(typingArmed.Count==0)ClearTypingStyle();
+                    else{typingOpen=CombinedTypingOpen();typingClose=CombinedTypingClose();ApplyPendingImeStyle();}
+                    UpdateTools();
+                }
+            }
+            return result;
+        });
     }
     bool LiveLink(){
         if(!LiveFormat)return false;
@@ -2043,13 +2107,17 @@ public partial class MainWindow {
         // on detach).
         HookLiveTableCut(area);
         /* ApplicationCommands.Paste in the basic view (menu, API) takes the same path as Ctrl+V: LivePaste, so the markers a selection cut off are restored and table cells paste alike. */
-        if(livePreview!=null&&Object.ReferenceEquals(source==null?null:source.TextArea,area))livePreview.HostPaste=delegate{return PasteClipboard(false);};
+        if(livePreview!=null&&Object.ReferenceEquals(source==null?null:source.TextArea,area)){
+            livePreview.HostPaste=delegate{return PasteClipboard(false);};
+            livePreview.HasArmedTypingStyle=delegate{return TypingStyleArmed;};
+        }
     }
     void UnhookLiveCodeMenu(SourceEditor owner){
         if(owner==null||owner.TextArea==null)return;
         owner.TextArea.PreviewMouseRightButtonDown-=LiveCodeMenuPointer;
         owner.TextArea.ContextMenuOpening-=LiveCodeMenuOpening;
         UnhookLiveTableCut(owner);
+        if(livePreview!=null)livePreview.HasArmedTypingStyle=null;
         if(Object.ReferenceEquals(owner.TextArea.ContextMenu,liveCodeMenu))owner.TextArea.ContextMenu=null;
         liveCodeMenu=null;
     }
@@ -2082,10 +2150,14 @@ public partial class MainWindow {
         // delete keys follow: the cut must not clear the header cells around it, and nothing goes
         // to the clipboard when no text may be removed.
         if(SelectionTouchesDelimiter()){e.Handled=true;return;}
+        CommandResult clear=null;
         var cells=SourceRowCells(start);
-        if(cells==null||!MarkdownTableCommands.SpansCellBoundary(source.Document,start,length,cells))return;
-        CommandResult clear=MarkdownTableCommands.ClearCellSelection(source.Document,start,length,cells);
+        if(cells!=null&&MarkdownTableCommands.SpansCellBoundary(source.Document,start,length,cells))
+            clear=MarkdownTableCommands.ClearCellSelection(source.Document,start,length,cells);
+        if(clear==null&&LivePreviewAttached)
+            clear=MarkdownTableCommands.ClearBoundarySelection(source.Document,start,length);
         if(clear==null)return;
+        if(clear.Edits.Count==0){e.Handled=true;source.Select(clear.SelectionStart,clear.SelectionLength);source.Focus();return;}
         e.Handled=true;
         var data=new System.Windows.DataObject();
         SourceCopying(source.TextArea,new System.Windows.DataObjectCopyingEventArgs(data,false));

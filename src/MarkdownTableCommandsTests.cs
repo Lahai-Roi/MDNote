@@ -344,9 +344,9 @@ internal static class MarkdownTableCommandsTests {
         };
     }
 
-    // Markdown.Cells feeds the basic view's table columns. A wrong split shows up as a wider
-    // header: a pipe inside a `code` span or after an even backslash run is cell text, not a
-    // column boundary, so the check reports the column count the print parser built.
+    // Markdown.Cells feeds the basic view's table columns. Under GFM, only an odd backslash run
+    // escapes a pipe (an unescaped pipe inside a `code` span still splits cells), so the check
+    // reports the column count the print parser built.
     static Func<TextDocument, int, string> BasicTableColumnsCheck() {
         return delegate(TextDocument document, int caret) {
             FlowDocument parsed = Markdown.Parse(document.Text, 16, "Malgun Gothic", System.Windows.Media.Brushes.Black, false, "");
@@ -699,15 +699,15 @@ internal static class MarkdownTableCommandsTests {
         AddCellSelection(cases, "paste over two rows keeps both rows",
             twoRows, 15, "Q",
             table + "| Q‸ |  |\n|  |  |");
-        // H1 inside a closed `code` span: the renderer's TablePipes skips span content and
-        // ParseInline draws it literally, so a pipe there is written raw (no visible "\").
-        // Anywhere else in the cell, including after an unclosed backtick, it is still escaped.
-        AddCellSelection(cases, "paste a pipe inside a code span stays raw",
+        // Under GFM, an unescaped pipe inside a `code` span still splits table cells, so pipes
+        // pasted inside a code span (or a pasted code span containing a pipe) are escaped as "\|"
+        // just like anywhere else in the cell.
+        AddCellSelection(cases, "paste a pipe inside a code span is escaped",
             table + "| `a‸b` | e |", 0, "|",
-            table + "| `a|‸b` | e |");
-        AddCellSelection(cases, "paste a code span with a pipe keeps the pipe raw",
+            table + "| `a\\|‸b` | e |");
+        AddCellSelection(cases, "paste a code span with a pipe escapes the pipe",
             table + "| c‸ | e |", 0, "`a|b`",
-            table + "| c`a|b`‸ | e |");
+            table + "| c`a\\|b`‸ | e |");
         AddCellSelection(cases, "paste a pipe after a code span is escaped",
             table + "| `a`‸ | e |", 0, "|",
             table + "| `a`\\|‸ | e |");
@@ -721,9 +721,9 @@ internal static class MarkdownTableCommandsTests {
         AddCellSelection(cases, "drop text with a line break and a pipe into a cell",
             table + "| c‸ | e |", 0, "x | y\r\nz",
             table + "| cx \\| y<br>z‸ | e |");
-        AddCellSelection(cases, "drop a pipe inside a code span stays raw across a line break",
+        AddCellSelection(cases, "drop a pipe inside a code span escapes the pipe across a line break",
             table + "| c‸ | e |", 0, "`a|b`\r\nc",
-            table + "| c`a|b`<br>c‸ | e |");
+            table + "| c`a\\|b`<br>c‸ | e |");
         // Whole-table selections are ordinary text (SelectionCoversWholeTables): the host's own
         // replacement takes those lines, so the cell command declines. A selection that covers
         // only part of the table - the header and its delimiter row included - stays a cell edit.
@@ -1336,7 +1336,7 @@ internal static class MarkdownTableCommandsTests {
         AddRich(cases, "live Tab over a multi-cell selection never edits", delegate(MainWindow window) {
             return window.TableMultiCellTabProbe();
         });
-        AddRich(cases, "live pipe typed inside a code span stays raw", delegate(MainWindow window) {
+        AddRich(cases, "live pipe typed inside a code span is escaped", delegate(MainWindow window) {
             return window.TableCodeSpanPipeTypingProbe();
         });
         AddRich(cases, "live delimiter row survives delete, paste and backspace", delegate(MainWindow window) {
@@ -1405,7 +1405,7 @@ internal static class MarkdownTableCommandsTests {
         AddHelper(cases, "cell index first", "| ‸a | b | c |", "0", CellIndexCheck());
         AddHelper(cases, "cell index before leading pipe", "‸| a | b |", "0", CellIndexCheck());
         AddHelper(cases, "cell index escaped pipe", "| a \\| x | ‸b |", "1", CellIndexCheck());
-        AddHelper(cases, "cell index code span pipe", "| `x|y` | ‸b |", "1", CellIndexCheck());
+        AddHelper(cases, "cell index code span pipe", "| `x|y` | ‸b |", "2", CellIndexCheck());
         AddHelper(cases, "cell index clamps to row cells", "| a | b |\n|---|---|\n| c |‸", "0", CellIndexCheck());
         AddHelper(cases, "three deletes at a cell end keep the row", "| a‸ | b |", "same", CellEndDeleteRepeatCheck());
         // The padding around a separator belongs to the cell before it: Delete there never takes
@@ -1445,13 +1445,16 @@ internal static class MarkdownTableCommandsTests {
         AddHelper(cases, "table indented by four spaces is still a table block",
             "- item\n    ‸| a | b |\n    | --- | --- |", "tables=1", BasicParseCheck());
 
-        // Markdown.Cells follows the live renderer (and MarkdownPlainText.Cells): a pipe inside a
-        // `code` span is cell text for as long as the same-length backtick run keeps it open, and
-        // a pipe after an EVEN backslash run is still the row's closing pipe (odd means escaped).
-        AddHelper(cases, "basic table keeps a pipe inside a code span",
-            "‸| `a|b` | c |\n| --- | --- |", "cols=2", BasicTableColumnsCheck());
-        AddHelper(cases, "basic table keeps a pipe inside a double backtick span",
-            "‸| ``a|b`` | c |\n| --- | --- |", "cols=2", BasicTableColumnsCheck());
+        // Under GFM, unescaped pipes inside a `code` span still split cells (only an odd backslash
+        // run escapes a pipe), so a header with a raw pipe inside a code span has 3 cells against
+        // a 2-column delimiter row and is not a table; a pipe after an EVEN backslash run is still
+        // the row's closing pipe.
+        AddHelper(cases, "basic table splits a raw pipe inside a code span",
+            "‸| `a|b` | c |\n| --- | --- |", "no-table", BasicTableColumnsCheck());
+        AddHelper(cases, "basic table splits a raw pipe inside a double backtick span",
+            "‸| ``a|b`` | c |\n| --- | --- |", "no-table", BasicTableColumnsCheck());
+        AddHelper(cases, "basic table keeps an escaped pipe inside a code span",
+            "‸| `a\\|b` | c |\n| --- | --- |", "cols=2", BasicTableColumnsCheck());
         AddHelper(cases, "basic table takes a pipe after two backslashes as the row end",
             "‸| h \\\\|\n| --- |", "cols=1", BasicTableColumnsCheck());
         AddHelper(cases, "basic table keeps an escaped pipe inside a cell",
@@ -1597,9 +1600,9 @@ public partial class MainWindow {
                 + ", expected=" + expectedStart + "+" + expectedLength + ")";
         return null;
     }
-    // H1 with a closed `code` span: a "|" typed inside the span is written raw (TablePipes
-    // skips span content and ParseInline draws it literally), while the same key elsewhere in
-    // the cell is still escaped. Each edit is one document update, so one undo takes it back.
+    // Under GFM, an unescaped "|" inside a `code` span still splits table cells, so a "|" typed
+    // inside the span is escaped as "\|" just like elsewhere in the cell. Each edit is one
+    // document update, so one undo takes it back.
     internal string TableCodeSpanPipeTypingProbe() {
         EnsureProbeEditSurface();
         if (!LivePreviewAttached || !LiveFormat) return "live surface did not attach (attached=" + LivePreviewAttached + ", live=" + LiveFormat + ")";
@@ -1611,14 +1614,14 @@ public partial class MainWindow {
         // Between the code span's "a" and "b": cells[0].Start points at the opening backtick.
         source.Select(header.Offset + info.Cells[0].Start + 2, 0); LongLineBench.Idle();
         source.TextArea.PerformTextInput("|"); LongLineBench.Idle();
-        string typed = "| `a|b` | c |\n| --- | --- |";
+        string typed = "| `a\\|b` | c |\n| --- | --- |";
         if (text != typed) return "a pipe typed inside a code span wrote \"" + Flat(text) + "\"";
         info = livePreview.Info(source.Document.GetLineByNumber(1));
         if (info.Cells == null || info.Cells.Count != 2) return "the typed pipe split the cell (" + (info.Cells == null ? "-1" : info.Cells.Count.ToString(CultureInfo.InvariantCulture)) + " cells)";
         DocumentLine typedLine = source.Document.GetLineByNumber(1);
-        if (source.CaretIndex != typedLine.Offset + info.Cells[0].Start + 3) return "the caret did not stay after the typed pipe (at " + source.CaretIndex + ")";
+        if (source.CaretIndex != typedLine.Offset + info.Cells[0].Start + 4) return "the caret did not stay after the typed pipe (at " + source.CaretIndex + ")";
         Undo(); LongLineBench.Idle();
-        if (text != table) return "undo did not take the raw pipe back: \"" + Flat(text) + "\"";
+        if (text != table) return "undo did not take the escaped pipe back: \"" + Flat(text) + "\"";
         // Outside the code span the key keeps the escape.
         string plain = "| ab | c |\n| --- | --- |";
         SetText(plain); LongLineBench.Idle();

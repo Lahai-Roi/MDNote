@@ -1180,15 +1180,15 @@ internal static class MarkdownStructuralInputProbe {
         AddNoEdits(cases, "tab selection from a paragraph into the last cell does not append",
             "«hello\n| a | b |\n| --- | --- |\n| c | d» |",
             "hello\n| a | b |\n| --- | --- |\n| c | d‸ |", TabKey(false));
-        // A cell's own pipe is text: an escaped "\|" and a pipe inside a `code` span are not
-        // separators for the renderer or MarkdownTableCommands, so Tab lands on the next real
-        // cell instead of on the rest of the same cell's text.
+        // Under GFM, an escaped "\|" is cell text (not a separator), so Tab lands on the next real
+        // cell; an unescaped pipe inside a `code` span still splits cells, so Tab lands on the
+        // split second cell.
         AddNoEdits(cases, "tab in a table skips an escaped pipe",
             "| a‸ \\| b | c |\n| --- | --- |\n| 1 | 2 |",
             "| a \\| b | «c» |\n| --- | --- |\n| 1 | 2 |", TabKey(false));
-        AddNoEdits(cases, "tab in a table skips a pipe inside a code span",
-            "| `x‸|y` | z |\n| --- | --- |\n| 1 | 2 |",
-            "| `x|y` | «z» |\n| --- | --- |\n| 1 | 2 |", TabKey(false));
+        AddNoEdits(cases, "tab in a table splits a raw pipe inside a code span",
+            "| `x‸|y` | z |\n| --- | --- | --- |\n| 1 | 2 | 3 |",
+            "| `x|«y`» | z |\n| --- | --- | --- |\n| 1 | 2 | 3 |", TabKey(false));
         // The delimiter row is structure, not a row: no cell move ever targets it, and a row's
         // trailing pipe leaves no phantom cell past its last real one. Shift+Tab from a body
         // row's first cell therefore reaches the last real header cell.

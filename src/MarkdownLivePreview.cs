@@ -248,6 +248,7 @@ internal static class LiveCompositionGeometry {
             if (!ImmGetCompositionFontW(context,out currentFont) || currentFont.Height!=font.Height ||
                 currentFont.Weight!=font.Weight || currentFont.Italic!=font.Italic || currentFont.Face!=font.Face) {
                 ImmSetCompositionFontW(context,ref font);NativeWrites++;
+                if (ImeTrace.Enabled) ImeTrace.Write("ime live font "+font.Face+"/"+font.Height);
             }
             if (!ImmGetCompositionWindow(context,out currentForm) || currentForm.Style!=form.Style ||
                 currentForm.X!=form.X || currentForm.Y!=form.Y || currentForm.Left!=form.Left || currentForm.Top!=form.Top ||
@@ -446,7 +447,44 @@ internal static partial class MarkdownLivePreview {
         for(int c=0;c<count;c++) {
             min[c]=Math.Max(padding*2+1,(c<minima.Length ? minima[c] : 0)+padding*2);
             want[c]=Math.Max(floor,(c<preferredWidths.Length ? preferredWidths[c] : 0)+padding*2);
+            // A minimum published ahead of its width (a typed key whose growth was not published)
+            // still bounds the column: want under min let every branch below allocate less than it.
+            if(want[c]<min[c]) want[c]=min[c];
             preferred+=want[c];minimum+=min[c];
+        }
+        // A minimum wider than its column floor (a long word, a key box, an unbroken URL) is paid
+        // only out of what is left once EVERY column keeps its floor (about eight Korean
+        // characters). When the wide minima do not all fit
+        // there, that remainder is shared by a level: the smaller extras are paid whole, the larger
+        // stop at a common cap and those tokens wrap by characters inside their own cell. Every step
+        // is continuous, so no key flips a column between "paid" and "wrapped" (Neon review 11-22:
+        // the earlier all-or-nothing payment snapped columns by 260 px on one key and, just before,
+        // left the Korean column one syllable wide).
+        if(wrap && preferred>available && count>0) {
+            // The reserve is the full floor for every column, the same floor `want` is raised to: a
+            // short column ("1") still takes up to the floor in the level below, so reserving only its
+            // content let the wide minimum take what then came out of the Korean column (54 px under
+            // its floor) and moved two columns on a key typed in the short one (Neon review 11-22).
+            var extra=new double[count];double reserve=0,extraTotal=0,extraMax=0;
+            for(int c=0;c<count;c++) {
+                reserve+=floor;
+                if(min[c]>floor) { extra[c]=min[c]-floor;extraTotal+=extra[c];if(extra[c]>extraMax) extraMax=extra[c]; }
+            }
+            double spare=Math.Max(0,available-.5-reserve);
+            if(extraTotal>spare) {
+                double low=0,high=extraMax;
+                for(int step=0;step<60;step++) {
+                    double level=(low+high)/2,sum=0;
+                    for(int c=0;c<count;c++) sum+=Math.Min(extra[c],level);
+                    if(sum>spare) high=level; else low=level;
+                }
+                preferred=0;minimum=0;
+                for(int c=0;c<count;c++) {
+                    if(extra[c]>low) min[c]-=extra[c]-low;
+                    if(want[c]<min[c]) want[c]=min[c];
+                    preferred+=want[c];minimum+=min[c];
+                }
+            }
         }
         if(preferred<=available) {
             // The content widths already fit: every column takes them (b52 behaviour).
@@ -456,33 +494,25 @@ internal static partial class MarkdownLivePreview {
             // when wrapping is off), as before.
             for(int c=0;c<count;c++) widths[c]=wrap ? Math.Max(padding*2+1,available/count) : min[c];
         } else {
-            // Browser auto layout. Short columns keep their one-line width first; only when
-            // the columns still unvisited could not pay their own minimum does a column take
-            // its minimum, and the columns that gave up slack then share what is left in
-            // proportion to it. The old equal-factor shrink (min + k*(want-min)) starved a
-            // short column: Korean may break between any two syllables, so a long column's
-            // minimum is tiny and it kept its slack, while a short column whose minimum sat
-            // close to its content width lost the few pixels that held its cell on one line.
-            int[] order=new int[count];
-            for(int c=0;c<count;c++) order[c]=c;
-            for(int c=1;c<count;c++) {
-                int index=order[c],probe=c;
-                while(probe>0 && want[order[probe-1]]>want[index]) { order[probe]=order[probe-1];probe--; }
-                order[probe]=index;
+            // Water level: every column fills up to one common level T, a short column stops at
+            // its one-line width and none goes under its own minimum; T is where the columns fill
+            // the view exactly. Short columns still keep their one line first (the reason the
+            // old equal-factor shrink min + k*(want-min) was dropped: Korean may break between
+            // any two syllables, so a long column's minimum is tiny and it kept its slack while a
+            // short column lost the pixels that held its cell on one line). The 2.5.1 short-first
+            // pass gave a column either its whole one-line width or its minimum, so one key that
+            // tipped that choice swapped two other columns by ~190 px while typing, and the slack
+            // shared in proportion to want-min let a long breakable URL leave Korean prose a
+            // syllable wide (11-22, probes table-word-cross-floor-3col / table-long-url-3col).
+            // The level is continuous in every width, so a key moves the columns a key's worth.
+            double low=0,high=0;
+            for(int c=0;c<count;c++) if(want[c]>high) high=want[c];
+            for(int step=0;step<60;step++) {
+                double level=(low+high)/2,sum=0;
+                for(int c=0;c<count;c++) sum+=Math.Min(want[c],Math.Max(min[c],level));
+                if(sum>available) high=level; else low=level;
             }
-            double given=0,unvisited=minimum;
-            for(int i=0;i<count;i++) {
-                int c=order[i];
-                if(want[c]<=available-given-unvisited) { widths[c]=want[c];given+=want[c]; }
-                else { widths[c]=min[c];given+=min[c]; }
-                unvisited-=min[c];
-            }
-            double slack=0;
-            for(int c=0;c<count;c++) if(widths[c]<want[c]) slack+=want[c]-min[c];
-            double left=available-given;
-            if(slack>.001) {
-                if(left>0) for(int c=0;c<count;c++) if(widths[c]<want[c]) widths[c]+=left*(want[c]-min[c])/slack;
-            } else if(left>0&&count>0) for(int c=0;c<count;c++) widths[c]+=left/count;
+            for(int c=0;c<count;c++) widths[c]=Math.Min(want[c],Math.Max(min[c],low));
         }
         // 0.01 px rounding on the running boundary, so the columns still meet exactly.
         for(int c=0;c<count;c++) {
@@ -1425,21 +1455,42 @@ internal static partial class MarkdownLivePreview {
     static bool HasTablePipe(string text) { return TablePipes(text, null); }
     static bool TablePipes(string text, List<int> pipes) {
         bool found = false;
-        int budget = text.Length * 3;
         for (int p = 0; p < text.Length; p++) {
             if (text[p] == '\\') { p++; continue; }
-            if (text[p] == '`') {
-                int run = 1;
-                while (p + run < text.Length && text[p + run] == '`') run++;
-                int close = FindCodeEnd(text, p + run, run, ref budget);
-                p = close >= 0 ? close + run - 1 : p + run - 1;
-            } else if (text[p] == '|') {
+            if (text[p] == '|') {
                 if (pipes == null) return true;
                 pipes.Add(p);
                 found = true;
             }
         }
         return found;
+    }
+    static bool IsInCodeSpan(string text, int index) {
+        if (text == null || index < 0 || index >= text.Length) return false;
+        int budget = text.Length * 3;
+        for (int p = 0; p < text.Length; p++) {
+            if (p > index) break;
+            if (text[p] == '\\') { p++; continue; }
+            if (text[p] == '`') {
+                int run = 1;
+                while (p + run < text.Length && text[p + run] == '`') run++;
+                int close = FindCodeEnd(text, p + run, run, ref budget);
+                if (close >= 0) {
+                    if (p + run <= index && index < close) return true;
+                    p = close + run - 1;
+                } else {
+                    p = p + run - 1;
+                }
+            }
+        }
+        return false;
+    }
+    internal static bool IsOnlySpaceBeforePipeAfterOddBackslash(string text, int cellEnd, int relative, int innerEnd) {
+        if (text == null || relative != innerEnd || relative - 1 != cellEnd || innerEnd < 0 || innerEnd >= text.Length) return false;
+        if (text[innerEnd] != '|') return false;
+        int count = 0;
+        for (int p = cellEnd - 1; p >= 0 && text[p] == '\\'; p--) count++;
+        return (count & 1) == 1;
     }
     internal static List<Cell> SplitCells(string text) {
         var pipes = new List<int>();
@@ -1451,10 +1502,44 @@ internal static partial class MarkdownLivePreview {
             int a = start, b = end;
             while (a < b && (text[a] == ' ' || text[a] == '\t')) a++;
             while (b > a && (text[b - 1] == ' ' || text[b - 1] == '\t')) b--;
-            if (a != b || (i > 0 && i < pipes.Count)) cells.Add(new Cell { Start=a, End=b });
+            if (a != b || (i > 0 && i < pipes.Count)) cells.Add(new Cell { Start=a, End=b, InnerStart=start, InnerEnd=end });
             start = end + 1;
         }
         return cells;
+    }
+    // Editable span [innerStart, innerEnd] of cell `index` (opening pipe + 1 to closing pipe or
+    // line end), falling back to [Start, End] when a Cell was constructed without SplitCells.
+    internal static void CellBounds(List<Cell> cells, int index, out int innerStart, out int innerEnd) {
+        Cell cell = cells[index];
+        if (cell.InnerEnd >= cell.End && cell.InnerStart <= cell.Start) {
+            innerStart = cell.InnerStart;
+            innerEnd = cell.InnerEnd;
+        } else {
+            innerStart = cell.Start;
+            innerEnd = cell.End;
+        }
+    }
+    // Index of the cell whose [InnerStart, InnerEnd] contains `relative`, or -1 outside cells.
+    internal static int OwningCellAt(List<Cell> cells, int relative) {
+        if (cells == null || cells.Count == 0) return -1;
+        for (int c = 0; c < cells.Count; c++) {
+            int innerStart, innerEnd;
+            CellBounds(cells, c, out innerStart, out innerEnd);
+            if (relative < innerStart) return -1;
+            if (relative <= innerEnd) return c;
+        }
+        return -1;
+    }
+    // Insertion/caret anchor of a cell when empty: one space in from its closing pipe when
+    // >= 2 padding characters exist ("|  |" -> middle), otherwise its trimmed Start/End.
+    internal static int CellCaretStart(Cell cell) {
+        if (cell.Start < cell.End) return cell.Start;
+        int innerStart = cell.InnerEnd >= cell.End && cell.InnerStart <= cell.Start ? cell.InnerStart : cell.Start;
+        return cell.End - innerStart >= 2 ? cell.End - 1 : cell.End;
+    }
+    internal static int CellEdge(Cell cell, bool start) {
+        if (cell.Start == cell.End) return CellCaretStart(cell);
+        return start ? cell.Start : cell.End;
     }
     // True when text[from..to) holds a column pipe ("\|" is an escaped one and does not count).
     static bool HasCellPipe(string text, int from, int to) {
@@ -1467,7 +1552,7 @@ internal static partial class MarkdownLivePreview {
     static void AddTableStops(LineInfo info) {
         if (info.Cells.Count == 0) { info.Hide(0, info.Text.Length); return; }
         // Consume pipe + adjacent padding in one run. This keeps generator ranges
-        // disjoint even for empty cells, and leaves escaped/code-span pipes alone.
+        // disjoint even for empty cells, and leaves escaped "\|" pipes alone.
         var stops = new List<Replacement>();
         Cell first = info.Cells[0];
         if (first.Start > 0) stops.Add(new Replacement { Start=0, Length=first.Start, Kind=ReplacementKind.Hidden });
@@ -1477,13 +1562,19 @@ internal static partial class MarkdownLivePreview {
         }
         int end = info.Cells[info.Cells.Count - 1].End;
         if (end < info.Text.Length) stops.Add(new Replacement { Start=end, Length=info.Text.Length - end, Kind=ReplacementKind.Hidden });
-        foreach (Replacement stop in stops) {
-            for (int i = info.Replacements.Count - 1; i >= 0; i--) {
-                Replacement old = info.Replacements[i];
-                if (old.Start < stop.Start + stop.Length && stop.Start < old.Start + old.Length) info.Replacements.RemoveAt(i);
-            }
-            info.Replacements.Add(stop);
+        SortReplacements(info);
+        var filtered = new List<Replacement>(info.Replacements.Count + stops.Count);
+        int s = 0;
+        for (int i = 0; i < info.Replacements.Count; i++) {
+            Replacement old = info.Replacements[i];
+            int oldEnd = old.Start + old.Length;
+            while (s < stops.Count && (stops[s].Length > 0 ? stops[s].Start + stops[s].Length <= old.Start : stops[s].Start < old.Start)) s++;
+            bool overlaps = s < stops.Count && old.Start < stops[s].Start + stops[s].Length && stops[s].Start < oldEnd;
+            if (!overlaps) filtered.Add(old);
         }
+        filtered.AddRange(stops);
+        info.Replacements.Clear();
+        info.Replacements.AddRange(filtered);
     }
 
     [Flags]
@@ -1523,7 +1614,7 @@ internal static partial class MarkdownLivePreview {
         internal double PadEm;
     }
     internal struct Cell {
-        internal int Start, End;
+        internal int Start, End, InnerStart, InnerEnd;
     }
     internal sealed class LinkPart {
         internal int Start, Length;
@@ -1624,7 +1715,9 @@ internal static partial class MarkdownLivePreview {
         // composition rebuilds the row. Set by the strut generator before the row is laid out.
         internal string ImeText, ImeKey;
         internal byte[] ImeAttrs;
-        internal int ImeCell = -1, ImeAt;
+        // ImeLead: spaces between ImeAt (the cell's trimmed end) and the caret, drawn before the string. LeadCell: the cell that draws
+        // ImeLead spaces with no composition (the caret after spaces typed at its end), -1 otherwise.
+        internal int ImeCell = -1, ImeAt, ImeLead, LeadCell = -1;
         // The line has no ">" of its own and continues the quote above it (lazy continuation).
         internal bool LazyQuote;
         // How many quote levels the lazily continued line sits in (the line above's marker count):
@@ -2279,7 +2372,9 @@ internal static partial class MarkdownLivePreview {
             Source=info.Text;SourceStart=cell.Start;SourceLength=cell.End-cell.Start;Plain=true;
             Default=previous.Default;Breaks=null;Pads=previous.Pads;PadClose=previous.PadClose;ContentWidth=previous.ContentWidth;
             int from=previous.SourceStart+previous.SourceLength;
-            Text=String.Concat(previous.Text,info.Text.Substring(from,appended));
+            string tail=info.Text.Substring(from,appended);
+            if (tail.IndexOf('\t')>=0) tail=tail.Replace('\t',' ');
+            Text=String.Concat(previous.Text,tail);
             Map=new int[Text.Length+1];
             Array.Copy(previous.Map,Map,previous.Text.Length);
             for (int p=0;p<appended;p++) Map[previous.Text.Length+p]=from+p;
@@ -2294,8 +2389,10 @@ internal static partial class MarkdownLivePreview {
         internal CellText(LineInfo info, Cell cell, Session session, bool raw, double contentWidth, string touch) : this(info,cell,session,raw,contentWidth,touch,false) { }
         // The text index range of the IME composition string drawn in this cell (ImeLength 0 = none). Its characters have no
         // source of their own: their Map entry is the caret's source offset, and the caret stop is AFTER them (TableProjection).
-        internal readonly int ImeStart, ImeLength;
-        internal bool IsIme(int index) { return ImeLength>0 && index>=ImeStart && index<ImeStart+ImeLength; }
+        // ImeLead: spaces drawn just before the string (LineInfo.ImeLead), mapped like it, so a composition after a space typed at the
+        // cell's end shows that space now instead of only once the syllable commits (11-22 user video: the wrap jumped on commit).
+        internal readonly int ImeStart, ImeLength, ImeLead;
+        internal bool IsIme(int index) { return (ImeLength>0 || ImeLead>0) && index>=ImeStart-ImeLead && index<ImeStart+ImeLength; }
         // withIme: this cell carries the composition string of info (info.ImeText at info.ImeAt); a composition cell is never Plain,
         // so the typing-path reuse of the previous row's text never copies a string that is gone.
         internal CellText(LineInfo info, Cell cell, Session session, bool raw, double contentWidth, string touch, bool withIme) {
@@ -2372,13 +2469,13 @@ internal static partial class MarkdownLivePreview {
                     if (keyChars[idx] && sourceShades[idx]==1) sourceShades[idx]=0;
                 }
             }
-            byte imeShade=0;
+            byte imeShade=0, imeLeadShade=0;
+            int imeStyleAt=!imeDone && session!=null ? session.TableImeStyleAt(info,info.ImeAt) : info.ImeAt;
             if (!imeDone && session!=null) {
-                int styleAt=session.TableImeStyleAt(info,info.ImeAt);
                 bool imeKey=false;
                 for (int i=0;i<info.Styles.Count;i++) {
                     StyledPart style=info.Styles[i];
-                    if (styleAt<style.Start || styleAt>style.Start+style.Length) continue;
+                    if (imeStyleAt<style.Start || imeStyleAt>style.Start+style.Length) continue;
                     bool code=(style.Style & Style.Code)!=0;
                     bool keyboard=(style.Style & Style.Keyboard)!=0;
                     bool highlight=(style.Style & Style.Highlight)!=0;
@@ -2393,10 +2490,12 @@ internal static partial class MarkdownLivePreview {
                     if (pending!=null) {
                         if (pending.Code && !imeKey) imeShade=1;
                         if (pending.Highlight) imeShade=2;
+                        if (pending.NoHighlight && imeShade==2) imeShade=0;
                     }
                 }
                 int csStart, csEnd;
                 if (imeShade!=0 && session.TableCloseSpaceShadeRange(info,info.ImeAt,out csStart,out csEnd)) {
+                    imeLeadShade=imeShade;
                     int from=Math.Max(cell.Start,csStart), to=Math.Min(cell.End,csEnd);
                     if (to>from) {
                         if (sourceShades==null) sourceShades=new byte[cell.End-cell.Start];
@@ -2410,7 +2509,10 @@ internal static partial class MarkdownLivePreview {
             for (int p=cell.Start;p<cell.End;) {
                 if (!imeDone && p>=info.ImeAt) {
                     imeDone=true;imeStart=text.Length;
-                    AppendIme(text,map,properties,info,p<cell.End ? sourceProperties[p-cell.Start] : Default,session);
+                    TextRunProperties midBasis=imeStyleAt!=info.ImeAt && imeStyleAt>cell.Start && imeStyleAt<=cell.End && imeStyleAt-1-cell.Start<sourceProperties.Length
+                        ? sourceProperties[imeStyleAt-1-cell.Start]
+                        : (properties.Count>0 ? properties[properties.Count-1] : (p<cell.End ? sourceProperties[p-cell.Start] : Default));
+                    AppendIme(text,map,properties,info,midBasis,session);
                     if (shades!=null) for (int i=0;i<ime.Length;i++) shades.Add(imeShade);
                 }
                 while (replacement<info.Replacements.Count && info.Replacements[replacement].Start+info.Replacements[replacement].Length<=p) replacement++;
@@ -2472,16 +2574,29 @@ internal static partial class MarkdownLivePreview {
                         }
                     }
                 }
-                text.Append(info.Text[p]); map.Add(p); properties.Add(sourceProperties[p-cell.Start]);
+                char ch=info.Text[p]=='\t' ? ' ' : info.Text[p];
+                text.Append(ch); map.Add(p); properties.Add(sourceProperties[p-cell.Start]);
                 if (shades!=null) shades.Add(sourceShades==null ? (byte)0 : sourceShades[p-cell.Start]);
                 p++;
             }
+            int imeLead=0;
             if (!imeDone) {
-                imeDone=true;imeStart=text.Length;
-                AppendIme(text,map,properties,info,Default,session);
+                imeDone=true;
+                TextRunProperties imeBasis=imeStyleAt!=info.ImeAt && imeStyleAt>cell.Start && imeStyleAt<=cell.End && imeStyleAt-1-cell.Start<sourceProperties.Length
+                    ? sourceProperties[imeStyleAt-1-cell.Start]
+                    : (properties.Count>0 ? properties[properties.Count-1] : Default);
+                // The caret stands after spaces the cell's trimmed end leaves out (ImeAt is the cell end): draw them before the string.
+                for (;imeLead<info.ImeLead;imeLead++) { text.Append(' '); map.Add(info.ImeAt); properties.Add(Default); if (shades!=null) shades.Add(imeLeadShade); }
+                imeStart=text.Length;
+                AppendIme(text,map,properties,info,imeBasis,session);
                 if (shades!=null) for (int i=0;i<ime.Length;i++) shades.Add(imeShade);
+            } else if (withIme && String.IsNullOrEmpty(ime) && info.LeadCell>=0) {
+                // No composition, the caret after spaces typed at the cell's end (LineInfo.LeadCell): the spaces alone, so it stands after them.
+                for (;imeLead<info.ImeLead;imeLead++) { text.Append(' '); map.Add(info.ImeAt); properties.Add(Default); if (shades!=null) shades.Add(0); }
+                imeStart=text.Length;
             }
-            if (!String.IsNullOrEmpty(ime)) { ImeStart=imeStart;ImeLength=ime.Length; }
+            if (!String.IsNullOrEmpty(ime)) { ImeStart=imeStart;ImeLength=ime.Length;ImeLead=imeLead; }
+            else if (imeLead>0) { ImeStart=imeStart;ImeLead=imeLead; }
             map.Add(cell.End); Text=text.ToString(); Map=map.ToArray(); Properties=properties.ToArray(); FormatEnd=Text.Length;
             if (shades!=null) Shades=shades.ToArray();
             if (breaks.Count>0) {
@@ -2513,8 +2628,7 @@ internal static partial class MarkdownLivePreview {
         // The composition string as cell text: every character maps to the caret's source offset (info.ImeAt), in the run
         // the text before it has (the armed pending style over it, ImeInlineStyle) with the composition underline; the
         // clause the IME targets gets the highlight, exactly as ImeInlineElement draws it on an ordinary line.
-        static void AppendIme(StringBuilder text,List<int> map,List<TextRunProperties> properties,LineInfo info,TextRunProperties next,Session session) {
-            TextRunProperties basis=properties.Count>0 ? properties[properties.Count-1] : next;
+        static void AppendIme(StringBuilder text,List<int> map,List<TextRunProperties> properties,LineInfo info,TextRunProperties basis,Session session) {
             basis=ImeInlineStyle.WithPending(session.Editor,basis);
             if (basis!=null && basis.BackgroundBrush!=null) {
                 var stripped=new VisualLineElementTextRunProperties(basis);
@@ -2728,11 +2842,12 @@ internal static partial class MarkdownLivePreview {
         internal readonly string MathKey;
         // LineInfo.ImeKey the row was built for (null = no composition string in a cell).
         internal readonly string ImeKey;
+        internal readonly int LeadCell, ImeLead;
         // Immutable once built, so a redraw of the same cached row reuses it instead of
         // rebuilding the O(line) source/reverse maps on every visual line construction.
         internal TableProjection Projection;
         internal RowLayout(LineInfo info, TableLayout table, Session session, bool raw) {
-            Source=info.Text;MathKey=info.MathTouchKey;ImeKey=info.ImeKey;RowLayout previous=info.Row;
+            Source=info.Text;MathKey=info.MathTouchKey;ImeKey=info.ImeKey;LeadCell=info.LeadCell;ImeLead=info.ImeLead;RowLayout previous=info.Row;
             Table=table; Version=table.Version; ViewWidth=session.View.ActualWidth; FormattingMode=session.FormatterMode;
             Indent=Math.Max(0,info.TableIndent);
             BaseWidth=Math.Max(1,session.RowWidth()-Indent);
@@ -2748,7 +2863,7 @@ internal static partial class MarkdownLivePreview {
                 Slices[c]=new List<CellSlice>();
                 if (c>=info.Cells.Count) continue;
                 Cell cell=info.Cells[c];CellText oldText=null;List<CellSlice> oldSlices=null;bool appended=false;
-                if (previous!=null && previous.Table==table && previous.Raw==raw && c<previous.Texts.Length && c!=info.ImeCell) {
+                if (previous!=null && previous.Table==table && previous.Raw==raw && c<previous.Texts.Length && c!=info.ImeCell && c!=info.LeadCell) {
                     oldText=previous.Texts[c];oldSlices=previous.Slices[c];
                     if (oldText!=null && oldText.Plain && Session.PlainCell(info,cell) &&
                         oldText.Default==session.CellDefaults[info.Header ? 1 : 0]) {
@@ -2768,7 +2883,7 @@ internal static partial class MarkdownLivePreview {
                         }
                     }
                 }
-                if (Texts[c]==null) Texts[c]=new CellText(info,cell,session,raw,Math.Max(1,Widths[c]-Padding*2-1),info.MathTouchKey,c==info.ImeCell);
+                if (Texts[c]==null) Texts[c]=new CellText(info,cell,session,raw,Math.Max(1,Widths[c]-Padding*2-1),info.MathTouchKey,c==info.ImeCell || c==info.LeadCell);
                 // Appending plain prose changes only the last wrap slice. Retain the
                 // already broken prefix rather than shaping 1..N syllables on each key.
                 // The prefix is only valid at the width it was shaped for: a resize, or a
@@ -2781,7 +2896,7 @@ internal static partial class MarkdownLivePreview {
                     Texts[c].Text.Length>oldText.Text.Length &&
                     String.CompareOrdinal(Texts[c].Text,0,oldText.Text,0,oldText.Text.Length)==0);
                 Slices[c]=session.FormatCell(info,cell,Texts[c],table,Math.Max(1,Widths[c]-Padding*2-1),
-                    !raw && !table.Dirty && !table.PendingRemeasure && c!=info.ImeCell,append ? oldSlices : null);
+                    !raw && !table.Dirty && !table.PendingRemeasure && c!=info.ImeCell && c!=info.LeadCell,append ? oldSlices : null);
                 PhysicalRows=Math.Max(PhysicalRows,Slices[c].Count);
             }
             PhysicalRows=Math.Max(1,PhysicalRows);
@@ -2816,6 +2931,7 @@ internal static partial class MarkdownLivePreview {
             Map.Capacity=Source.Length+row.PhysicalRows*2+8;
             Tokens.Capacity=row.PhysicalRows*4+8;
             SliceColumns=new List<int>[row.Texts.Length];
+            int imeSource=-1, imeColumn=-1;
             for (int r=0;r<row.PhysicalRows;r++) {
                 double height=0, baseline=0;
                 for (int c=0;c<row.Texts.Length;c++) if (r<row.Slices[c].Count) { CellSlice s=row.Slices[c][r]; height=Math.Max(height,s.Height); baseline=Math.Max(baseline,s.Baseline); }
@@ -2878,6 +2994,7 @@ internal static partial class MarkdownLivePreview {
                             int offset=text.Map[p];
                             if (text.IsPad(p)) { if (text.IsClosePad(p)) Set(offset,Map.Count); }
                             else if (!text.IsIme(p)) Set(offset,Map.Count);
+                            if (text.ImeLength>0 && p==text.ImeStart+text.ImeLength-1) { imeSource=offset; imeColumn=Map.Count; }
                             Map.Add(offset);Stop.Add(!text.IsPad(p));
                         }
                         // A slice ending on a cell <br> ends at the hidden tag's source
@@ -2907,6 +3024,7 @@ internal static partial class MarkdownLivePreview {
                         Add(new TableToken { Length=1, Width=advance },text.Map[slice.Start+slice.Length]);
                         advance=0;
                     }
+                    if (row.Raw && text!=null && r==row.Slices[c].Count-1 && c==row.Texts.Length-1 && info.Cells.Count>row.Texts.Length) Hidden(info.Cells[c].End,Source.Length,true);
                 }
                 // A row with fewer cells than the grid keeps its right edge, so the line end
                 // still lands at the table's last column instead of right after its text.
@@ -2919,18 +3037,33 @@ internal static partial class MarkdownLivePreview {
             // its last one), so that column carries the last CELL's end instead. A raw row
             // shows the pipes, so its end is a real source position and keeps its own stop.
             int lastStop=Source.Length;
-            if (!row.Raw && info.Cells!=null && info.Cells.Count>0) lastStop=info.Cells[info.Cells.Count-1].End;
+            if (!row.Raw && info.Cells!=null && info.Cells.Count>0 && row.Texts.Length>0) lastStop=info.Cells[Math.Min(info.Cells.Count,row.Texts.Length)-1].End;
+            if (!row.Raw && lastStop>=0 && lastStop<Reverse.Length && Reverse[lastStop]<0) {
+                Set(lastStop,Map.Count);
+                Add(new TableToken { Length=1, Width=0 },lastStop);
+            }
             Map.Add(lastStop);Stop.Add(true);
             Set(lastStop,Map.Count-1);
+            // 11-22 user (video 163733): a composition right before hidden markers ("**타|**" with
+            // Italic armed there) has no following column of its own offset, so the fill below
+            // handed that offset the next visible column and it stopped being a caret stop. The
+            // caret column AvalonEdit kept from before the composition then failed revalidation and
+            // the caret stepped in front of the bold text; the syllable and the armed style went
+            // there. The string's last column carries the offset itself, so it stays the stop.
+            if (imeSource>=0 && imeSource<Reverse.Length && Reverse[imeSource]<0) Reverse[imeSource]=imeColumn;
             // Hidden inline syntax maps to the next visible character in its own cell.
             int next=Map.Count-1;
             for (int p=Reverse.Length-1;p>=0;p--) { if (Reverse[p]<0) Reverse[p]=next; else next=Reverse[p]; }
+            if (!row.Raw && info.Cells!=null && info.Cells.Count>row.Texts.Length && lastStop>=0 && lastStop<Reverse.Length && Reverse[lastStop]>=0) {
+                int clampColumn=Reverse[lastStop];
+                for (int p=lastStop+1;p<Reverse.Length;p++) Reverse[p]=clampColumn;
+            }
             // A cell's padding -- the spaces between its text and the following pipe -- is that
             // cell's own: a caret stop inside it resolves to the cell's end column instead of the
             // neighbour's first column or a column past the pipe, so a space typed at the cell's
             // end draws where the text is. A raw row draws those characters as source and keeps
             // their own stops (Hidden above already mapped them).
-            if (!row.Raw && info.Cells!=null) for (int c=0;c<info.Cells.Count;c++) {
+            if (!row.Raw && info.Cells!=null) for (int c=0;c<info.Cells.Count && c<row.Texts.Length;c++) {
                 int from=info.Cells[c].End;
                 int to=c+1<info.Cells.Count ? info.Cells[c+1].Start : Source.Length;
                 if (from<0 || from>=Reverse.Length) continue;
@@ -2997,8 +3130,13 @@ internal static partial class MarkdownLivePreview {
         // cell's physical row; callers step offsets and ask for the canonical column.
         internal bool HasStop(int source) {
             if (source<0 || source>DocumentLength) return false;
+            if (Session.ClampEscapedPipe(projection.Source,source)!=source) return false;
             int at=projection.Reverse[source];
-            return at>=0 && at<=VisualLength && projection.Map[at]==source && projection.IsStop(at) && StopsAt(projection.Source,source,CaretPositioningMode.Normal);
+            if (at<0 || at>VisualLength || !projection.IsStop(at)) return false;
+            if (projection.Map[at]==source) return StopsAt(projection.Source,source,CaretPositioningMode.Normal);
+            if (source+1<=DocumentLength && projection.Map[at]==source+1 && Session.ClampEscapedPipe(projection.Source,source+1)!=source+1)
+                return StopsAt(projection.Source,source,CaretPositioningMode.Normal);
+            return false;
         }
         // The caret-stop rule TextUtilities.GetNextCaretPosition applies to every plain line:
         // never in the middle of a surrogate pair (TextUtilities.cs:331), and outside
@@ -3029,49 +3167,83 @@ internal static partial class MarkdownLivePreview {
                 if (source<from && HasStop(source)) return source;
             return -1;
         }
-        internal int NextWordStop(int from) {
-            for (int source=Math.Max(0,from);source<=DocumentLength;source++) {
-                if (source<=from || !HasStop(source)) continue;
-                if (source==0 || source==DocumentLength ||
-                    char.IsWhiteSpace(projection.Source[source-1])!=char.IsWhiteSpace(projection.Source[source])) return source;
+        enum WordClass { Space, Word, Symbol }
+        static WordClass ClassifyChar(char c) {
+            if (char.IsWhiteSpace(c)) return WordClass.Space;
+            if (char.IsLetterOrDigit(c) || c == '_') return WordClass.Word;
+            return WordClass.Symbol;
+        }
+        // Word step over what the cell actually draws (Row.Texts[cell]): hidden markers are
+        // transparent in basic view, raw markers count as symbol text in live view, and the
+        // cell's own start/end are hard boundaries. Returns the row-relative source offset, or
+        // -1 at the cell's boundary in that direction.
+        int CellWordStep(int cell, int from, LogicalDirection direction, CaretPositioningMode mode) {
+            if (Info.Cells == null || cell < 0 || cell >= Info.Cells.Count) return -1;
+            Cell range = Info.Cells[cell];
+            if (range.Start >= range.End) return -1;
+            CellText ct = Row != null && Row.Texts != null && cell < Row.Texts.Length ? Row.Texts[cell] : null;
+            if (ct == null || ct.Text == null || ct.Text.Length == 0 || ct.Map == null || ct.Map.Length <= ct.Text.Length) return -1;
+            string text = ct.Text;
+            int len = text.Length;
+            bool forward = direction == LogicalDirection.Forward;
+            if (forward && from >= range.End) return -1;
+            if (!forward && from <= ct.Map[0]) return -1;
+            int vis;
+            if (from <= ct.Map[0]) vis = 0;
+            else if (from >= ct.Map[len]) vis = len;
+            else {
+                vis = 0;
+                while (vis < len && ct.Map[vis] < from) vis++;
+            }
+            int step = forward ? 1 : -1;
+            for (int pos = vis + step; pos >= 0 && pos <= len; pos += step) {
+                if (pos < len && ct.IsPad(pos)) continue;
+                if (!StopsAt(text, pos, mode)) continue;
+                if (pos == 0 || pos == len) {
+                    int edgeOffset = ct.Map[pos];
+                    if (Session.ClampEscapedPipe(Info.Text, edgeOffset) != edgeOffset) edgeOffset--;
+                    if (forward ? edgeOffset > from : edgeOffset < from) return edgeOffset;
+                    continue;
+                }
+                int left = pos - 1;
+                while (left > 0 && (ct.IsPad(left) || IsCombiningMark(text, left))) left--;
+                if (ct.IsPad(left)) continue;
+                WordClass before = ClassifyChar(text[left]);
+                WordClass after = ClassifyChar(text[pos]);
+                bool stop;
+                if (mode == CaretPositioningMode.WordBorder || mode == CaretPositioningMode.WordBorderOrSymbol)
+                    stop = before != after;
+                else
+                    stop = before != after && (forward ? before != WordClass.Space : after != WordClass.Space);
+                if (!stop) continue;
+                int offset = ct.Map[pos];
+                if (Session.ClampEscapedPipe(Info.Text, offset) != offset) offset--;
+                if (forward ? offset > from : offset < from) return offset;
             }
             return -1;
+        }
+        internal int NextWordStop(int from) {
+            int cell = OwningCellAt(Info.Cells, from);
+            if (cell < 0) return -1;
+            return CellWordStep(cell, from, LogicalDirection.Forward, CaretPositioningMode.WordStart);
         }
         internal int PrevWordStop(int from) {
-            for (int source=Math.Min(DocumentLength,from);source>=0;source--) {
-                if (source>=from || !HasStop(source)) continue;
-                if (source==0 || source==DocumentLength ||
-                    char.IsWhiteSpace(projection.Source[source-1])!=char.IsWhiteSpace(projection.Source[source])) return source;
-            }
-            return -1;
+            int cell = OwningCellAt(Info.Cells, from);
+            if (cell < 0) return -1;
+            return CellWordStep(cell, from, LogicalDirection.Backward, CaretPositioningMode.WordStart);
         }
-        // The cell that owns an element-relative offset. A cell's own end belongs to that cell
-        // (before the next cell's '|'), and an empty cell owns its single offset, so a caret
-        // between two cells never lands on the hidden separator or in the neighbour.
+        // The cell that owns an element-relative offset across both text and padding.
         internal static int CellAt(LineInfo info,int relative) {
-            List<Cell> cells=info.Cells;
-            if (cells==null || cells.Count==0) return -1;
-            for (int c=0;c<cells.Count;c++) if (relative<=cells[c].End) return relative<cells[c].Start ? -1 : c;
-            return cells.Count-1;
+            if (info==null) return -1;
+            return OwningCellAt(info.Cells,relative);
         }
-        // Clamps an offset that sits past the row's own closing '|', which is where End used to
-        // land and where typing then created a new column. The padding between the last cell's
-        // text and that pipe is still INSIDE the row (a space typed there is the cell's own word
-        // gap) and now has a caret stop inside the cell, so it stays; positions before the
-        // leading '|' and the gaps between cells are real source positions on the caret's own row
-        // (which reveals its pipes), so they are left alone; in particular the header's column 0
-        // is what the "Enter above the table" rule matches on.
         internal static int Normalize(LineInfo info,int relative) {
             List<Cell> cells=info.Cells;
             if (cells==null || cells.Count==0) return relative;
-            Cell last=cells[cells.Count-1];
-            if (relative<=last.End) return relative;
-            // The row's last pipe is the closest one at or after the cell's text; only an offset
-            // past it is outside the row.
-            int pipe=-1;
-            for (int p=info.Text.Length-1;p>=last.End;p--) if (info.Text[p]=='|') { pipe=p;break; }
-            if (pipe<0 || relative<=pipe) return relative;
-            return last.End;
+            int lastInnerStart, lastInnerEnd;
+            CellBounds(cells, cells.Count-1, out lastInnerStart, out lastInnerEnd);
+            if (relative<=lastInnerEnd) return relative;
+            return CellEdge(cells[cells.Count-1], false);
         }
         // True when the offset is the end of a soft-wrapped slice that continues in the same
         // cell: the caret is drawn at this row's end but typing continues on the next row.
@@ -3262,18 +3434,37 @@ internal static partial class MarkdownLivePreview {
             // revalidation asks GetNext(vc-1, Forward) and expects vc back; skipping the
             // same-offset stop made it pick the neighbouring offset (caret one too far).
             int from=rel<0 ? 0 : rel>VisualLength ? DocumentLength : projection.Map[rel];
+            if (mode!=CaretPositioningMode.Normal && mode!=CaretPositioningMode.EveryCodepoint) {
+                if (Info.Cells==null || Info.Cells.Count==0) return -1;
+                int cell=OwningCellAt(Info.Cells,from);
+                if (cell<0) {
+                    int firstStart,firstEnd,lastStart,lastEnd;
+                    CellBounds(Info.Cells,0,out firstStart,out firstEnd);
+                    CellBounds(Info.Cells,Info.Cells.Count-1,out lastStart,out lastEnd);
+                    if (direction==LogicalDirection.Forward && from<firstStart) cell=0;
+                    else if (direction==LogicalDirection.Backward && from>lastEnd) cell=Info.Cells.Count-1;
+                    else return -1;
+                }
+                int targetSource=CellWordStep(cell,from,direction,mode);
+                if (targetSource<0 || targetSource>DocumentLength) return -1;
+                int at=projection.Reverse[targetSource];
+                if (at<0 || at>VisualLength || !projection.IsStop(at)) return -1;
+                bool matches=projection.Map[at]==targetSource ||
+                    (targetSource+1<=DocumentLength && projection.Map[at]==targetSource+1 &&
+                     Session.ClampEscapedPipe(projection.Source,targetSource+1)!=targetSource+1);
+                if (!matches) return -1;
+                if (direction==LogicalDirection.Forward ? at>rel : at<rel) return VisualColumn+at;
+                return -1;
+            }
             int stepOffset=direction==LogicalDirection.Forward ? 1 : -1;
             for(int source=from;source>=0 && source<=DocumentLength;source+=stepOffset) {
                 int at=projection.Reverse[source];
                 if (at<0 || at>VisualLength || projection.Map[at]!=source || !projection.IsStop(at))continue;
                 if (source==from && rel>=0 && rel<=VisualLength && (direction==LogicalDirection.Forward ? at<=rel : at>=rel))continue;
-                if (mode==CaretPositioningMode.Normal || mode==CaretPositioningMode.EveryCodepoint || source==0 || source==DocumentLength ||
-                    char.IsWhiteSpace(projection.Source[source-1])!=char.IsWhiteSpace(projection.Source[source])) {
-                    // Same whole code point / grapheme rule as every non-table line: the delete
-                    // and arrow paths ask this method for their next stop, so a refused offset
-                    // is skipped and the key takes one code point.
-                    if (StopsAt(projection.Source,source,mode)) return VisualColumn+at;
-                }
+                // Same whole code point / grapheme rule as every non-table line: the delete
+                // and arrow paths ask this method for their next stop, so a refused offset
+                // is skipped and the key takes one code point.
+                if (StopsAt(projection.Source,source,mode)) return VisualColumn+at;
             }
             return -1;
         }
@@ -3457,6 +3648,20 @@ internal static partial class MarkdownLivePreview {
         int closeWordCaret = -1;
         TextDocument closeWordDocument;
         ICSharpCode.AvalonEdit.Document.ITextSourceVersion closeWordVersion;
+        // 11-22 (VM, found with the user's Ctrl+B/Ctrl+I reports): a caret-only toggle on a run's inner
+        // closing edge ("**굵게|**" + Ctrl+B) steps past the closer and means "the style ends here". The
+        // closing-edge rule took the next character back inside the pair and the toolbar kept the button
+        // lit, so the toggle did nothing. While this mark holds (same document version, collapsed caret on
+        // the stepped spot) the toolbar shows that style off and the next character is written outside;
+        // the same toggle again resumes the style. Any edit or caret move ends it.
+        int closeEndCaret = -1;
+        readonly List<string> closeEndMarkers = new List<string>();
+        TextDocument closeEndDocument;
+        ICSharpCode.AvalonEdit.Document.ITextSourceVersion closeEndVersion;
+        bool closeSpacePaused;
+        int commitLandedCaret = -1;
+        TextDocument commitLandedDocument;
+        ICSharpCode.AvalonEdit.Document.ITextSourceVersion commitLandedVersion;
         System.Windows.Interop.HwndSource compositionSource;
         DispatcherOperation compositionWork,layoutWork,compositionReapply;
         bool compositionFrame;
@@ -4129,6 +4334,15 @@ internal static partial class MarkdownLivePreview {
             if (to > line.EndOffset) return false;
             LineInfo info = Info(line);
             int start = from - line.Offset, end = to - line.Offset;
+            if (start > 0 && start < line.Length && Document.GetCharAt(line.Offset + start) == '|' && Document.GetCharAt(line.Offset + start - 1) == '\\') {
+                foreach (Replacement run in info.Replacements) {
+                    if (run.Kind == ReplacementKind.Hidden && !run.Prefix && run.Length == 1 && run.Start == start - 1) {
+                        start--;
+                        from = line.Offset + start;
+                        break;
+                    }
+                }
+            }
             if (replacement.Length==0) {
                 // Empty inner pairs expose their enclosing pair in turn (**text** inside a span).
                 // Expand before planning edits so the outer tags disappear in the same rewrite.
@@ -4499,19 +4713,36 @@ internal static partial class MarkdownLivePreview {
         // anchor line at the same viewport position when a reveal above it changes height.
         void ApplyActiveChange() {
             if (disposed || scrolling || Editor.Document != Document) return;
+            if (commitLandedCaret >= 0) {
+                int landed = commitLandedCaret;
+                commitLandedCaret = -1;
+                bool validLand = Object.ReferenceEquals(Document, commitLandedDocument) &&
+                    Object.ReferenceEquals(Document.Version, commitLandedVersion) &&
+                    landed >= 0 && landed <= Document.TextLength;
+                commitLandedDocument = null; commitLandedVersion = null;
+                if (validLand && Editor.TextArea.Caret.Offset != landed) {
+                    Editor.TextArea.Caret.Offset = landed;
+                    return;
+                }
+            }
             // A caret/selection moved anywhere drops the closing-edge space: the next character may
             // only merge that space back in when it is typed exactly where the space left the
             // caret. (The typing that writes the space itself moves the caret before the state is
             // armed, so this never cancels a fresh one.)
             if (closeSpacePending && (!Editor.TextArea.Selection.IsEmpty || Editor.TextArea.Caret.Offset != closeSpaceCaret)) {
                 closeSpacePending = false;
+                closeSpacePaused = false;
                 // The toolbar read the caret before this ran (FormatAt checks the offset itself);
                 // a selection that kept the caret still needs the lit style taken back.
                 if (!Editor.TextArea.Selection.IsEmpty) Editor.NotifyToolsChanged();
             }
+            if (closeSpacePaused && (!Editor.TextArea.Selection.IsEmpty || Editor.TextArea.Caret.Offset != closeSpaceCaret)) closeSpacePaused = false;
             // The merged word's continuation mark follows the same rule: a caret that leaves the
             // spot it names ends the word's inside-the-pair run.
             if (closeWordCaret >= 0 && (!Editor.TextArea.Selection.IsEmpty || Editor.TextArea.Caret.Offset != closeWordCaret)) closeWordCaret = -1;
+            // The toggle's "style ended here" mark too (11-22 review: moving away and back to the same
+            // spot without an edit brought the ended style back).
+            if (closeEndCaret >= 0 && (!Editor.TextArea.Selection.IsEmpty || Editor.TextArea.Caret.Offset != closeEndCaret)) ClearStyleEnded();
             SnapHiddenCaret();
             // A selection change can move the moving endpoint into a row/escape without a
             // separate caret guard pass; the table rule also sees the just-made selection (H7).
@@ -4538,6 +4769,26 @@ internal static partial class MarkdownLivePreview {
                 (nextOffset == Document.TextLength || activeOffset == Document.TextLength);
             if (nextCaret == caretLine && nextStart == selectionStart && nextEnd == selectionEnd && !touchChanged && !endStopMoved) {
                 activeOffset = nextOffset;
+                if (nextCaret > 0 && Document != null && nextCaret <= Document.LineCount && String.IsNullOrEmpty(Editor.ImeCompositionText)) {
+                    DocumentLine line = Document.GetLineByNumber(nextCaret);
+                    LineInfo info = Info(line);
+                    if (info != null && info.Table && !info.Delimiter && info.Cells != null && info.Cells.Count > 0 && !Raw(line)) {
+                        int leadCell = -1, imeLead = 0;
+                        if (Editor.SelectionLength == 0 && nextOffset >= line.Offset && nextOffset <= line.EndOffset) {
+                            int at;
+                            int cell = ImeCellOf(info, nextOffset - line.Offset, out at);
+                            if (cell >= 0) {
+                                int spaces = ImeLeadOf(info.Text, at, nextOffset - line.Offset);
+                                if (spaces > 0) { leadCell = cell; imeLead = spaces; }
+                            }
+                        }
+                        if (leadCell != info.LeadCell || imeLead != info.ImeLead) {
+                            VisualLine visual = View.VisualLinesValid ? View.GetVisualLine(nextCaret) : null;
+                            View.Redraw(line);
+                            if (visual != null && !visual.IsDisposed) View.GetOrConstructVisualLine(line);
+                        }
+                    }
+                }
                 return;
             }
             int oldCaretLine = caretLine, oldStart = selectionStart, oldEnd = selectionEnd;
@@ -4829,13 +5080,15 @@ internal static partial class MarkdownLivePreview {
             VisualLine line=View.GetVisualLineFromVisualTop(documentPoint.Y);
             if (line==null || documentPoint.Y<line.VisualTop || documentPoint.Y>=line.VisualTop+line.Height) return false;
             LineInfo info=Info(line.FirstDocumentLine);RowLayout row=DrawnRow(line);
-            if (row==null || info.Cells==null || info.Cells.Count==0 || row.Boundaries==null || row.Boundaries.Length<info.Cells.Count+1) return false;
+            if (row==null || info.Cells==null || info.Cells.Count==0 || row.Texts==null || row.Boundaries==null) return false;
+            int drawnCells=Math.Min(info.Cells.Count,Math.Min(row.Texts.Length,row.Boundaries.Length-1));
+            if (drawnCells<=0) return false;
             if (documentPoint.X<row.Boundaries[0]) return false;
             // The row re-wrapped: its columns no longer name text lines, so leave the click to
             // the stock hit-test instead of placing the caret in a neighbour cell.
             if (!TableRowElement.RowAligned(line,row)) return false;
-            int cell=info.Cells.Count-1;
-            for (int c=0;c<info.Cells.Count;c++) if (documentPoint.X<row.Boundaries[c+1]) { cell=c;break; }
+            int cell=drawnCells-1;
+            for (int c=0;c<drawnCells;c++) if (documentPoint.X<row.Boundaries[c+1]) { cell=c;break; }
             // Right of the final column still belongs to that row's final cell.
             Cell range=info.Cells[cell];TableRowElement projection=null;
             foreach (VisualLineElement element in line.Elements) { projection=element as TableRowElement;if (projection!=null) break; }
@@ -4845,9 +5098,9 @@ internal static partial class MarkdownLivePreview {
             // resolve into the neighbour.
             double x=Math.Min(Math.Max(documentPoint.X,row.Boundaries[cell]),Math.Max(row.Boundaries[cell],row.Boundaries[cell+1]-0.5));
             Point cellPoint=new Point(x,documentPoint.Y);
-            int relative=documentPoint.X>=row.Boundaries[info.Cells.Count] ? range.End : projection.HitCell(line,row,cell,cellPoint);
-            relative=Math.Max(range.Start,Math.Min(range.End,relative));
-            offset=line.FirstDocumentLine.Offset+relative;
+            int relative=documentPoint.X>=row.Boundaries[drawnCells] ? CellEdge(range,false) : projection.HitCell(line,row,cell,cellPoint);
+            relative=range.Start==range.End ? CellCaretStart(range) : Math.Max(range.Start,Math.Min(range.End,relative));
+            offset=SnapEscapedPipeOffset(line.FirstDocumentLine.Offset+relative);
             return true;
         }
         void TableCaretDrag(object sender,MouseEventArgs e) {
@@ -4880,15 +5133,15 @@ internal static partial class MarkdownLivePreview {
         // drag mode and only keep the caret placed by the caller.
         internal bool BeginTablePressDrag(int anchor) {
             if (!Editor.TextArea.CaptureMouse()) return false;
-            tableDragAnchor=anchor;tableDragPointerGuard=true;return true;
+            tableDragAnchor=SnapEscapedPipeOffset(anchor);tableDragPointerGuard=true;return true;
         }
         internal bool TableDragActive { get { return tableDragAnchor>=0; } }
         internal bool WordDragActive { get { return wordDrag; } }
         // Probe seam: the drag half of a table press, without a real mouse.
-        internal void BeginTableDrag(int anchor) { tableDragAnchor=anchor;tableDragPointerGuard=false; }
+        internal void BeginTableDrag(int anchor) { tableDragAnchor=SnapEscapedPipeOffset(anchor);tableDragPointerGuard=false; }
         // Probe seam: a pointer-guarded drag without a real capture, so the autoscroll
         // stop conditions can be exercised on a machine with no button held.
-        internal void BeginTableDragWithPointerGuard(int anchor) { tableDragAnchor=anchor;tableDragPointerGuard=true; }
+        internal void BeginTableDragWithPointerGuard(int anchor) { tableDragAnchor=SnapEscapedPipeOffset(anchor);tableDragPointerGuard=true; }
         internal void EndTableDrag() {
             tableDragAnchor=-1;StopDragScroll();tableDragPointerGuard=false;
             if (Editor.TextArea.IsMouseCaptured) Editor.TextArea.ReleaseMouseCapture();
@@ -4898,7 +5151,7 @@ internal static partial class MarkdownLivePreview {
             if (!PlaceTableCaret(point,false)) {
                 var hit=View.GetPosition(point+View.ScrollOffset);
                 if (!hit.HasValue) return;
-                Editor.TextArea.Caret.Offset=Document.GetOffset(hit.Value.Location);
+                Editor.TextArea.Caret.Offset=SnapEscapedPipeOffset(Document.GetOffset(hit.Value.Location));
             }
             Editor.TextArea.Selection=ICSharpCode.AvalonEdit.Editing.Selection.Create(Editor.TextArea,anchor,Editor.CaretOffset);
         }
@@ -5238,18 +5491,16 @@ internal static partial class MarkdownLivePreview {
             // Home/End stay inside the caret's own cell (never after the row's trailing '|'),
             // which is what AvalonEdit would otherwise use: the hidden delimiter's end, or the
             // row's last column stop, both of which sit outside the cell's text.
+            int cellCount=row!=null && row.Row!=null && !row.Row.Raw && row.Row.Texts!=null && row.Row.Texts.Length>0 ? Math.Min(info.Cells.Count,row.Row.Texts.Length) : info.Cells.Count;
             int relative=caret.Offset-line.Offset;
-            int lastCellEnd=info.Cells[info.Cells.Count-1].End;
-            bool afterText=relative>lastCellEnd;
             int cell=TableRowElement.CellAt(info,relative);
-            if (cell<0||afterText) {
-                // The caret sits outside every cell's text: a revealed pipe, the padding around
-                // it, or the last row's line end. Home comes back to the row's first cell and
-                // End to its last one, in document order; never AvalonEdit's own line end.
-                cell=home ? 0 : info.Cells.Count-1;
+            if (cell<0 || cell>=cellCount) {
+                int lastInnerStart,lastInnerEnd;
+                CellBounds(info.Cells,cellCount-1,out lastInnerStart,out lastInnerEnd);
+                cell=relative>lastInnerEnd ? cellCount-1 : (home ? 0 : cellCount-1);
             }
             Cell range=info.Cells[cell];
-            int target=line.Offset+(home ? range.Start : range.End);
+            int target=line.Offset+CellEdge(range,home);
             // H7: the slot past the row's trailing pipe is not a caret stop, also on the last
             // row. End at the last cell stays at the cell's end; Enter there leaves the table
             // (MarkdownTableCommands.EnterOutsideTable reads that same position).
@@ -5338,47 +5589,66 @@ internal static partial class MarkdownLivePreview {
             VisualLine visual=View.GetOrConstructVisualLine(line);
             TableRowElement row=RowElement(visual);
             if (row==null || row.Info!=info) return;
+            int cellCount=row.Row!=null && !row.Row.Raw && row.Row.Texts!=null && row.Row.Texts.Length>0 ? Math.Min(info.Cells.Count,row.Row.Texts.Length) : info.Cells.Count;
             int relative=TableRowElement.Normalize(info,caret.Offset-line.Offset);
             if (relative!=caret.Offset-line.Offset) { caret.Offset=line.Offset+relative;relative=caret.Offset-line.Offset; }
             bool back=left||wordLeft||up;
             int cell=TableRowElement.CellAt(info,relative);
-            if (cell<0) {
-                // The caret sits on a revealed pipe or in the padding outside every cell's text
-                // (an undo, a drag or a click can leave it there). Never fall through to
-                // AvalonEdit's own movement: it steps the row-major visual columns and
-                // hit-tests the row by x, so a wrapped row walks into another cell's physical
-                // row. Move in document order instead - into the cell on the side the key
-                // moves towards, then inside that cell.
-                cell=GapCell(info.Cells,relative,back);
-                relative=Math.Max(info.Cells[cell].Start,Math.Min(info.Cells[cell].End,relative));
-            } else if (relative>info.Cells[cell].End) {
-                // The only position past a cell's own text is the table's LAST row at its line
-                // end (the spot the Enter rule uses there): a step starts from that cell's end,
-                // never from the pipe after it (Left used to jump over the whole cell).
-                relative=info.Cells[cell].End;
+            if (cell>=cellCount) {
+                cell=cellCount-1;
+                int tailEdge=CellEdge(info.Cells[cell],false);
+                if (left||right||wordLeft||wordRight) {
+                    ExtendOrMoveTable(caret,line.Offset+tailEdge,command);
+                    e.Handled=true;
+                    return;
+                }
+                relative=tailEdge;
+            } else if (cell<0) {
+                cell=GapCell(info.Cells,cellCount,relative,back);
+                int gapEdge=CellEdge(info.Cells[cell],!back);
+                if (left||right||wordLeft||wordRight) {
+                    ExtendOrMoveTable(caret,line.Offset+gapEdge,command);
+                    e.Handled=true;
+                    return;
+                }
+                relative=gapEdge;
             }
             Cell range=info.Cells[cell];
+            int innerStart,innerEnd;
+            CellBounds(info.Cells,cell,out innerStart,out innerEnd);
             int target=relative;
             if (left||right||wordLeft||wordRight) {
-                int step;
-                if (wordLeft) step=row.PrevWordStop(relative);
-                else if (wordRight) step=row.NextWordStop(relative);
-                else if (left) step=row.PrevStop(relative);
-                else step=row.NextStop(relative);
-                if (step>=range.Start && step<=range.End) target=step;
-                else if (right||wordRight) {
-                    // The cell boundary hops to the next cell's start; the row's last cell end
-                    // keeps the caret before the trailing '|'.
-                    if (cell+1<info.Cells.Count) target=info.Cells[cell+1].Start;
-                    else target=range.End;
+                if (range.Start==range.End) {
+                    if (right||wordRight) target=cell+1<cellCount ? CellEdge(info.Cells[cell+1],true) : CellEdge(range,false);
+                    else target=cell>0 ? CellEdge(info.Cells[cell-1],false) : CellEdge(range,true);
+                } else if ((left||right) && relative>range.End) {
+                    if (left) target=relative-1;
+                    else if (relative<innerEnd-1) target=relative+1;
+                    else target=cell+1<cellCount ? CellEdge(info.Cells[cell+1],true) : relative;
                 } else {
-                    if (cell>0) target=info.Cells[cell-1].End;
-                    else target=range.Start;
+                    int probe=relative;
+                    if (Options.HideMarkers && row.Row!=null && !row.Row.Raw && (right||wordRight)) {
+                        int leadEnd=LeadingHiddenEnd(info,range);
+                        if (relative<leadEnd) probe=leadEnd;
+                    }
+                    int step;
+                    if (wordLeft) step=row.PrevWordStop(relative);
+                    else if (wordRight) step=row.NextWordStop(probe);
+                    else if (left) step=row.PrevStop(relative);
+                    else step=row.NextStop(probe);
+                    if (step>=range.Start && step<=range.End) target=step;
+                    else if (right||wordRight) {
+                        if (cell+1<cellCount) target=CellEdge(info.Cells[cell+1],true);
+                        else target=CellEdge(range,false);
+                    } else {
+                        if (cell>0) target=CellEdge(info.Cells[cell-1],false);
+                        else target=CellEdge(range,true);
+                    }
                 }
             } else {
                 List<CellSlice> slices=row.Row.Slices!=null && cell<row.Row.Slices.Length ? row.Row.Slices[cell] : null;
                 if (slices==null || slices.Count==0) return;
-                int index=row.TextIndexOf(cell,relative);
+                int index=row.TextIndexOf(cell,Math.Max(range.Start,Math.Min(range.End,relative)));
                 int slice=index<0 ? (up ? 0 : slices.Count-1) : row.SliceOf(cell,index);
                 double desiredX=Double.NaN;
                 if (index>=0 && slice<slices.Count) desiredX=row.CellX(visual,cell,slice,index);
@@ -5442,14 +5712,14 @@ internal static partial class MarkdownLivePreview {
         // The cell a caret outside every cell's text belongs to when a key moves back (the cell
         // that ends before it) or forward (the cell that starts after it), both in document
         // order. A position before the first cell and after the last fall back to the edge cell.
-        static int GapCell(List<Cell> cells,int relative,bool back) {
+        static int GapCell(List<Cell> cells,int count,int relative,bool back) {
             if (back) {
                 int best=-1;
-                for (int c=0;c<cells.Count;c++) if (cells[c].End<=relative) best=c;
+                for (int c=0;c<count;c++) if (cells[c].End<=relative) best=c;
                 return best<0 ? 0 : best;
             }
-            for (int c=0;c<cells.Count;c++) if (cells[c].Start>=relative) return c;
-            return cells.Count-1;
+            for (int c=0;c<count;c++) if (cells[c].Start>=relative) return c;
+            return count-1;
         }
         void ExtendOrMoveTable(ICSharpCode.AvalonEdit.Editing.Caret caret,int offset,ICommand command) {
             offset=Math.Max(0,Math.Min(offset,Document.TextLength));
@@ -5476,13 +5746,16 @@ internal static partial class MarkdownLivePreview {
         // reaches, so one press still crosses one visible character. Touching runs pass whole
         // (each round follows the same zero-width rule), and a line with no earlier stop keeps the
         // engine's own step. Shift+Left extends from the same positions, so a selected range
-        // follows the caret. The live view's caret line is source, so only the no-reveal view
-        // takes part. The work is this line's own caret stops and elements, never a document scan.
+        // follows the caret. The live view's caret line is source, so hidden-run crossing only
+        // runs in the no-reveal view, while escaped-pipe unit crossing also runs in Live view.
+        // The work is this line's own caret stops and elements, never a document scan.
         void HiddenRunLeft(object sender,ExecutedRoutedEventArgs e) {
             if (disposed || e.Handled || e.Parameter!=null) return;
-            if (!Options.HideMarkers || Options.Busy || Editor.Document!=Document) return;
-            bool extend=e.Command==EditingCommands.SelectLeftByCharacter;
-            if (!extend && e.Command!=EditingCommands.MoveLeftByCharacter) return;
+            if (Options.Busy || Editor.Document!=Document) return;
+            bool charLeft=e.Command==EditingCommands.MoveLeftByCharacter || e.Command==EditingCommands.SelectLeftByCharacter;
+            bool wordLeft=e.Command==EditingCommands.MoveLeftByWord || e.Command==EditingCommands.SelectLeftByWord;
+            if (!charLeft && !wordLeft) return;
+            bool extend=e.Command==EditingCommands.SelectLeftByCharacter || e.Command==EditingCommands.SelectLeftByWord;
             var area=Editor.TextArea;
             if (area.Selection is ICSharpCode.AvalonEdit.Editing.RectangleSelection) return;
             var caret=area.Caret;
@@ -5493,10 +5766,13 @@ internal static partial class MarkdownLivePreview {
             // Only a caret standing on a hidden run's end can spend a press on its start; a plain
             // line answers from its (usually empty) marker list without touching the visual line.
             bool atRunEnd=false;
-            foreach (Replacement marker in info.Replacements) {
-                if (marker.Kind!=ReplacementKind.Hidden || marker.Length<=0) continue;
-                if (marker.Start+marker.Length==relative) { atRunEnd=true; break; }
+            if (Options.HideMarkers) {
+                foreach (Replacement marker in info.Replacements) {
+                    if (marker.Kind!=ReplacementKind.Hidden || marker.Length<=0) continue;
+                    if (marker.Start+marker.Length==relative) { atRunEnd=true; break; }
+                }
             }
+            if (!atRunEnd && relative>0 && SnapEscapedPipeOffset(caret.Offset-1)!=caret.Offset-1) atRunEnd=true;
             if (!atRunEnd) return;
             VisualLine visual=View.GetOrConstructVisualLine(line);
             if (visual==null || visual.IsDisposed) return;
@@ -5505,16 +5781,28 @@ internal static partial class MarkdownLivePreview {
             try { column=caret.VisualColumn; }
             catch (ArgumentOutOfRangeException) { return; }
             catch (InvalidOperationException) { return; }
+            CaretPositioningMode mode=wordLeft ? CaretPositioningMode.WordStart : CaretPositioningMode.Normal;
             int target=-1;
             bool dead=false;
+            bool crossedPipe=false;
             for (int round=0;round<8;round++) {
-                int stop=visual.GetNextCaretPosition(column,LogicalDirection.Backward,CaretPositioningMode.Normal,virtualSpace);
-                if (stop<0) break;
+                int stop=visual.GetNextCaretPosition(column,LogicalDirection.Backward,mode,virtualSpace);
+                if (stop<0) {
+                    if (crossedPipe && target>line.Offset && SnapEscapedPipeOffset(target)!=target) target--;
+                    break;
+                }
                 target=Document.GetOffset(visual.GetTextViewPosition(stop).Location);
+                if (SnapEscapedPipeOffset(target)!=target) {
+                    crossedPipe=true;
+                    dead=true;
+                    column=stop;
+                    continue;
+                }
+                if (crossedPipe) break;
                 // A run's start column draws the same spot as the end column the caret stood on,
                 // so that step spent the press; continue from the run's start and let the next
                 // round cross the visible character. Anything else is the visible stop.
-                if (!EndsHiddenRunAt(visual,stop,column)) break;
+                if (!Options.HideMarkers || !EndsHiddenRunAt(visual,stop,column)) break;
                 dead=true;
                 column=stop;
             }
@@ -5769,13 +6057,6 @@ internal static partial class MarkdownLivePreview {
             foreach (Cell cell in info.Cells) if (replacement.Start>=cell.Start && end<=cell.End) return true;
             return false;
         }
-        // True when the offset is exactly the end of one of the row's cells: typing there is
-        // text appended to the cell, not markup continuing a closing run (H10).
-        static bool AtCellEnd(LineInfo info,int relative) {
-            if (info.Cells==null) return false;
-            foreach (Cell cell in info.Cells) if (relative==cell.End) return true;
-            return false;
-        }
         // True when the offset sits in a cell's own trailing padding: after that cell's text,
         // before its following pipe, with nothing but spaces/tabs between. That run is the cell's
         // word gap (a space typed at the cell's end), so the caret stays; a pipe or the padding
@@ -5783,16 +6064,20 @@ internal static partial class MarkdownLivePreview {
         // the other pipe/padding positions matters: their columns are fillers, not caret stops,
         // and validation could walk a folded header's caret into its collapsed delimiter row.
         static bool InCellPadding(LineInfo info,int relative) {
-            foreach (Cell cell in info.Cells) {
-                if (relative<=cell.End) continue;
-                int p=cell.End;
-                while (p<info.Text.Length && (info.Text[p]==' ' || info.Text[p]=='\t')) p++;
-                if (p==cell.End) continue;
-                if (p<info.Text.Length && info.Text[p]=='|') { if (relative<p) return true; continue; }
-                // The last cell's padding runs to the line's end (the row has no closing pipe).
-                if (p==info.Text.Length) return true;
-            }
-            return false;
+            if (info==null || info.Cells==null) return false;
+            int cell=OwningCellAt(info.Cells,relative);
+            if (cell<0) return false;
+            Cell span=info.Cells[cell];
+            int innerStart,innerEnd;
+            CellBounds(info.Cells,cell,out innerStart,out innerEnd);
+            if (span.Start==span.End) return relative>innerStart && relative<innerEnd;
+            if (relative>innerStart && relative<span.Start) return true;
+            if (relative <= span.End || relative > innerEnd) return false;
+            if (relative < innerEnd) return true;
+            if (innerEnd >= info.Text.Length || info.Text[innerEnd] != '|') return false;
+            int bs = 0;
+            for (int q = span.End - 1; q >= innerStart && info.Text[q] == '\\'; q--) bs++;
+            return (bs & 1) == 1;
         }
         // The caret stop a padding-only cell that ends at `end` owns: one space in from the pipe
         // that closes it, the renderer's copy of MarkdownTableCommands.EmptyCellStop. -1 when no
@@ -5813,6 +6098,18 @@ internal static partial class MarkdownLivePreview {
             }
             return -1;
         }
+        internal int DrawnCellCount(DocumentLine line,LineInfo info) {
+            return DrawnCellCount(line, info, false);
+        }
+        internal int DrawnCellCount(DocumentLine line, LineInfo info, bool forTarget) {
+            if (info == null || info.Cells == null || info.Cells.Count == 0) return 0;
+            if (forTarget && Options != null && !Options.HideMarkers) return info.Cells.Count;
+            if (line != null && Raw(line)) return info.Cells.Count;
+            if (info.Row != null && info.Row.Texts != null && info.Row.Texts.Length > 0)
+                return Math.Min(info.Cells.Count, info.Row.Texts.Length);
+            TableLayout table = info.TableStart != null ? FindTable(info.TableStart) : null;
+            return table != null && table.Count > 0 ? Math.Min(info.Cells.Count, table.Count) : info.Cells.Count;
+        }
         void NormalizeTableCaret() {
             if (disposed || tableCaretGuarded || Options.Busy || Editor.Document != Document) return;
             var caret=Editor.TextArea.Caret;
@@ -5832,7 +6129,7 @@ internal static partial class MarkdownLivePreview {
                 // shape pays for the table scan; ordinary keystrokes end before it.
                 bool wholeTableEnd=relative==info.Text.Length&&Editor.SelectionLength>0&&
                     MarkdownTableCommands.SelectionCoversWholeTables(Document,Editor.SelectionStart,Editor.SelectionLength);
-                if (!wholeTableEnd) normalized=line.Offset+ClampTableRowOffset(info,relative);
+                if (!wholeTableEnd) normalized=line.Offset+ClampTableRowOffset(info,relative,DrawnCellCount(line,info));
             }
             normalized=SnapEscapedPipeOffset(normalized);
             if (normalized==offset) return;
@@ -5846,6 +6143,9 @@ internal static partial class MarkdownLivePreview {
         // offset past the deletion position made the next keystroke land elsewhere (the long
         // typing probe's bad inputs). A typed pipe there is still cell text (TablePipeTyping).
         static int ClampTableRowOffset(LineInfo info,int relative) {
+            return ClampTableRowOffset(info,relative,info!=null && info.Cells!=null ? info.Cells.Count : 0);
+        }
+        static int ClampTableRowOffset(LineInfo info,int relative,int maxCells) {
             List<Cell> cells=info.Cells;
             if (cells==null || cells.Count==0) return relative;
             if (relative<0) return 0;
@@ -5856,10 +6156,11 @@ internal static partial class MarkdownLivePreview {
             // `indent` is the row's leading pipe: only an offset in front of it (or on it) is
             // outside the first cell. Offsets after it, before the cell's text, are its padding.
             if (!indentStop && relative<=indent) return cells[0].Start;
-            Cell last=cells[cells.Count-1];
+            int count=Math.Max(1,Math.Min(cells.Count,maxCells));
+            Cell last=cells[count-1];
             if (relative>last.End) {
                 int pipe=-1;
-                for (int p=info.Text.Length-1;p>=last.End;p--) if (info.Text[p]=='|') { pipe=p;break; }
+                for (int p=last.End;p<info.Text.Length;p++) if (info.Text[p]=='|') { pipe=p;break; }
                 if (pipe>=0 && relative>pipe) relative=last.End;
             }
             // A padding-only cell's own end is the pipe that closes it, and a caret there types
@@ -5874,7 +6175,7 @@ internal static partial class MarkdownLivePreview {
         // H2: "\|" is one caret unit. A caret between the two characters moves after them on
         // every caret move, click and selection change; Backspace/Delete remove both in one step
         // (see TablePipeDelete). Only an odd run of backslashes escapes the pipe.
-        static int ClampEscapedPipe(string text,int relative) {
+        internal static int ClampEscapedPipe(string text,int relative) {
             if (text==null || relative<=0 || relative>=text.Length) return relative;
             if (text[relative-1]!='\\' || text[relative]!='|') return relative;
             int count=0;
@@ -5887,6 +6188,7 @@ internal static partial class MarkdownLivePreview {
             LineInfo info=Info(line);
             if (info.Code) return offset;
             int relative=offset-line.Offset;
+            if ((!info.Table || info.Delimiter) && IsInCodeSpan(info.Text,relative)) return offset;
             int snapped=ClampEscapedPipe(info.Text,relative);
             return snapped==relative ? offset : line.Offset+snapped;
         }
@@ -6038,24 +6340,8 @@ internal static partial class MarkdownLivePreview {
         // caret is inside a rendered cell). CellAt alone answers -1 for padding, which made a
         // "|" typed on a cell's padding a literal column.
         static int TypingCellAt(LineInfo info,int relative) {
-            List<Cell> cells=info.Cells;
-            if (cells==null || cells.Count==0) return -1;
-            var pipes=new List<int>();
-            TablePipes(info.Text,pipes);
-            // Cells and separator pipes are both in document order, so one forward index names
-            // each cell's following pipe; the previous pipe is the one before it.
-            int pipeIndex=0;
-            for (int c=0;c<cells.Count;c++) {
-                while (pipeIndex<pipes.Count && pipes[pipeIndex]<cells[c].End) pipeIndex++;
-                int nextPipe=pipeIndex<pipes.Count ? pipes[pipeIndex] : info.Text.Length;
-                int previousPipe=pipeIndex>0 && pipes[pipeIndex-1]<cells[c].Start ? pipes[pipeIndex-1] : -1;
-                if (relative>=cells[c].Start && relative<=cells[c].End) return c;
-                if (previousPipe>=0 && relative>previousPipe && relative<cells[c].Start) return c;
-                if (relative>cells[c].End && relative<nextPipe) return c;
-                // The last cell's padding runs to the line's end when the row has no closing pipe.
-                if (c==cells.Count-1 && nextPipe==info.Text.Length && relative==info.Text.Length) return c;
-            }
-            return -1;
+            if (info==null || info.Cells==null || info.Cells.Count==0) return -1;
+            return OwningCellAt(info.Cells,relative);
         }
         // A selection that spans more than one cell of a table row must not delete a '|'
         // delimiter: only each cell's selected interior text goes, in one undo group, and the
@@ -6103,6 +6389,9 @@ internal static partial class MarkdownLivePreview {
             DocumentLine line=Document.GetLineByNumber(first);
             LineInfo info=Info(line);
             if (!info.Table || info.Delimiter || info.Cells==null || info.Cells.Count==0) return false;
+            int rawFirstCell=TableRowElement.CellAt(info,segment.Offset-line.Offset);
+            int rawLastCell=TableRowElement.CellAt(info,segment.EndOffset-line.Offset);
+            if (rawFirstCell>=0 && rawFirstCell==rawLastCell) return false;
             int a=Math.Max(info.Cells[0].Start,segment.Offset-line.Offset);
             int b=Math.Min(info.Cells[info.Cells.Count-1].End,segment.EndOffset-line.Offset);
             if (b<=a) {
@@ -6116,12 +6405,57 @@ internal static partial class MarkdownLivePreview {
             int lastCell=TableRowElement.CellAt(info,b);
             if (firstCell<0) firstCell=0;
             if (lastCell<0) lastCell=info.Cells.Count-1;
-            if (firstCell==lastCell && b<=info.Cells[firstCell].End && a>=info.Cells[firstCell].Start) return false;
+            int rawStart=segment.Offset-line.Offset, rawEnd=segment.EndOffset-line.Offset;
+            if (firstCell==lastCell && TypingCellAt(info,rawStart)==firstCell && TypingCellAt(info,rawEnd)==lastCell) return false;
             start=line.Offset+a;end=line.Offset+b;text=Document.GetText(start,end-start);
             return true;
         }
         // Clears each selected cell's interior text and leaves the caret in the first one.
         // Returns the offset the follows the edit insert (or the caret for a pure delete).
+        struct CellEdit { internal int Start, Length; internal string Text; }
+        static void CollectRowCellRebalancedEdits(DocumentLine line,LineInfo info,List<MarkdownInlineSpans.Span> lineSpans,int from,int to,ref string pendingInsert,List<CellEdit> edits,ref int firstCaret) {
+            if (info==null || !info.Table || info.Delimiter || info.Cells==null || info.Text==null) return;
+            int baseOffset=line.Offset;
+            for (int c=0;c<info.Cells.Count;c++) {
+                Cell cell=info.Cells[c];
+                int a=Math.Max(cell.Start,from), b=Math.Min(cell.End,to);
+                if (a>=b) continue;
+                int wa=Math.Max(cell.Start,CellMarkerEdge(info,a,true));
+                int wb=Math.Min(cell.End,CellMarkerEdge(info,b,false));
+                if (wa>=wb) continue;
+                string cellInsert=string.Empty;
+                if (pendingInsert!=null && pendingInsert.Length>0 && pendingInsert.IndexOf('\r')<0 && pendingInsert.IndexOf('\n')<0) {
+                    cellInsert=pendingInsert;
+                    pendingInsert=null;
+                }
+                string cellText=info.Text.Substring(cell.Start,cell.End-cell.Start);
+                var cellSpans=new List<MarkdownInlineSpans.Span>();
+                if (lineSpans!=null) {
+                    for (int s=0;s<lineSpans.Count;s++) {
+                        MarkdownInlineSpans.Span sp=lineSpans[s];
+                        int spEnd=sp.CloseLen>0 ? sp.CloseStart+sp.CloseLen : sp.OpenStart+sp.OpenLen;
+                        if (sp.OpenStart<cell.Start || spEnd>cell.End) continue;
+                        sp.OpenStart-=cell.Start;
+                        if (sp.CloseStart>=0) sp.CloseStart-=cell.Start;
+                        cellSpans.Add(sp);
+                    }
+                }
+                int caretRel=0;
+                string rebalanced=cellSpans.Count>0
+                    ? MarkdownInlineSpans.Rebalance(cellSpans,cellText,wa-cell.Start,wb-cell.Start,cellInsert,out caretRel)
+                    : cellText.Substring(0,wa-cell.Start)+cellInsert+cellText.Substring(wb-cell.Start);
+                if (cellSpans.Count==0) caretRel=(wa-cell.Start)+cellInsert.Length;
+                int head=0, headMax=Math.Min(cellText.Length,rebalanced.Length);
+                while (head<headMax && rebalanced[head]==cellText[head]) head++;
+                int tail=0, tailMax=Math.Min(cellText.Length,rebalanced.Length)-head;
+                while (tail<tailMax && rebalanced[rebalanced.Length-1-tail]==cellText[cellText.Length-1-tail]) tail++;
+                int diffLen=cellText.Length-tail-head;
+                string diffText=rebalanced.Substring(head,rebalanced.Length-head-tail);
+                if (diffLen>0 || diffText.Length>0)
+                    edits.Add(new CellEdit { Start=baseOffset+cell.Start+head, Length=diffLen, Text=diffText });
+                if (firstCaret<0) firstCaret=baseOffset+cell.Start+caretRel;
+            }
+        }
         internal int ReplaceMultiCell(string insert) {
             return ReplaceMultiCell(insert,false);
         }
@@ -6130,19 +6464,16 @@ internal static partial class MarkdownLivePreview {
             if (!MultiCellSelection(out start,out end,out selected,throughRowNewline)) return -1;
             DocumentLine line=Document.GetLineByOffset(start);
             LineInfo info=Info(line);
-            int baseOffset=line.Offset;
-            var ranges=new List<Cell>();
-            for (int c=0;c<info.Cells.Count;c++) {
-                int a=Math.Max(info.Cells[c].Start,start-baseOffset);
-                int b=Math.Min(info.Cells[c].End,end-baseOffset);
-                if (a<b) ranges.Add(new Cell { Start=baseOffset+a, End=baseOffset+b });
-            }
-            if (ranges.Count==0) return -1;
-            int caret=ranges[0].Start;
+            string pendingInsert=insert;
+            var edits=new List<CellEdit>();
+            int caret=-1;
+            CollectRowCellRebalancedEdits(line,info,LineSpans(info),start-line.Offset,end-line.Offset,ref pendingInsert,edits,ref caret);
+            if (edits.Count==0 && caret<0) return -1;
+            if (caret<0) caret=start;
             Document.BeginUpdate();
             try {
-                for (int r=ranges.Count-1;r>=0;r--) Document.Remove(ranges[r].Start,ranges[r].End-ranges[r].Start);
-                if (insert!=null && insert.Length>0) { Document.Insert(caret,insert);caret+=insert.Length; }
+                for (int r=edits.Count-1;r>=0;r--) Document.Replace(edits[r].Start,edits[r].Length,edits[r].Text);
+                if (pendingInsert!=null && pendingInsert.Length>0) { Document.Insert(caret,pendingInsert);caret+=pendingInsert.Length; }
                 // The history group records the selection the update ended with, so the final caret
                 // and the collapsed selection go in before EndUpdate: the entry's TypedEnd then
                 // points at the caret and the next typed character joins the same step.
@@ -6179,6 +6510,7 @@ internal static partial class MarkdownLivePreview {
             string typed=CellTypedText(e.Text);
             int blockStart,blockEnd;string blockText;
             if (MultiCellSelectionBlock(out blockStart,out blockEnd,out blockText)) {
+                typed=MultiCellTypedText(e.Text,typed,blockStart,blockEnd,true);
                 int caret=ReplaceMultiCellBlock(typed,blockStart,blockEnd);
                 if (caret<0) caret=InsertTypedAtBlockEdge(typed,blockStart);
                 if (caret>=0) e.Handled=true;
@@ -6186,10 +6518,69 @@ internal static partial class MarkdownLivePreview {
             }
             int start,end;string selected;
             if (!MultiCellSelection(out start,out end,out selected)) return;
+            typed=MultiCellTypedText(e.Text,typed,start,end,false);
             int placed=ReplaceMultiCell(typed);
             if (placed<0) placed=InsertCellTextAtSelection(typed,start,start+ (end>start ? end-start : 0));
             if (placed<0) return;
             e.Handled=true;
+        }
+        string MultiCellTypedText(string rawText,string fallbackTyped,int rangeStart,int rangeEnd,bool multiLine) {
+            if (string.IsNullOrEmpty(rawText) || (rawText.IndexOf('|')<0 && !rawText.EndsWith("\\",StringComparison.Ordinal)))
+                return fallbackTyped;
+            DocumentLine first=Document.GetLineByOffset(Math.Min(rangeStart,Document.TextLength));
+            DocumentLine last=multiLine ? Document.GetLineByOffset(Math.Min(rangeEnd,Document.TextLength)) : first;
+            DocumentLine targetLine=null;
+            LineInfo targetInfo=null;
+            Cell targetCell=new Cell();
+            int insertRel=-1, deleteEndRel=-1;
+            for (DocumentLine line=first;line!=null;line=line.NextLine) {
+                LineInfo info=Info(line);
+                if (!info.Delimiter && info.Table && info.Cells!=null && info.Text!=null) {
+                    int from=line==first ? Math.Max(0,rangeStart-line.Offset) : 0;
+                    int to=line==last ? Math.Max(0,rangeEnd-line.Offset) : line.Length;
+                    for (int c=0;c<info.Cells.Count;c++) {
+                        Cell cell=info.Cells[c];
+                        int a=Math.Max(cell.Start,from), b=Math.Min(cell.End,to);
+                        if (a>=b) continue;
+                        int wa=Math.Max(cell.Start,CellMarkerEdge(info,a,true));
+                        int wb=Math.Min(cell.End,CellMarkerEdge(info,b,false));
+                        if (wa>=wb) continue;
+                        targetLine=line;targetInfo=info;targetCell=cell;insertRel=wa;deleteEndRel=wb;
+                        break;
+                    }
+                    if (targetLine!=null) break;
+                }
+                if (line==last) break;
+            }
+            if (targetLine==null) {
+                LineInfo firstInfo=Info(first);
+                if (firstInfo==null || !firstInfo.Table || firstInfo.Delimiter || firstInfo.Cells==null || firstInfo.Cells.Count==0 || firstInfo.Text==null)
+                    return fallbackTyped;
+                int rel=rangeStart-first.Offset;
+                int cell=TableRowElement.CellAt(firstInfo,rel);
+                if (cell<0) cell=0;
+                targetLine=first;targetInfo=firstInfo;targetCell=firstInfo.Cells[cell];
+                insertRel=targetCell.Start==targetCell.End ? CellCaretStart(targetCell) : Math.Max(targetCell.Start,Math.Min(targetCell.End,rel));
+                deleteEndRel=insertRel;
+            }
+            int selLen=Math.Max(0,deleteEndRel-insertRel);
+            string result=rawText.IndexOf('|')>=0
+                ? MarkdownTableCommands.CellInsertText(Document,targetLine.Offset+insertRel,selLen,rawText,targetInfo.Cells)
+                : rawText;
+            if (rawText.EndsWith("\\",StringComparison.Ordinal) && result.EndsWith("\\",StringComparison.Ordinal) &&
+                deleteEndRel==targetCell.End && targetCell.End<targetInfo.Text.Length && targetInfo.Text[targetCell.End]=='|') {
+                int pipe=targetCell.End;
+                int oldRun=0;
+                for (int q=pipe-1;q>=0 && targetInfo.Text[q]=='\\';q--) oldRun++;
+                int trailing=0;
+                for (int q=result.Length-1;q>=0 && result[q]=='\\';q--) trailing++;
+                int newRun=trailing;
+                if (trailing==result.Length) {
+                    for (int q=insertRel-1;q>=0 && targetInfo.Text[q]=='\\';q--) newRun++;
+                }
+                if (((oldRun ^ newRun) & 1)!=0) result+="\\";
+            }
+            return result;
         }
         // A block selection with no cell text (the row tail/delimiter start) is collapsed to the
         // nearest cell edge and the typed text goes there; no separator or newline is removed.
@@ -6200,7 +6591,8 @@ internal static partial class MarkdownLivePreview {
             int relative=offset-line.Offset;
             int cell=TableRowElement.CellAt(info,relative);
             if (cell<0) cell=0;
-            int at=line.Offset+Math.Max(info.Cells[cell].Start,Math.Min(info.Cells[cell].End,relative));
+            Cell targetCell=info.Cells[cell];
+            int at=line.Offset+(targetCell.Start==targetCell.End ? CellCaretStart(targetCell) : Math.Max(targetCell.Start,Math.Min(targetCell.End,relative)));
             tableCaretGuarded=true;
             try {
                 Editor.Select(at,0);
@@ -6223,7 +6615,8 @@ internal static partial class MarkdownLivePreview {
             int relative=selectionStart-line.Offset;
             int cell=TableRowElement.CellAt(info,relative);
             if (cell<0) cell=0;
-            int at=Math.Max(info.Cells[cell].Start,Math.Min(info.Cells[cell].End,relative));
+            Cell targetCell=info.Cells[cell];
+            int at=targetCell.Start==targetCell.End ? CellCaretStart(targetCell) : Math.Max(targetCell.Start,Math.Min(targetCell.End,relative));
             int start=selectionStart,end=selectionEnd;
             int length=Math.Max(0,Math.Min(end,Document.TextLength)-start);
             bool hasText=false;
@@ -6291,25 +6684,24 @@ internal static partial class MarkdownLivePreview {
             if (MarkdownTableCommands.SelectionCoversWholeTables(Document,start,end-start)) return -1;
             DocumentLine first=Document.GetLineByOffset(Math.Min(start,Document.TextLength));
             DocumentLine last=Document.GetLineByOffset(Math.Min(end,Document.TextLength));
-            var ranges=new List<Cell>();
+            var edits=new List<CellEdit>();
+            string pendingInsert=insert;
+            int caret=-1;
             for (DocumentLine line=first;line!=null;line=line.NextLine) {
                 LineInfo info=Info(line);
                 if (!info.Delimiter && info.Table && info.Cells!=null) {
                     int from=line==first ? Math.Max(0,start-line.Offset) : 0;
                     int to=line==last ? Math.Max(0,end-line.Offset) : line.Length;
-                    for (int c=0;c<info.Cells.Count;c++) {
-                        int a=Math.Max(info.Cells[c].Start,from), b=Math.Min(info.Cells[c].End,to);
-                        if (a<b) ranges.Add(new Cell { Start=line.Offset+a, End=line.Offset+b });
-                    }
+                    CollectRowCellRebalancedEdits(line,info,LineSpans(info),from,to,ref pendingInsert,edits,ref caret);
                 }
                 if (line==last) break;
             }
-            if (ranges.Count==0) return -1;
-            int caret=ranges[0].Start;
+            if (edits.Count==0 && caret<0) return -1;
+            if (caret<0) caret=start;
             Document.BeginUpdate();
             try {
-                for (int r=ranges.Count-1;r>=0;r--) Document.Remove(ranges[r].Start,ranges[r].End-ranges[r].Start);
-                if (insert!=null && insert.Length>0) { Document.Insert(caret,insert);caret+=insert.Length; }
+                for (int r=edits.Count-1;r>=0;r--) Document.Replace(edits[r].Start,edits[r].Length,edits[r].Text);
+                if (pendingInsert!=null && pendingInsert.Length>0) { Document.Insert(caret,pendingInsert);caret+=pendingInsert.Length; }
                 // Same as ReplaceMultiCell: the final caret belongs inside the update, or the group
                 // records the old selection start as its end and the next typed character cannot
                 // join this step.
@@ -6508,14 +6900,24 @@ internal static partial class MarkdownLivePreview {
             if (!MultiCellSelection(out start,out end,out selected,rowNewline)) {
                 // A selection that spans several rows of one table keeps its cell structure too
                 // (Backspace/Delete clear the selected cell text, never a separator pipe).
+                int blockStart,blockEnd;string blockText;
                 if (command!=ApplicationCommands.Paste) {
-                    int blockStart,blockEnd;string blockText;
                     if (MultiCellSelectionBlock(out blockStart,out blockEnd,out blockText) && ReplaceMultiCellBlock(null,blockStart,blockEnd)>=0) { e.Handled=true; return; }
                     // Header plus delimiter selected whole: neither rule above takes it (the
                     // block rule needs the selection to stop at the delimiter's start), yet the
                     // lines are a table selection. Clearing the cells is what the host's cut
                     // rule does, so Delete answers the same way here.
                     if (ClearTableSelectionCells()) e.Handled=true;
+                } else if (MultiCellSelectionBlock(out blockStart,out blockEnd,out blockText)) {
+                    string blockInsert;
+                    if (!ClipboardRetry.TryGetText(out blockInsert)) blockInsert=null;
+                    if (blockInsert==null) return;
+                    blockInsert=NormalizeInputNewline(blockInsert.Replace("\r\n","\n").Replace('\r','\n'));
+                    LineInfo blockInfo=Info(Document.GetLineByOffset(Math.Min(blockStart,Document.TextLength)));
+                    blockInsert=MarkdownTableCommands.CellInsertText(Document,blockStart,0,blockInsert,blockInfo.Cells);
+                    if (ReplaceMultiCellBlock(blockInsert,blockStart,blockEnd)<0 && !string.IsNullOrEmpty(blockInsert))
+                        InsertTypedAtBlockEdge(blockInsert,blockStart);
+                    e.Handled=true;
                 }
                 return;
             }
@@ -6524,8 +6926,11 @@ internal static partial class MarkdownLivePreview {
                 if (!ClipboardRetry.TryGetText(out insert)) insert=null;
                 if (insert==null) return;
                 insert=NormalizeInputNewline(insert.Replace("\r\n","\n").Replace('\r','\n'));
+                LineInfo startInfo=Info(Document.GetLineByOffset(Math.Min(start,Document.TextLength)));
+                insert=MarkdownTableCommands.CellInsertText(Document,start,0,insert,startInfo.Cells);
             }
-            ReplaceMultiCell(insert,rowNewline);
+            if (ReplaceMultiCell(insert,rowNewline)<0 && command==ApplicationCommands.Paste && !string.IsNullOrEmpty(insert))
+                InsertCellTextAtSelection(insert,start,end);
             e.Handled=true;
         }
         // With Settings.HideMarkers, unselected inline emphasis/code markers are transparent
@@ -6556,6 +6961,7 @@ internal static partial class MarkdownLivePreview {
             if (!Editor.TextArea.Selection.IsEmpty) {
                 if (!SelectionTouchesDelimiter() && FenceSelectionDelete(cut)) { e.Handled = true; return; }
                 if (SelectionBreaksFence()) { e.Handled = true; return; }
+                if ((backKey || forwardKey || cut) && TableCellSelectionPipeGuard(cut)) { e.Handled = true; return; }
             }
             // 11-04: Backspace on the only, empty line of a code block takes the block away.
             if (back && Editor.TextArea.Selection.IsEmpty && EmptyFenceBlockBackspace()) { e.Handled = true; return; }
@@ -6627,10 +7033,201 @@ internal static partial class MarkdownLivePreview {
             // Live view: the caret line is source, but a word delete that takes a pair's whole text
             // still takes the pair (the J4 rule above), so "a **굵게|** b" + Ctrl+Backspace never leaves "****".
             if (!cut && (wordBack || wordForward) && WordDeleteKeepsPair(wordBack)) { e.Handled = true; return; }
-            if (!Options.HideMarkers) { if (!cut && (wordBack || wordForward) && LiveWordEmptyPairDelete(wordBack)) e.Handled = true; return; }
+            if (!Options.HideMarkers) {
+                if (!cut && (wordBack || wordForward) && LiveWordEmptyPairDelete(wordBack)) { e.Handled = true; return; }
+                if (!cut && Editor.SelectionLength == 0 && LiveTableCellDelete(back, wordBack, wordForward)) { e.Handled = true; return; }
+                return;
+            }
             if (cut) return;
+            if (forwardKey && HiddenEscapeForwardDelete(wordForward)) { e.Handled = true; return; }
             if (wordBack || wordForward) { if (WordMarkerDelete(wordBack)) e.Handled = true; return; }
             if (HiddenTextDelete(back) || HiddenUnitDelete(back)) e.Handled = true;
+        }
+        bool TableCellSelectionPipeGuard(bool cut) {
+            if (disposed || Options.ReadOnly || Editor.IsReadOnly || Editor.Document != Document || Editor.TextArea.Selection.IsEmpty) return false;
+            ISegment segment = Editor.TextArea.Selection.SurroundingSegment;
+            if (segment == null || segment.Length <= 0) return false;
+            int start = segment.Offset, end = segment.EndOffset;
+            DocumentLine line = Document.GetLineByOffset(start);
+            if (end > line.EndOffset) return false;
+            LineInfo info = Info(line);
+            if (info == null || !info.Table || info.Delimiter || info.Code || info.Cells == null || info.Cells.Count == 0) return false;
+            if (info.Text == null || info.Text.Length != line.Length) return false;
+            int relStart = start - line.Offset, relEnd = end - line.Offset;
+            if (relStart < 0 || relEnd <= relStart || relEnd > info.Text.Length) return false;
+            int cell = OwningCellAt(info.Cells, relStart);
+            if (cell < 0 || cell != OwningCellAt(info.Cells, relEnd)) return false;
+            Cell span = info.Cells[cell];
+            int innerStart, innerEnd;
+            CellBounds(info.Cells, cell, out innerStart, out innerEnd);
+            bool closed = innerEnd < info.Text.Length && info.Text[innerEnd] == '|';
+            if (closed && relEnd == innerEnd && relEnd > span.End && relStart >= span.End) {
+                if (IsOnlySpaceBeforePipeAfterOddBackslash(info.Text, span.End, innerEnd, innerEnd)) {
+                    if (cut) Editor.Copy();
+                    int caret = Math.Max(0, Math.Min(line.Offset + relStart, Document.TextLength));
+                    Editor.TextArea.Caret.Offset = caret;
+                    Editor.TextArea.Selection = ICSharpCode.AvalonEdit.Editing.Selection.Create(Editor.TextArea, caret, caret);
+                    RevalidateCaretColumn(Editor.TextArea);
+                    SafeBringCaretToView(Editor.TextArea);
+                    return true;
+                }
+                if (relStart == span.End && innerEnd > span.End + 1) {
+                    int bs = 0;
+                    for (int q = span.End - 1; q >= innerStart && info.Text[q] == '\\'; q--) bs++;
+                    if ((bs & 1) == 1) {
+                        if (cut) Editor.Copy();
+                        relEnd = innerEnd - 1;
+                        bool guarded = tableCaretGuarded;
+                        tableCaretGuarded = true;
+                        try {
+                            using (Document.RunUpdate()) {
+                                Document.Remove(line.Offset + relStart, relEnd - relStart);
+                                int caret = Math.Max(0, Math.Min(line.Offset + relStart, Document.TextLength));
+                                Editor.TextArea.Caret.Offset = caret;
+                                Editor.TextArea.Selection = ICSharpCode.AvalonEdit.Editing.Selection.Create(Editor.TextArea, caret, caret);
+                            }
+                        } finally {
+                            tableCaretGuarded = guarded;
+                        }
+                        RevalidateCaretColumn(Editor.TextArea);
+                        SafeBringCaretToView(Editor.TextArea);
+                        return true;
+                    }
+                }
+            }
+            int p = relEnd;
+            while (p < info.Text.Length && info.Text[p] == '\\') p++;
+            if (p < info.Text.Length && info.Text[p] == '|') {
+                int oldRun = 0;
+                for (int q = p - 1; q >= 0 && info.Text[q] == '\\'; q--) oldRun++;
+                int newRun = p - relEnd;
+                for (int q = relStart - 1; q >= 0 && info.Text[q] == '\\'; q--) newRun++;
+                if (oldRun > 0 && ((oldRun ^ newRun) & 1) != 0) {
+                    if (cut) Editor.Copy();
+                    if (oldRun == 1 && relEnd == p && p + 1 <= innerEnd) {
+                        relEnd = p + 1;
+                    } else if (relStart > span.Start && info.Text[relStart - 1] == '\\') {
+                        relStart--;
+                    } else if (relEnd < p) {
+                        relEnd++;
+                    } else if (relEnd > relStart && info.Text[relEnd - 1] == '\\') {
+                        relEnd--;
+                    }
+                    if (relEnd > relStart) {
+                        bool guarded = tableCaretGuarded;
+                        tableCaretGuarded = true;
+                        try {
+                            using (Document.RunUpdate()) {
+                                Document.Remove(line.Offset + relStart, relEnd - relStart);
+                                int caret = Math.Max(0, Math.Min(line.Offset + relStart, Document.TextLength));
+                                Editor.TextArea.Caret.Offset = caret;
+                                Editor.TextArea.Selection = ICSharpCode.AvalonEdit.Editing.Selection.Create(Editor.TextArea, caret, caret);
+                            }
+                        } finally {
+                            tableCaretGuarded = guarded;
+                        }
+                        RevalidateCaretColumn(Editor.TextArea);
+                        SafeBringCaretToView(Editor.TextArea);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        bool HiddenEscapeForwardDelete(bool word) {
+            if (!Options.HideMarkers || Options.ReadOnly || Editor.IsReadOnly || Editor.Document != Document || !Editor.TextArea.Selection.IsEmpty) return false;
+            int offset = Editor.CaretOffset;
+            if (offset < 0 || offset > Document.TextLength) return false;
+            DocumentLine line = Document.GetLineByOffset(offset);
+            LineInfo info = Info(line);
+            if (info == null || info.Code || info.Delimiter || info.SetextUnderline > 0 || info.HtmlTagLine) return false;
+            if (info.Text == null || info.Text.Length != line.Length) return false;
+            int relative = offset - line.Offset;
+            int step;
+            try { step = word ? WordStepOffset(false, line) : WallStepOffset(false, line); }
+            catch (Exception) { return false; }
+            if (step <= offset || step > line.EndOffset) return false;
+            int stopRel = step - line.Offset;
+            int cut = -1;
+            foreach (Replacement marker in info.Replacements) {
+                if (marker.Kind != ReplacementKind.Hidden || marker.Length != 1 || marker.Prefix) continue;
+                if (marker.Start <= relative || marker.Start >= stopRel) continue;
+                if (info.Text[marker.Start] != '\\') continue;
+                if (cut < 0 || marker.Start < cut) cut = marker.Start;
+            }
+            if (cut <= relative || cut >= stopRel) return false;
+            foreach (Replacement marker in info.Replacements) {
+                if (marker.Length > 0 && marker.Start < cut && marker.Start + marker.Length > relative) return false;
+            }
+            using (Document.RunUpdate()) {
+                Document.Remove(offset, (line.Offset + cut) - offset);
+                Editor.TextArea.Caret.Offset = offset;
+            }
+            SafeBringCaretToView(Editor.TextArea);
+            return true;
+        }
+        bool LiveTableCellDelete(bool back,bool wordBack,bool wordForward) {
+            if (disposed || Options.HideMarkers || Editor.Document != Document || !Editor.TextArea.Selection.IsEmpty) return false;
+            int offset=Editor.CaretOffset;
+            if (offset<0 || offset>Document.TextLength) return false;
+            DocumentLine line=Document.GetLineByOffset(offset);
+            LineInfo info=Info(line);
+            if (info==null || info.Code || info.Delimiter || info.SetextUnderline>0 || !info.Table || info.Cells==null || info.Cells.Count==0) return false;
+            if (info.Text==null || info.Text.Length!=line.Length) return false;
+            bool word=wordBack || wordForward;
+            int step;
+            try { step=word ? WordStepOffset(wordBack,line) : WallStepOffset(back,line); }
+            catch (Exception) { return false; }
+            if (step<0 || step==offset) return false;
+            int start=Math.Min(offset,step)-line.Offset, end=Math.Max(offset,step)-line.Offset;
+            if (start<0 || end<=start || end>info.Text.Length) return false;
+            List<MarkdownInlineSpans.Span> spans=LineSpans(info);
+            if (!word) {
+                foreach (MarkdownInlineSpans.Span span in spans) {
+                    if (span.Kind==MarkdownInlineSpans.SpanKind.Atomic || span.OpenLen<=0 || span.CloseLen<=0) continue;
+                    if ((start<span.OpenStart+span.OpenLen && end>span.OpenStart) ||
+                        (start<span.CloseStart+span.CloseLen && end>span.CloseStart))
+                        return true;
+                }
+                return false;
+            }
+            int cellStart=CellMarkerEdge(info,start,true);
+            int cellEnd=CellMarkerEdge(info,end,false);
+            if (!InCellEdges(info,cellStart,cellEnd)) return false;
+            int owning=OwningCellAt(info.Cells,cellStart);
+            if (owning>=0 && wordForward) {
+                Cell cellSpan=info.Cells[owning];
+                int innerStart,innerEnd;
+                CellBounds(info.Cells,owning,out innerStart,out innerEnd);
+                bool closed=innerEnd<info.Text.Length && info.Text[innerEnd]=='|';
+                if (closed && cellEnd>cellSpan.End && cellEnd==innerEnd && innerEnd>cellSpan.End) {
+                    char beforePipe=info.Text[innerEnd-1];
+                    if (beforePipe==' ' || beforePipe=='\t') cellEnd=Math.Max(cellSpan.End,innerEnd-1);
+                }
+            }
+            if (cellEnd<=cellStart) return true;
+            if (spans.Count==0) return false;
+            bool touches=false;
+            foreach (MarkdownInlineSpans.Span span in spans) {
+                if (span.Kind==MarkdownInlineSpans.SpanKind.Atomic || span.OpenLen<=0 || span.CloseLen<=0) continue;
+                if ((cellStart<span.OpenStart+span.OpenLen && cellEnd>span.OpenStart) ||
+                    (cellStart<span.CloseStart+span.CloseLen && cellEnd>span.CloseStart)) { touches=true; break; }
+            }
+            if (!touches) return false;
+            int caretRelative;
+            string result=MarkdownInlineSpans.Rebalance(spans,info.Text,cellStart,cellEnd,string.Empty,out caretRelative);
+            if (result==null || result==info.Text) return true;
+            string text=info.Text;
+            int head=0, headMax=Math.Min(text.Length,result.Length);
+            while (head<headMax && result[head]==text[head]) head++;
+            int tail=0, tailMax=Math.Min(text.Length,result.Length)-head;
+            while (tail<tailMax && result[result.Length-1-tail]==text[text.Length-1-tail]) tail++;
+            using (Document.RunUpdate()) {
+                Document.Replace(line.Offset+head,text.Length-tail-head,result.Substring(head,result.Length-head-tail));
+                Editor.TextArea.Caret.Offset=Math.Max(0,Math.Min(line.Offset+caretRelative,Document.TextLength));
+            }
+            SafeBringCaretToView(Editor.TextArea);
+            return true;
         }
         // True when this empty Backspace/Delete would join a front matter delimiter line with its
         // neighbour (the delimiter would stop closing the box).
@@ -6740,7 +7337,24 @@ internal static partial class MarkdownLivePreview {
             if (info.Code) return false;
             string text=info.Text;
             int relative=offset-line.Offset;
-            int unit=EscapedPipeUnit(text,relative,back);
+            int probe=relative;
+            if (Options.HideMarkers && info.Replacements.Count>0 && text!=null && text.Length==line.Length) {
+                List<MarkdownInlineSpans.Span> spans=LineSpans(info);
+                if (back) {
+                    for (int i=info.Replacements.Count-1;i>=0;i--) {
+                        Replacement m=info.Replacements[i];
+                        if (m.Kind!=ReplacementKind.Hidden || m.Length<=0 || m.Prefix) continue;
+                        if (m.Start+m.Length==probe && (PairedMarker(spans,m) || CodePad(info,m))) probe=m.Start;
+                    }
+                } else {
+                    for (int i=0;i<info.Replacements.Count;i++) {
+                        Replacement m=info.Replacements[i];
+                        if (m.Kind!=ReplacementKind.Hidden || m.Length<=0 || m.Prefix) continue;
+                        if (m.Start==probe && (PairedMarker(spans,m) || CodePad(info,m))) probe=m.Start+m.Length;
+                    }
+                }
+            }
+            int unit=EscapedPipeUnit(text,probe,back,info.Table && !info.Delimiter);
             if (unit>=0) {
                 Document.BeginUpdate();
                 try {
@@ -6750,6 +7364,22 @@ internal static partial class MarkdownLivePreview {
                 return true;
             }
             if (!info.Table || info.Delimiter) return false;
+            int target=back ? relative-1 : relative;
+            if (text!=null && target>=0 && target<text.Length && text[target]=='\\') {
+                int runStart=target;
+                while (runStart>0 && text[runStart-1]=='\\') runStart--;
+                int runEnd=target+1;
+                while (runEnd<text.Length && text[runEnd]=='\\') runEnd++;
+                if (runEnd<text.Length && text[runEnd]=='|' && runEnd-runStart>=2) {
+                    int delStart=back ? Math.Max(runStart,target-1) : Math.Min(target,runEnd-2);
+                    Document.BeginUpdate();
+                    try {
+                        Document.Remove(line.Offset+delStart,2);
+                        Editor.TextArea.Caret.Offset=line.Offset+delStart;
+                    } finally { Document.EndUpdate(); }
+                    return true;
+                }
+            }
             // The row's own line break is structure too: Backspace at the row's start or
             // Delete at its end would join a row to its neighbour and drop the block's line.
             // There is no documented row merge (the table tool row removes a row whole), so
@@ -6761,8 +7391,9 @@ internal static partial class MarkdownLivePreview {
             if (next<0 || Math.Abs(next-offset)!=1) return false;
             int pipe=Math.Min(offset,next)-line.Offset;
             if (pipe<0 || pipe>=text.Length || text[pipe]!='|') return false;
-            // Only a pipe the renderer reads as a column separator is structure; a pipe inside
-            // an escaped pair or a code span is cell text and may be deleted.
+            // Only a pipe the renderer reads as a column separator is structure (under GFM, every
+            // unescaped pipe including inside a code span); an escaped "\|" pair is cell text and
+            // may be deleted.
             var pipes=new List<int>();
             TablePipes(text,pipes);
             return pipes.Contains(pipe);
@@ -6787,21 +7418,63 @@ internal static partial class MarkdownLivePreview {
                 if (back) return false;
                 cell=0;
             }
+            Cell span=info.Cells[cell];
+            int innerStart,innerEnd;
+            CellBounds(info.Cells,cell,out innerStart,out innerEnd);
+            if (span.Start==span.End) {
+                if (back && !Editor.ImeComposing) {
+                    int target=-1;
+                    if (offset-line.Offset>innerEnd) target=line.Offset+CellEdge(span,false);
+                    else if (cell>0) target=line.Offset+CellEdge(info.Cells[cell-1],false);
+                    if (target>=0) {
+                        Editor.TextArea.Caret.Offset=target;
+                        RevalidateCaretColumn(Editor.TextArea);
+                        SafeBringCaretToView(Editor.TextArea);
+                    }
+                }
+                return true;
+            }
+            if (!back && offset>=line.Offset+span.End) return true;
             int endOffset;
             try { endOffset=word ? WordStepOffset(back,line) : WallStepOffset(back,line); }
             catch (Exception) { return false; }
             if (endOffset<0) return false;
             int start=Math.Min(offset,endOffset),finish=Math.Max(offset,endOffset);
             if (finish<=start) return false;
-            Cell span=info.Cells[cell];
-            if (start>=line.Offset+span.Start && finish<=line.Offset+span.End) return false;
+            // Extra leading padding (>= 2 spaces after pipe): Backspace deletes one space instead of jumping cells.
+            if (back && !word && offset-line.Offset<=span.Start && offset-line.Offset>innerStart+1 &&
+                WhitespaceOnly(line.Offset+innerStart,offset)) {
+                Editor.TextArea.Selection=ICSharpCode.AvalonEdit.Editing.Selection.Create(Editor.TextArea,offset-1,offset);
+                Editor.TextArea.Selection.ReplaceSelectionWithText("");
+                SafeBringCaretToView(Editor.TextArea);
+                return true;
+            }
+            bool closed=innerEnd<info.Text.Length && info.Text[innerEnd]=='|';
+            int tailLimit=closed && innerEnd>span.End ? line.Offset+innerEnd-1 : line.Offset+innerEnd;
+            if (start>=line.Offset+span.Start &&
+                !(back && !word && start<line.Offset+span.End && finish>line.Offset+span.End) &&
+                (finish<=line.Offset+span.End ||
+                (finish<=(start<line.Offset+span.End && word ? line.Offset+innerEnd : tailLimit) && WhitespaceOnly(line.Offset+span.End,finish))))
+                return false;
             // A space typed after the cell text lies past the trimmed end: removing only that
-            // whitespace never reaches the closing pipe, so it stays the cell's own edit.
-            if (start>=line.Offset+span.End && WhitespaceOnly(start,finish)) return false;
+            // whitespace never reaches the closing pipe, so it stays the cell's own edit
+            // unless it would remove the required single trailing space before '|'.
+            if (start>=line.Offset+span.End && finish<=tailLimit && WhitespaceOnly(start,finish)) return false;
+            // The same space after a cell text that ends in hidden markup ("**굵게** |"): the visual
+            // step skips the hidden closer, so its range starts inside the text although the key
+            // only takes that space.
+            if (back && !word && offset-1>=line.Offset+span.End && offset<=line.Offset+innerEnd && WhitespaceOnly(line.Offset+span.End,offset)) {
+                if (IsOnlySpaceBeforePipeAfterOddBackslash(info.Text,span.End,offset-line.Offset,innerEnd)) return true;
+                if (Options.HideMarkers && closed && offset==line.Offset+innerEnd && offset-1==line.Offset+span.End) return true;
+                Editor.TextArea.Selection=ICSharpCode.AvalonEdit.Editing.Selection.Create(Editor.TextArea,offset-1,offset);
+                Editor.TextArea.Selection.ReplaceSelectionWithText("");
+                SafeBringCaretToView(Editor.TextArea);
+                return true;
+            }
             // Backspace at the cell's drawn start (a cell whose text opens with hidden markup)
             // is the structured rule's move to the previous cell's end, never a delete.
-            if (back && Options.HideMarkers && start<line.Offset+span.Start && LeadingHiddenRun(info,span,offset-line.Offset)) {
-                Editor.TextArea.Caret.Offset=cell>0 ? line.Offset+info.Cells[cell-1].End : line.Offset+span.Start;
+            if (back && !word && Options.HideMarkers && start<line.Offset+span.Start && LeadingHiddenRun(info,span,offset-line.Offset)) {
+                Editor.TextArea.Caret.Offset=cell>0 ? line.Offset+CellEdge(info.Cells[cell-1],false) : line.Offset+span.Start;
                 // This key may run from a caret notification or right before a measurement; a
                 // moved caret must leave a usable visual column behind.
                 RevalidateCaretColumn(Editor.TextArea);
@@ -6867,6 +7540,24 @@ internal static partial class MarkdownLivePreview {
             if (pos<0) return -1;
             return Document.GetOffset(nextLine.GetTextViewPosition(pos).Location);
         }
+        // The first offset of a cell's text past its own leading hidden markers ("**" of "**굵게**"):
+        // the visible start the reader sees. The cell's text start when the cell opens with text.
+        static int LeadingHiddenEnd(LineInfo info,Cell cell) {
+            int at=cell.Start;
+            while (at<cell.End) {
+                int next=-1;
+                foreach (Replacement marker in info.Replacements) {
+                    if (marker.Length<=0) continue;
+                    if (marker.Kind!=ReplacementKind.Hidden && marker.Kind!=ReplacementKind.Spacer) continue;
+                    if (at<marker.Start || at>=marker.Start+marker.Length) continue;
+                    next=marker.Start+marker.Length;
+                    break;
+                }
+                if (next<=at) break;
+                at=next;
+            }
+            return at;
+        }
         // True when every character from the cell's first source character up to the caret is the
         // cell's own hidden markup, so the caret is drawn at the cell's visible start.
         static bool LeadingHiddenRun(LineInfo info,Cell cell,int relative) {
@@ -6891,17 +7582,16 @@ internal static partial class MarkdownLivePreview {
         // in front of the first cell's text answers -1 (the row's own leading run, whose rules
         // stay with the structured keys).
         static int WallCellAt(List<Cell> cells,int relative) {
-            if (cells==null || cells.Count==0 || relative<cells[0].Start) return -1;
-            int cell=0;
-            for (int c=0;c<cells.Count;c++) {
-                if (relative<cells[c].Start) break;
-                cell=c;
-            }
-            return cell;
+            int cell=OwningCellAt(cells,relative);
+            if (cell>=0 || cells==null || cells.Count==0) return cell;
+            int innerStart,innerEnd;
+            CellBounds(cells,cells.Count-1,out innerStart,out innerEnd);
+            return relative>innerEnd ? cells.Count-1 : -1;
         }
         // The [start, start+2) span of the escaped-pipe unit adjacent to or containing the
         // caret, or -1. Only an odd run of backslashes escapes the pipe.
-        static int EscapedPipeUnit(string text,int relative,bool back) {
+        static int EscapedPipeUnit(string text,int relative,bool back,bool inTable) {
+            if (text==null) return -1;
             int unit=-1;
             if (relative>=1 && relative<text.Length && text[relative-1]=='\\' && text[relative]=='|') unit=relative-1;
             else if (back) {
@@ -6910,6 +7600,7 @@ internal static partial class MarkdownLivePreview {
                 if (relative+1<text.Length && text[relative]=='\\' && text[relative+1]=='|') unit=relative;
             }
             if (unit<0) return -1;
+            if (!inTable && IsInCodeSpan(text,unit+1)) return -1;
             int count=0;
             for (int p=unit;p>=0 && text[p]=='\\';p--) count++;
             return (count&1)==1 ? unit : -1;
@@ -7069,9 +7760,8 @@ internal static partial class MarkdownLivePreview {
         // Like InCellRange but the edges count: a marker run on a cell's edge is still the cell's own.
         static bool InCellEdges(LineInfo info,int start,int end) {
             if (info==null || info.Cells==null) return false;
-            foreach (Cell cell in info.Cells)
-                if (start>=cell.Start && end<=cell.End) return true;
-            return false;
+            int first=OwningCellAt(info.Cells,start);
+            return first>=0 && first==OwningCellAt(info.Cells,end);
         }
         // Ctrl+Backspace / Ctrl+Delete over hidden markers. The visual-line word range the vendor
         // command would take starts or ends on a zero-width run when the word touches a pair, so
@@ -7226,8 +7916,9 @@ internal static partial class MarkdownLivePreview {
             foreach (MarkdownInlineSpans.Span span in LineSpans(info)) {
                 if (span.Kind!=MarkdownInlineSpans.SpanKind.Emphasis && span.Kind!=MarkdownInlineSpans.SpanKind.Code) continue;
                 if (span.OpenStart<0 || span.CloseStart<0 || span.OpenLen<=0 || span.CloseLen<=0) continue;
-                if (span.OpenStart+span.OpenLen!=start || span.CloseStart!=end) continue;
-                Document.Remove(line.Offset+span.OpenStart,span.CloseStart+span.CloseLen-span.OpenStart);
+                int inner=span.OpenStart+span.OpenLen, outer=span.CloseStart+span.CloseLen;
+                if ((start!=inner && start!=span.OpenStart) || (end!=span.CloseStart && end!=outer)) continue;
+                Document.Remove(line.Offset+span.OpenStart,outer-span.OpenStart);
                 Editor.TextArea.Caret.Offset=line.Offset+span.OpenStart;
                 SafeBringCaretToView(Editor.TextArea);
                 return true;
@@ -7250,6 +7941,15 @@ internal static partial class MarkdownLivePreview {
             // An endpoint left inside a marker by an undo or an API-set offset takes that marker's
             // own edge first, exactly like the selection rules, so no half marker is deleted.
             start=Math.Min(start,WidenStart(start));
+            if (info.Table && !info.Code && start>line.Offset && Document.GetCharAt(start-1)=='\\') {
+                int relStart=start-line.Offset;
+                foreach (Replacement run in info.Replacements) {
+                    if (run.Kind==ReplacementKind.Hidden && run.Length==1 && !run.Prefix && run.Start==relStart-1) {
+                        start--;
+                        break;
+                    }
+                }
+            }
             end=Math.Max(end,WidenEnd(end));
             if (start<0) start=0;
             if (end>Document.TextLength) end=Document.TextLength;
@@ -7567,32 +8267,45 @@ internal static partial class MarkdownLivePreview {
             // character is already there, so only this one input needs the mark.
             int wordCaret = closeWordCaret;
             closeWordCaret = -1;
+            bool blank = BlankText(e.Text);
+            string endedMarker;
+            bool hasEnded = StyleEndedAt(offset, out endedMarker);
+            // A blank typed at a style-ended spot stays outside the pair.
+            if (blank && hasEnded) { closeSpaceArm = false; return; }
             bool continuingWord = wordCaret >= 0 && offset == wordCaret &&
                 Object.ReferenceEquals(Document, closeWordDocument) &&
                 Object.ReferenceEquals(Document.Version, closeWordVersion);
             DocumentLine line = Document.GetLineByOffset(offset);
             LineInfo info = Info(line);
             int relative = offset - line.Offset;
-            bool blank = BlankText(e.Text);
             // An arm from an earlier input that no TextEntered consumed is stale.
             closeSpaceArm = false;
-            // H10: a table cell's own end is its boundary. Typing there (a click at the cell's
-            // right edge lands on it) belongs after the cell's text, not inside a closing run
-            // that happens to end at the same source offset; the cell, not the pair, owns the spot.
-            if (info.Table && info.Cells != null && AtCellEnd(info, relative)) return;
-            int start, end;
-            if (HiddenCloseRun(info, relative, out start, out end)) {
-                // 11-05 user decision: a non-blank character typed anywhere on a closing run's edges
-                // takes the style the toolbar shows there. FormatAt/LiveDrawnSize read the whole
-                // stacked run as the pair's inside (HiddenCloseInside), so typing goes to the same
-                // spot (TypingInsideTarget): `**굵게**|` + X writes `**굵게X**`, with the enclosing
-                // size/colour tag kept, in the no-reveal view and on the revealed caret line alike.
-                // Inline code is the one style the toolbar does not light at the outer edge
-                // (LiveInlineCodeAt): on a revealed line the character stays after its closer.
+            int start, end, activeCount, splitPoint;
+            string reopen, reclose;
+            if (ClosingRunEditPlan(info, offset, relative, out start, out end, out activeCount, out splitPoint, out reopen, out reclose)) {
                 if (!blank) {
+                    if (activeCount == 0) return;
                     // On a revealed line the inner edge is already the spot, and a caret strictly
                     // inside a marker is the user editing the marker itself.
                     if (!Options.HideMarkers && (relative <= start || InsideCloserMarker(info, relative))) return;
+                    if (activeCount > 0) {
+                        ClearStyleEnded();
+                        int insertAt = line.Offset + splitPoint;
+                        string text = e.Text;
+                        if (info.Table && !info.Delimiter && text != null && text.IndexOf('|') >= 0) {
+                            text = MarkdownTableCommands.CellInsertText(Document, insertAt, 0, text, info.Cells);
+                        }
+                        string wrapped = reopen + text + reclose;
+                        int placed = insertAt + reopen.Length + text.Length;
+                        using (Document.RunUpdate()) {
+                            Document.Insert(insertAt, wrapped);
+                            Editor.TextArea.Caret.Offset = placed;
+                        }
+                        Editor.EndTypingRun();
+                        SafeBringCaretToView(Editor.TextArea);
+                        e.Handled = true;
+                        return;
+                    }
                     Editor.TextArea.Caret.Offset = line.Offset + TypingInsideTarget(info, start, end, relative, !Options.HideMarkers);
                     return;
                 }
@@ -7699,13 +8412,22 @@ internal static partial class MarkdownLivePreview {
             // Everything InsertCloseSpaceCommit checks, before the update is opened for the same
             // reason: a refused input must not leave an empty update behind.
             if (!CloseSpaceCommitReady(at, e.Text)) { closeSpacePending = false; return; }
+            if (HasArmedTypingStyle != null && HasArmedTypingStyle()) return;
             // Keep the moved space, inserted text AND final caret in the same history group.
             // On the revealed line the markers are real characters, so the caret belongs inside
             // the pair (right after the text); Basic draws the two edges on one spot and keeps
             // the existing outer-edge stop.
-            int placed = Options.HideMarkers ? at + e.Text.Length : closeSpaceStart + closeSpaceSpaces.Length + e.Text.Length;
+            string text = e.Text;
+            if (text.IndexOf('|') >= 0) {
+                DocumentLine line = Document.GetLineByOffset(at);
+                LineInfo info = Info(line);
+                if (info != null && info.Table && !info.Delimiter) {
+                    text = MarkdownTableCommands.CellInsertText(Document, at, 0, text, info.Cells);
+                }
+            }
+            int placed = Options.HideMarkers ? at + text.Length : closeSpaceStart + closeSpaceSpaces.Length + text.Length;
             using (Document.RunUpdate()) {
-                if (!InsertCloseSpaceCommit(at, e.Text)) return;
+                if (!InsertCloseSpaceCommit(at, text)) return;
                 Editor.TextArea.Caret.Offset = placed;
             }
             Editor.EndTypingRun();
@@ -7740,6 +8462,193 @@ internal static partial class MarkdownLivePreview {
         // ends, the space stays outside the run and the next character lands after it. Only a
         // toggle for one of the run's own closing markers is taken (an italic toggle does not
         // consume a bold run, whose "**" is a single marker of its own).
+        bool EndedCloseStateValid(int offset) {
+            if (closeEndCaret < 0 || offset != closeEndCaret || closeEndMarkers.Count == 0) return false;
+            if (disposed || Editor.Document != Document || !Object.ReferenceEquals(Document, closeEndDocument) ||
+                !Object.ReferenceEquals(Document.Version, closeEndVersion)) {
+                ClearStyleEnded();
+                return false;
+            }
+            if (!Editor.TextArea.Selection.IsEmpty || Editor.TextArea.Caret.Offset != closeEndCaret) return false;
+            return true;
+        }
+        void ClearStyleEnded() {
+            closeEndCaret = -1;
+            closeEndMarkers.Clear();
+            closeEndDocument = null;
+            closeEndVersion = null;
+            closeSpacePaused = false;
+        }
+        static bool SpanMatchesEndedMarker(MarkdownInlineSpans.Span span, string ended) {
+            if (String.IsNullOrEmpty(ended)) return false;
+            if (String.Equals(span.CloseText, ended, StringComparison.Ordinal)) return true;
+            if (span.Kind == MarkdownInlineSpans.SpanKind.Tag) {
+                if (String.Equals(span.CloseText, ended, StringComparison.OrdinalIgnoreCase)) return true;
+                if (String.Equals(ended, "font-size", StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(ended, "size", StringComparison.OrdinalIgnoreCase)) {
+                    return span.OpenText != null && span.OpenText.IndexOf("font-size", StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+                if (String.Equals(ended, "color", StringComparison.OrdinalIgnoreCase)) {
+                    return span.OpenText != null &&
+                        (span.OpenText.IndexOf("color:", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         span.OpenText.IndexOf("color ", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         span.OpenText.IndexOf("<font", StringComparison.OrdinalIgnoreCase) >= 0);
+                }
+            }
+            return false;
+        }
+        static List<MarkdownInlineSpans.Span> ClosingRunSpans(LineInfo info, int start, int end) {
+            var closers = new List<MarkdownInlineSpans.Span>();
+            foreach (MarkdownInlineSpans.Span span in LineSpans(info)) {
+                if (span.Kind == MarkdownInlineSpans.SpanKind.Atomic || span.CloseLen <= 0) continue;
+                if (span.CloseStart < start || span.CloseStart + span.CloseLen > end) continue;
+                closers.Add(span);
+            }
+            closers.Sort(delegate(MarkdownInlineSpans.Span a, MarkdownInlineSpans.Span b) {
+                return a.CloseStart.CompareTo(b.CloseStart);
+            });
+            return closers;
+        }
+        bool AllClosingRunEnded(LineInfo info, int offset, int start, int end) {
+            if (!EndedCloseStateValid(offset)) return false;
+            List<MarkdownInlineSpans.Span> closers = ClosingRunSpans(info, start, end);
+            if (closers.Count == 0) return true;
+            for (int i = 0; i < closers.Count; i++) {
+                bool ended = false;
+                for (int m = 0; m < closeEndMarkers.Count; m++) {
+                    if (SpanMatchesEndedMarker(closers[i], closeEndMarkers[m])) { ended = true; break; }
+                }
+                if (!ended) return false;
+            }
+            return true;
+        }
+        bool ClosingRunEditPlan(LineInfo info, int offset, int relative, out int start, out int end, out int activeCount, out int splitPoint, out string reopen, out string reclose) {
+            activeCount = -1;
+            splitPoint = -1;
+            reopen = string.Empty;
+            reclose = string.Empty;
+            if (!HiddenCloseRun(info, relative, out start, out end)) return false;
+            if (!EndedCloseStateValid(offset)) return true;
+            List<MarkdownInlineSpans.Span> closers = ClosingRunSpans(info, start, end);
+            if (closers.Count == 0) { activeCount = 0; return true; }
+            bool[] ended = new bool[closers.Count];
+            activeCount = 0;
+            for (int i = 0; i < closers.Count; i++) {
+                bool isEnded = false;
+                for (int m = 0; m < closeEndMarkers.Count; m++) {
+                    if (SpanMatchesEndedMarker(closers[i], closeEndMarkers[m])) { isEnded = true; break; }
+                }
+                if (!isEnded && !Options.HideMarkers && relative == end && closers[i].Kind == MarkdownInlineSpans.SpanKind.Code)
+                    isEnded = true;
+                ended[i] = isEnded;
+                if (!isEnded) activeCount++;
+            }
+            if (activeCount == 0) return true;
+            for (int i = 0; i + 1 < closers.Count; i++) {
+                MarkdownInlineSpans.Span first = closers[i];
+                MarkdownInlineSpans.Span second = closers[i + 1];
+                if (first.Kind != MarkdownInlineSpans.SpanKind.Emphasis || second.Kind != MarkdownInlineSpans.SpanKind.Emphasis) continue;
+                if (first.CloseStart + first.CloseLen != second.CloseStart) continue;
+                if (!String.Equals(first.CloseText, "**", StringComparison.Ordinal) ||
+                    !String.Equals(second.CloseText, "*", StringComparison.Ordinal)) continue;
+                if (!ended[i] && ended[i + 1]) {
+                    int starStart = first.CloseStart;
+                    second.CloseStart = starStart;
+                    first.CloseStart = starStart + 1;
+                    closers[i] = second;
+                    closers[i + 1] = first;
+                    ended[i] = true;
+                    ended[i + 1] = false;
+                }
+            }
+            int firstOuterActive = closers.Count;
+            while (firstOuterActive > 0 && !ended[firstOuterActive - 1]) firstOuterActive--;
+            splitPoint = firstOuterActive < closers.Count ? closers[firstOuterActive].CloseStart : end;
+            var openBuf = new StringBuilder();
+            var closeBuf = new StringBuilder();
+            for (int j = firstOuterActive - 1; j >= 0; j--) if (!ended[j]) openBuf.Append(closers[j].OpenText);
+            for (int j = 0; j < firstOuterActive; j++) if (!ended[j]) closeBuf.Append(closers[j].CloseText);
+            reopen = openBuf.ToString();
+            reclose = closeBuf.ToString();
+            return true;
+        }
+        // The toggle's own step past a closing run (closeEndCaret), recorded after the caret moved there.
+        internal void NoteStyleEnded(int caret, string marker) {
+            if (disposed || String.IsNullOrEmpty(marker) || caret < 0 || caret > Document.TextLength) {
+                ClearStyleEnded();
+                return;
+            }
+            if (closeEndCaret == caret &&
+                Object.ReferenceEquals(Document, closeEndDocument) &&
+                Object.ReferenceEquals(Document.Version, closeEndVersion)) {
+                bool exists = false;
+                for (int i = 0; i < closeEndMarkers.Count; i++) {
+                    if (String.Equals(closeEndMarkers[i], marker, StringComparison.Ordinal)) { exists = true; break; }
+                }
+                if (!exists) closeEndMarkers.Add(marker);
+            } else {
+                closeEndCaret = caret;
+                closeEndMarkers.Clear();
+                closeEndMarkers.Add(marker);
+                closeEndDocument = Document;
+                closeEndVersion = Document.Version;
+            }
+            Editor.TextArea.Caret.Refresh();
+            Editor.NotifyToolsChanged();
+        }
+        // True while the ended-style mark holds for this offset; `marker` is the first style that ended there.
+        internal bool StyleEndedAt(int offset, out string marker) {
+            marker = null;
+            if (!EndedCloseStateValid(offset)) return false;
+            marker = closeEndMarkers[0];
+            return true;
+        }
+        internal bool IsStyleEndedAt(int offset, string marker) {
+            if (String.IsNullOrEmpty(marker) || !EndedCloseStateValid(offset)) return false;
+            for (int i = 0; i < closeEndMarkers.Count; i++) {
+                if (String.Equals(closeEndMarkers[i], marker, StringComparison.Ordinal)) return true;
+            }
+            return false;
+        }
+        internal void ApplyEndedToImeStyle(int offset, ImePendingStyle style) {
+            if (style == null || !EndedCloseStateValid(offset)) return;
+            for (int i = 0; i < closeEndMarkers.Count; i++) {
+                string m = closeEndMarkers[i];
+                if ((m == "**" || m == "__") && !style.Bold) style.NoBold = true;
+                else if ((m == "*" || m == "_") && !style.Italic) style.NoItalic = true;
+                else if (m == "~~" && !style.Strike) style.NoStrike = true;
+                else if (m == "==" && !style.Highlight) style.NoHighlight = true;
+            }
+        }
+        // The same toggle on the stepped spot resumes the style: restores pending close-space or moves back to the inner edge when none remain ended.
+        internal bool ResumeEndedStyle(string marker) {
+            int caret = Editor.TextArea.Caret.Offset;
+            if (String.IsNullOrEmpty(marker) || !EndedCloseStateValid(caret)) return false;
+            int found = -1;
+            for (int i = 0; i < closeEndMarkers.Count; i++) {
+                if (String.Equals(closeEndMarkers[i], marker, StringComparison.Ordinal)) { found = i; break; }
+            }
+            if (found < 0) return false;
+            closeEndMarkers.RemoveAt(found);
+            if (closeEndMarkers.Count == 0) {
+                bool paused = closeSpacePaused;
+                ClearStyleEnded();
+                if (paused && caret == closeSpaceCaret && PendingCloseSpaceIntact()) {
+                    closeSpacePending = true;
+                    Editor.TextArea.Caret.Refresh();
+                    Editor.NotifyToolsChanged();
+                    return true;
+                }
+                DocumentLine line = Document.GetLineByOffset(caret);
+                LineInfo info = Info(line);
+                int inside = HiddenCloseInside(info, caret - line.Offset);
+                int inner = inside >= 0 ? line.Offset + inside : caret - marker.Length;
+                if (inner >= 0 && inner <= Document.TextLength) Editor.TextArea.Caret.Offset = inner;
+            }
+            Editor.TextArea.Caret.Refresh();
+            Editor.NotifyToolsChanged();
+            return true;
+        }
         internal bool EndPendingCloseStyle(string marker) {
             if (!closeSpacePending || String.IsNullOrEmpty(marker)) return false;
             if (disposed || Options.Busy || Editor.IsReadOnly || Editor.Document != Document) return false;
@@ -7755,13 +8664,38 @@ internal static partial class MarkdownLivePreview {
                 int start = lineOffset + replacement.Start, end = start + replacement.Length;
                 if (start < closeSpaceStart || end > closeSpaceEnd) continue;
                 if (!HiddenCloser(info, replacement)) continue;
-                if (!String.Equals(Document.GetText(start, replacement.Length), marker, StringComparison.Ordinal)) continue;
+                string markerText = Document.GetText(start, replacement.Length);
+                if (!String.Equals(markerText, marker, StringComparison.Ordinal) &&
+                    !(markerText == "***" && (marker == "**" || marker == "*")) &&
+                    !(markerText == "___" && (marker == "__" || marker == "_"))) continue;
                 owns = true;
                 break;
             }
             if (!owns) return false;
             closeSpacePending = false;
             closeSpaceArm = false;
+            closeSpacePaused = true;
+            NoteStyleEnded(closeSpaceCaret, marker);
+            return true;
+        }
+        internal bool CommitArmedWithCloseSpace(int at, string open, string text, string close, out int placedCaret) {
+            placedCaret = at;
+            if (!closeSpacePending) return false;
+            if (String.IsNullOrEmpty(text) || BlankText(text)) return false;
+            if (!CloseSpaceCommitReady(at, text)) { closeSpacePending = false; closeSpacePaused = false; return false; }
+            if (open == null) open = string.Empty;
+            if (close == null) close = string.Empty;
+            int start = closeSpaceStart;
+            string replacement = closeSpaceSpaces + open + text + close + closeSpaceMarkers;
+            closeSpacePending = false;
+            closeSpaceArm = false;
+            closeSpacePaused = false;
+            placedCaret = start + closeSpaceSpaces.Length + open.Length + text.Length;
+            using (Document.RunUpdate()) {
+                Document.Replace(start, at - start, replacement);
+                Editor.TextArea.Caret.Offset = placedCaret;
+            }
+            SafeBringCaretToView(Editor.TextArea);
             return true;
         }
         // Shared by normal TextEntering and SourceEditor's redirected/late commit insertion.
@@ -7770,6 +8704,7 @@ internal static partial class MarkdownLivePreview {
             if (!closeSpacePending) return InsertCommitInsideRun(at, text);
             if (!CloseSpaceCommitReady(at, text)) {
                 closeSpacePending = false;
+                closeSpacePaused = false;
                 return false;
             }
             // Whitespace alone extends the pending gap through DocumentChanged.
@@ -7777,6 +8712,7 @@ internal static partial class MarkdownLivePreview {
             int start = closeSpaceStart;
             string replacement = closeSpaceSpaces + text + closeSpaceMarkers;
             closeSpacePending = false;
+            closeSpacePaused = false;
             using (Document.RunUpdate()) Document.Replace(start, at - start, replacement);
             // The moved markers put the no-reveal caret on the run's outer edge; the next
             // character of the same word belongs inside the pair (HiddenCloseTypingEntering reads
@@ -7799,10 +8735,31 @@ internal static partial class MarkdownLivePreview {
             DocumentLine line = Document.GetLineByOffset(at);
             LineInfo info = Info(line);
             int relative = at - line.Offset;
-            if (info.Table && info.Cells != null && AtCellEnd(info, relative)) return false;
-            int start, end;
-            if (!HiddenCloseRun(info, relative, out start, out end)) return false;
+            int start, end, activeCount, splitPoint;
+            string reopen, reclose;
+            if (!ClosingRunEditPlan(info, at, relative, out start, out end, out activeCount, out splitPoint, out reopen, out reclose)) return false;
+            if (activeCount == 0) return false;
             if (!Options.HideMarkers && (relative <= start || InsideCloserMarker(info, relative))) return false;
+            if (activeCount > 0) {
+                ClearStyleEnded();
+                if (String.IsNullOrEmpty(reopen)) {
+                    if (splitPoint >= relative) return false;
+                    Document.Insert(line.Offset + splitPoint, text);
+                    Editor.CommitLandedOffset = line.Offset + splitPoint;
+                    return true;
+                }
+                int insertAt = line.Offset + splitPoint;
+                string wrapped = reopen + text + reclose;
+                Document.Insert(insertAt, wrapped);
+                Editor.CommitLandedOffset = insertAt + reopen.Length;
+                int insideEnd = insertAt + reopen.Length + text.Length;
+                if (insertAt + reopen.Length >= at) {
+                    commitLandedCaret = insideEnd;
+                    commitLandedDocument = Document;
+                    commitLandedVersion = Document.Version;
+                }
+                return true;
+            }
             int target = TypingInsideTarget(info, start, end, relative, !Options.HideMarkers);
             if (target >= relative) return false;
             Document.Insert(line.Offset + target, text);
@@ -7838,18 +8795,26 @@ internal static partial class MarkdownLivePreview {
             DocumentLine line=Document.GetLineByNumber(caret.Line);
             LineInfo info=Info(line);
             if (!info.Table || info.Delimiter || info.Cells==null || info.Cells.Count==0) return;
-            if (caret.Offset-line.Offset>RowPipeIndex(Document,line)) return;
-            caret.Offset=line.Offset+info.Cells[0].Start;
+            int rel=caret.Offset-line.Offset;
+            if (rel<=RowPipeIndex(Document,line)) {
+                caret.Offset=line.Offset+CellCaretStart(info.Cells[0]);
+                return;
+            }
+            int lastInnerStart,lastInnerEnd;
+            CellBounds(info.Cells,info.Cells.Count-1,out lastInnerStart,out lastInnerEnd);
+            if (lastInnerEnd<info.Text.Length && info.Text[lastInnerEnd]=='|' && rel>lastInnerEnd)
+                caret.Offset=line.Offset+CellEdge(info.Cells[info.Cells.Count-1],false);
         }
         // H1: a "|" typed inside a table row's cell is cell text, not a new column, so it is
-        // written as "\|" in one undo step; the caret stays after it. Inside a closed `code`
-        // span it stays raw instead (TablePipes skips the span and ParseInline shows its text
-        // literally), exactly the paste rule MarkdownTableCommands.CellInsertText applies, so
-        // typing and paste agree. Outside a row the key is the editor's own input. A selection
-        // that stays inside one cell is replaced whole.
+        // written as "\|" in one undo step (even inside a `code` span, matching GFM and
+        // MarkdownTableCommands.CellInsertText); the caret stays after it. Outside a row the
+        // key is the editor's own input. A selection that stays inside one cell is replaced whole.
         void TablePipeTyping(object sender,TextCompositionEventArgs e) {
             if (disposed || e.Handled || Options.Busy || Editor.IsReadOnly || Editor.Document != Document) return;
-            if (e.Text!="|") return;
+            bool pipe=e.Text!=null && e.Text.IndexOf('|')>=0;
+            bool backslash=e.Text!=null && e.Text.EndsWith("\\",StringComparison.Ordinal);
+            if (!pipe && !backslash) return;
+            if (!pipe && Options.ReadOnly) return;
             if (Editor.TextArea.Selection is ICSharpCode.AvalonEdit.Editing.RectangleSelection) return;
             int start,length;
             if (Editor.TextArea.Selection.IsEmpty) { start=Editor.CaretOffset;length=0; }
@@ -7866,7 +8831,7 @@ internal static partial class MarkdownLivePreview {
             LineInfo info=Info(line);
             // The delimiter row is structure, not cell text: an inserted pipe would end the
             // table. Column edits come from the table tool row, so the key is swallowed.
-            if (info.Table && info.Delimiter) { e.Handled=true; return; }
+            if (info.Table && info.Delimiter) { if (pipe) e.Handled=true; return; }
             if (!info.Table || info.Cells==null || info.Cells.Count==0) return;
             int relative=start-line.Offset;
             // A caret in the padding around a cell (after a separator pipe or before one) still
@@ -7874,14 +8839,45 @@ internal static partial class MarkdownLivePreview {
             // that emptied the cell left, is the cell's own. Without this a "|" typed there
             // became a new column.
             int cell=TypingCellAt(info,relative);
-            if (cell<0) return;
-            if (length>0 && start+length-line.Offset>info.Cells[cell].End) return;
-            string insert=MarkdownTableCommands.CellInsertText(Document,start,length,"|",info.Cells);
+            if (cell<0) {
+                if (pipe || backslash) {
+                    int firstInnerStart,firstInnerEnd,lastInnerStart,lastInnerEnd;
+                    CellBounds(info.Cells,0,out firstInnerStart,out firstInnerEnd);
+                    CellBounds(info.Cells,info.Cells.Count-1,out lastInnerStart,out lastInnerEnd);
+                    if (relative<firstInnerStart || (lastInnerEnd<info.Text.Length && info.Text[lastInnerEnd]=='|' && relative>lastInnerEnd))
+                        e.Handled=true;
+                }
+                return;
+            }
+            int innerStart,innerEnd;
+            CellBounds(info.Cells,cell,out innerStart,out innerEnd);
+            if (length>0 && start+length-line.Offset>innerEnd) return;
+            if (!pipe && backslash) {
+                if (info.Text==null) return;
+                int relStart=relative, relEnd=relStart+length;
+                if (relStart<0 || relEnd>info.Text.Length) return;
+                int trailing=0;
+                for (int q=e.Text.Length-1;q>=0 && e.Text[q]=='\\';q--) trailing++;
+                int newBefore=trailing;
+                if (trailing==e.Text.Length) {
+                    for (int q=relStart-1;q>=0 && info.Text[q]=='\\';q--) newBefore++;
+                }
+                if (MarkdownTableCommands.NeedsTrailingBackslashBeforePipe(Document,line.Offset,line.Offset+line.Length,start+length,newBefore)) {
+                    Document.BeginUpdate();
+                    try {
+                        Document.Replace(start,length,e.Text+"\\");
+                        Editor.Select(start+e.Text.Length+1,0);
+                    } finally { Document.EndUpdate(); }
+                    e.Handled=true;
+                }
+                return;
+            }
+            string insert=MarkdownTableCommands.CellInsertText(Document,start,length,e.Text,info.Cells);
             Document.BeginUpdate();
             try {
                 Document.Replace(start,length,insert);
+                Editor.Select(start+insert.Length,0);
             } finally { Document.EndUpdate(); }
-            Editor.Select(start+insert.Length,0);
             e.Handled=true;
         }
         // fix13: a paragraph written directly under a table row is read back as one more row by
@@ -8305,6 +9301,7 @@ internal static partial class MarkdownLivePreview {
         // Set by the window (LiveMarkdownHost) so ApplicationCommands.Paste in the basic view runs the
         // host paste (formats, tables, restored markers). It must not call back into the command.
         internal Func<bool> HostPaste;
+        internal Func<bool> HasArmedTypingStyle;
         bool hostPasting;
         // Stage 3d: a selection follows the single-line rule however many lines it spans, and a
         // caret that sits inside a marker (an offset set by undo, search or a command) is pulled
@@ -8479,10 +9476,32 @@ internal static partial class MarkdownLivePreview {
                 // Inside one cell only: the row's pipes, padding and cell walls stay with the table
                 // rules, and a "|" typed here is TablePipeTyping's (it escapes it).
                 if (!sameLine || !firstInfo.Table || firstInfo.Cells == null) return false;
-                if (inserted.IndexOf('|') >= 0) return false;
+                if (inserted.IndexOf('|') >= 0 || inserted.EndsWith("\\", StringComparison.Ordinal)) return false;
                 int cellStart = CellMarkerEdge(firstInfo, start - first.Offset, true);
                 int cellEnd = CellMarkerEdge(firstInfo, end - first.Offset, false);
                 if (!InCellEdges(firstInfo, cellStart, cellEnd)) return false;
+                int owning = OwningCellAt(firstInfo.Cells, cellStart);
+                if (owning >= 0) {
+                    Cell cellSpan = firstInfo.Cells[owning];
+                    int innerStart, innerEnd;
+                    CellBounds(firstInfo.Cells, owning, out innerStart, out innerEnd);
+                    bool closed = innerEnd < firstInfo.Text.Length && firstInfo.Text[innerEnd] == '|';
+                    if (closed && cellEnd == innerEnd && (cellEnd > cellSpan.End || (cellSpan.Start == cellSpan.End && innerEnd - innerStart >= 2))) {
+                        char beforePipe = firstInfo.Text[innerEnd - 1];
+                        if (beforePipe == ' ' || beforePipe == '\t') cellEnd = innerEnd - 1;
+                    }
+                    if (cellSpan.Start == cellSpan.End && cellStart < cellEnd) {
+                        int caretStop = CellCaretStart(cellSpan);
+                        if (cellStart < caretStop) cellStart = Math.Min(cellEnd, caretStop);
+                    }
+                    if (cellEnd <= cellStart) {
+                        if (inserted.Length == 0) {
+                            editStart = start; editLength = 0; editText = string.Empty; caret = start;
+                            return true;
+                        }
+                        cellEnd = cellStart;
+                    }
+                }
                 widenedStart = first.Offset + cellStart;
                 widenedEnd = first.Offset + cellEnd;
             } else {
@@ -8540,6 +9559,7 @@ internal static partial class MarkdownLivePreview {
         static int CellMarkerEdge(LineInfo info, int relative, bool toStart) {
             foreach (Replacement run in info.Replacements) {
                 if (run.Kind != ReplacementKind.Hidden || run.Prefix || run.Length <= 0) continue;
+                if (!InsideTableCell(info, run)) continue;
                 if (relative > run.Start && relative < run.Start + run.Length) return toStart ? run.Start : run.Start + run.Length;
             }
             return relative;
@@ -9528,8 +10548,9 @@ internal static partial class MarkdownLivePreview {
                 string inserted = e.RemovalLength == 0 && e.Offset == closeSpaceCaret && e.InsertionLength > 0
                     ? e.InsertedText.Text : null;
                 if (inserted != null && SpaceOnly(inserted)) { closeSpaceCaret += inserted.Length; closeSpaceSpaces += inserted; }
-                else closeSpacePending = false;
-            }
+                else { closeSpacePending = false; closeSpacePaused = false; }
+            } else closeSpacePaused = false;
+            if (closeEndCaret >= 0 && !Object.ReferenceEquals(Document.Version, closeEndVersion)) ClearStyleEnded();
             // AvalonEdit keeps the caret's OLD visual column across an edit ("keep visual
             // column"). In a table row the edit re-projects the row (a wrapped cell can unwrap),
             // so that column may still map to the same offset yet be a non-canonical filler
@@ -9674,6 +10695,7 @@ internal static partial class MarkdownLivePreview {
                 // the old grid until the idle re-sample, which the caret inside the table
                 // defers; publish the new count from the final parse here.
                 PublishTableCount(number, lastNumber);
+                MeasureChangedLines(number, lastNumber);
             } else {
                 // Changing already removed the old parse. A native Changed handler may
                 // have built the new row in the meantime; keep that parse and visual paired.
@@ -9798,18 +10820,31 @@ internal static partial class MarkdownLivePreview {
             return PendingCloseSpaceIntact() ? closeSpaceStart : offset;
         }
         internal int TableImeStyleAt(LineInfo info, int relative) {
-            if (!closeSpacePending || Document == null || closeSpaceCaret < 0 || closeSpaceCaret > Document.TextLength) return relative;
-            DocumentLine line = Document.GetLineByOffset(closeSpaceCaret);
-            if (line == null || !Object.ReferenceEquals(Info(line), info) || relative != closeSpaceCaret - line.Offset) return relative;
-            return closeSpaceStart >= line.Offset && PendingCloseSpaceIntact() ? closeSpaceStart - line.Offset : relative;
+            if (closeSpacePending && Document != null && closeSpaceCaret >= 0 && closeSpaceCaret <= Document.TextLength &&
+                Editor != null && Editor.CaretOffset == closeSpaceCaret) {
+                DocumentLine line = Document.GetLineByOffset(closeSpaceCaret);
+                if (line != null && Object.ReferenceEquals(Info(line), info) &&
+                    closeSpaceStart >= line.Offset && closeSpaceStart <= line.Offset + info.Text.Length && PendingCloseSpaceIntact())
+                    return closeSpaceStart - line.Offset;
+            }
+            int start, end;
+            if (HiddenCloseRun(info, relative, out start, out end)) {
+                if ((Editor == null || !AllClosingRunEnded(info, Editor.CaretOffset, start, end)) &&
+                    (Options.HideMarkers || (relative > start && !InsideCloserMarker(info, relative)))) {
+                    int target = TypingInsideTarget(info, start, end, relative, !Options.HideMarkers);
+                    if (target < relative) return target;
+                }
+            }
+            return relative;
         }
         // Pending closing-edge space inside a table cell (plus any drawn closer characters on a
         // raw row) shares the composition's shade while the space is intact, matching CloseSpaceBoxRange.
         internal bool TableCloseSpaceShadeRange(LineInfo info, int imeAt, out int start, out int end) {
             start = end = 0;
             if (!closeSpacePending || Document == null || closeSpaceCaret < 0 || closeSpaceCaret > Document.TextLength) return false;
+            if (Editor == null || Editor.CaretOffset != closeSpaceCaret) return false;
             DocumentLine line = Document.GetLineByOffset(closeSpaceCaret);
-            if (line == null || !Object.ReferenceEquals(Info(line), info) || imeAt != closeSpaceCaret - line.Offset) return false;
+            if (line == null || !Object.ReferenceEquals(Info(line), info)) return false;
             if (closeSpaceStart < line.Offset || closeSpaceCaret > line.EndOffset || !PendingCloseSpaceIntact()) return false;
             start = closeSpaceStart - line.Offset;
             end = closeSpaceCaret - line.Offset;
@@ -9900,6 +10935,10 @@ internal static partial class MarkdownLivePreview {
                 int rows=0, chars=0;
                 while (table.Next!=null && rows<8 && chars<8192) MeasureTableLine(table,ref rows,ref chars);
                 table.Widths=(double[])table.Work.Clone(); table.Minima=(double[])table.WorkMinima.Clone(); table.SampledMinima=(double[])table.WorkMinima.Clone(); table.Align=(int[])table.WorkAlign.Clone();
+                // The sample already parsed this table's header, so its count is the grid: a
+                // fresh table must not look like a column-count change in CompleteTable and
+                // drop the Seed widths (0 != Count would clear Grow and SampledMinima).
+                if (table.PublishedCount==0 && table.Count>0) table.PublishedCount=table.Count;
                 ScheduleTables();
             }
             // The header row is the grid: a structural edit that lands on it (the last edit of
@@ -9911,6 +10950,7 @@ internal static partial class MarkdownLivePreview {
             if (cached!=null && Object.ReferenceEquals(cached.Source,info.Text) && cached.Table==table && cached.Version==table.Version && cached.Raw==raw &&
                 cached.ViewWidth==View.ActualWidth && cached.Indent==indent && String.Equals(cached.MathKey,info.MathTouchKey,StringComparison.Ordinal) &&
                 String.Equals(cached.ImeKey,info.ImeKey,StringComparison.Ordinal) &&
+                cached.LeadCell==info.LeadCell && cached.ImeLead==info.ImeLead &&
                 cached.BaseWidth==Math.Max(1,RowWidth()-indent) && cached.Widths.Length==columns) {
                 if (Object.ReferenceEquals(cached,previousRow)) { previousRow=null;previousRowLine=null; }
                 return cached;
@@ -10060,21 +11100,55 @@ internal static partial class MarkdownLivePreview {
             rows++; chars+=text.Length; table.Rows++; table.Characters+=text.Length; table.Next=line.NextLine;
             if (table.Next==null || table.Rows>=2000 || table.Characters>=300000) CompleteTable(table);
         }
+        // The column the caret is in on this table's line, or -1 when the caret is elsewhere or
+        // on the delimiter. Same resolution as GrowTypingColumn (cell body, then padding/gap,
+        // then the last column).
+        int ActiveTableColumn(TableLayout table) {
+            if (Options.ReadOnly || Editor.IsReadOnly) return -1;
+            int caretLineNumber=Editor.TextArea.Caret.Line;
+            if (caretLineNumber<1 || caretLineNumber>Document.LineCount) return -1;
+            DocumentLine line=Document.GetLineByNumber(caretLineNumber);
+            LineInfo info=Info(line);
+            if (!info.Table || info.Delimiter || info.TableStart != table.Start) return -1;
+            List<Cell> cells=info.Cells != null ? info.Cells : SplitCells(info.Text);
+            if (cells==null || cells.Count==0) return -1;
+            int relative=Editor.CaretOffset-line.Offset;
+            if (relative<0 || relative>line.Length) return -1;
+            int column=-1;
+            for (int c=0;c<cells.Count && c<TableLayout.Columns;c++)
+                if (relative>=cells[c].Start && relative<=cells[c].End) { column=c;break; }
+            if (column<0) {
+                for (int c=0;c<cells.Count&&c<TableLayout.Columns;c++) {
+                    if (relative>cells[c].End) continue;
+                    column=c;break;
+                }
+                if (column<0) column=Math.Min(cells.Count,TableLayout.Columns)-1;
+            }
+            return column<TableLayout.Columns ? column : -1;
+        }
         void CompleteTable(TableLayout table) {
             table.Next = null;
             MergeHotRows(table);
-            // b52: grow-only while the caret is still in this table. A sample taken before
-            // the last keys landed would otherwise publish the narrower width under the
-            // caret and wrap the text again.
-            if (EditingTable(table))
-                for (int c = 0; c < TableLayout.Columns; c++)
-                    if (table.Work[c] < table.Grow[c]) table.Work[c] = table.Grow[c];
             // Cell shapes cache the line splits of one width keyed by cell text. The width
             // key already rejects stale hits, but a column count change makes the whole
             // set stale for the new grid, so drop it instead of carrying old slices. The
             // grow-only widths are indexed by column too, so they go with it: after a column
             // was inserted or removed the stored width would hold the neighbour's column.
             if (table.PublishedCount != table.Count) { table.Shapes.Clear(); table.ShapeCharacters = 0; Array.Clear(table.Grow, 0, table.Grow.Length); Array.Clear(table.SampledMinima, 0, table.SampledMinima.Length); }
+            // The sample's own minima, taken before the active column is raised to the
+            // published minimum: Undo/delete in GrowTypingColumn lowers back to what the rest
+            // of the table can pay, not to the width the typed line had grown to.
+            double[] sampledMinima = (double[])table.WorkMinima.Clone();
+            // b52: grow-only while the caret is still in this table. A sample taken before
+            // the last keys landed would otherwise publish the narrower width under the
+            // caret and wrap the text again.
+            if (EditingTable(table)) {
+                for (int c = 0; c < TableLayout.Columns; c++)
+                    if (table.Work[c] < table.Grow[c]) table.Work[c] = table.Grow[c];
+                int caretColumn = ActiveTableColumn(table);
+                if (caretColumn >= 0 && caretColumn < TableLayout.Columns && table.WorkMinima[caretColumn] < table.Minima[caretColumn])
+                    table.WorkMinima[caretColumn] = table.Minima[caretColumn];
+            }
             table.PublishedCount = table.Count;
             bool changed = false;
             for (int c = 0; c < TableLayout.Columns; c++) {
@@ -10082,7 +11156,7 @@ internal static partial class MarkdownLivePreview {
             }
             table.Widths = table.Work;
             table.Minima = table.WorkMinima;
-            table.SampledMinima = (double[])table.WorkMinima.Clone();
+            table.SampledMinima = sampledMinima;
             table.Align = table.WorkAlign;
             if (changed) { table.Version++; RedrawTable(table); }
         }
@@ -10174,6 +11248,7 @@ internal static partial class MarkdownLivePreview {
             int limit = Math.Min(lastNumber, firstNumber + 7);
             int chars = 0;
             for (int number = firstNumber; number <= limit && chars < 8192; number++) {
+                if (number < 1 || number > Document.LineCount) break;
                 DocumentLine line = Document.GetLineByNumber(number);
                 if (line.IsDeleted) continue;
                 chars += line.Length;
@@ -10250,6 +11325,11 @@ internal static partial class MarkdownLivePreview {
             for (int c=0;c<cells.Count && c<TableLayout.Columns;c++)
                 if (relative>=cells[c].Start && relative<=cells[c].End) { column=c;break; }
             if (column<0) {
+                int owning=OwningCellAt(cells,relative);
+                if (owning>=TableLayout.Columns) return false;
+                if (owning>=0) column=owning;
+            }
+            if (column<0) {
                 // A caret in a cell's own padding, in the gap before a pipe, or past the last pipe
                 // still edits a cell: a paste clamps into the cell the same way (ClampIntoCell in
                 // MarkdownTableCommands). Without this a paste there left the column at its old
@@ -10262,8 +11342,11 @@ internal static partial class MarkdownLivePreview {
             }
             if (column<0) return false;
             Cell cell=cells[column];
+            bool rawRow = Raw(line);
             // The composition string the cell draws now (live editor state, not a stale LineInfo): it is part of the text width.
             double composing=CompositionWidth(info);
+            // The spaces CellText draws before the string (or before the caret when !rawRow) when the caret is past the cell's trimmed end (ImeLeadOf).
+            if ((composing>0 || !rawRow) && Editor.SelectionLength==0) { int lead=ImeLeadOf(info.Text,cell.End,relative); if (lead>0) composing+=glyphs.Measure(new string(' ',lead),0,lead,info.Header); }
             // A column that was inserted or removed while the caret stayed here renumbers every
             // stored width; they would then hold a neighbour's column, so drop them first.
             if (table.GrowColumns!=cells.Count) { Array.Clear(table.Grow,0,table.Grow.Length); table.GrowColumns=cells.Count; }
@@ -10274,45 +11357,53 @@ internal static partial class MarkdownLivePreview {
                 return false;
             }
             // Widths (and Work) hold the cell's TEXT width; TableWidths adds the padding and
-            // bounds the table's total, so this column is not capped here.
-            double text=0, minWord=0;
-            if (cell.End>cell.Start) glyphs.MeasureCell(info,cell,this,Raw(line),out text,out minWord);
-            text+=composing;
-            if (text<=0) {
+            // bounds the table's total, so this column is not capped here. The measured raw
+            // advance feeds the one-line need; the metric's Preferred/Minimum follow the same
+            // clamped basis TableWidths uses.
+            double rawWidth=0;
+            CellMetric metric=cell.End>cell.Start ? MeasureSingleCell(info,cell,PlainCell(info,cell),Raw(line),out rawWidth) : new CellMetric();
+            double text=rawWidth+composing;
+            if (text<=0 && metric.Preferred<=0) {
                 if (beforeMin!=sampled) { table.Minima[column]=sampled; return true; }
                 return false;
             }
-            double minNeed=minWord>0 ? Math.Ceiling(minWord+1.05) : 0;
-            int count=table.Count>0 ? table.Count : cells.Count;
-            double available=Math.Max(40,RowWidth()-Math.Max(0,info.TableIndent)-4);
-            double otherMin=0;
-            for (int c=0;c<count;c++) {
-                if (c==column) continue;
-                double m=c<table.Minima.Length ? table.Minima[c] : 0;
-                otherMin+=Math.Max(CellPadding*2+1,m+CellPadding*2);
-            }
-            // One pixel short of the edge: TableWidths re-sums the minima in another order, and a
-            // total that lands exactly on `available` can round over it at a fractional DPI and
-            // take the equal-share branch (the 304 -> 129 px collapse of the typed column).
-            double cap=Math.Max(sampled,available-otherMin-CellPadding*2-1);
-            double cappedNeed=minNeed>cap ? cap : minNeed;
-            table.Minima[column]=Math.Max(sampled,cappedNeed);
+            double nextMin=Math.Max(sampled,metric.Minimum);
             // A composition string is not in the document yet: reserve one more syllable so
             // the column is already wide enough when the IME draws its interim glyphs.
             double allowance=Editor.ImeBusy ? Options.FontSize*1.2 : 0;
-            // +2: FormatCell wraps at Width-Padding*2-1, so the text needs one more pixel
+            // +1.05: FormatCell wraps at Width-Padding*2-1, so the text needs one more pixel
             // than its measured advance to stay on one line (rounding included).
-            double need=text+allowance+2;
+            double need=composing>0 || allowance>0 ? Math.Ceiling(text+allowance+1.05) : metric.Preferred;
             if (need>table.Grow[column]) table.Grow[column]=need;
             double before=table.Widths[column];
             // The grown width is remembered even when the current grid cannot use it, so a
             // wider view pays it without another key.
             // A changed minimum (grown on key insert or lowered after undo) must be published even
             // when the width itself did not grow: LayoutRow reuses rows of the same Version.
-            if (table.Grow[column]<=before+.5) return table.Minima[column]!=beforeMin;
+            if (table.Grow[column]<=before+.5) {
+                if (nextMin==beforeMin) return false;
+                if (nextMin<beforeMin) { table.Minima[column]=nextMin; return true; }
+                table.Minima[column]=nextMin;
+                double checkPublished;
+                double minGain=AllocatedWidthGain(table,cells,column,info.TableIndent,before,beforeMin,out checkPublished);
+                if (minGain<-.5 && !OverLongMinimum(checkPublished+minGain,nextMin)) { table.Minima[column]=beforeMin; return false; }
+                return true;
+            }
             table.Widths[column]=table.Grow[column];
+            table.Minima[column]=nextMin;
             double published;
-            double gained=AllocatedWidthGain(table,cells,column,info.TableIndent,before,out published);
+            double gained=AllocatedWidthGain(table,cells,column,info.TableIndent,before,beforeMin,out published);
+            // b52: crossing into the slack-sharing branch would narrow the typed column, so
+            // the grown width is not published; the candidate stays in Grow for a wider view.
+            // The one exception: a token too long for what the view can pay (TableWidths now
+            // wraps it by characters inside its cell). Holding the old width here is what the
+            // idle sample would not do, so the columns jumped when the caret left; publish it now.
+            if (gained<-.5 && OverLongMinimum(published+gained,nextMin)) return true;
+            if (gained<-.5) {
+                table.Widths[column]=before;
+                if (nextMin>beforeMin) table.Minima[column]=beforeMin;
+                return table.Minima[column]!=beforeMin;
+            }
             // Publish when the new allocation keeps the typed line on one line (it fits there
             // and not at the published width), or when it widens the column by at least half a
             // character. A column that shares the view's slack with others creeps a couple of
@@ -10322,11 +11413,20 @@ internal static partial class MarkdownLivePreview {
             // include the cell padding, the stored Widths do not.
             double textWidth=Math.Max(0,published-CellPadding*2-1);
             double grownWidth=Math.Max(0,published+gained-CellPadding*2-1);
-            if (gained<Math.Max(1,Options.FontSize*.5) && !(text>textWidth && text<=grownWidth)) {
+            bool bulkGrow=table.Grow[column]-before>Options.FontSize*2 && gained>.05;
+            if (!bulkGrow && gained<Math.Max(1,Options.FontSize*.5) && !(text>textWidth && text<=grownWidth)) {
                 table.Widths[column]=before;
+                // A token already at its cap: the raised minimum moves no boundary, so the rows are not
+                // rebuilt on every key past it (Neon review 11-22).
+                if (Math.Abs(gained)<=.01 && OverLongMinimum(published+gained,nextMin)) return false;
                 return table.Minima[column]!=beforeMin;
             }
             return true;
+        }
+        // TableWidths allocates the column less than its own minimum: the over-long token wraps by
+        // characters there whatever the typing path does (b52's no-narrowing cannot hold for it).
+        static bool OverLongMinimum(double allocated,double minimum) {
+            return minimum>0 && allocated<minimum+CellPadding*2-.5;
         }
         // One-line width of the IME composition string being drawn in the caret's cell (0 when none), in the armed size when one is picked.
         double CompositionWidth(LineInfo info) {
@@ -10340,16 +11440,19 @@ internal static partial class MarkdownLivePreview {
         // How much the allocation TableWidths makes would widen the typed column if the grown
         // width were published, and the width the grid uses now. Grow keeps the text width
         // when nothing is published, so the next key compares from the published value.
-        double AllocatedWidthGain(TableLayout table,List<Cell> cells,int column,double indent,double before,out double published) {
+        double AllocatedWidthGain(TableLayout table,List<Cell> cells,int column,double indent,double before,double beforeMin,out double published) {
             // The grid is the header's; a data row's extra cells own no column.
             int count=table.Count>0 ? table.Count : cells.Count;
             if (column<0 || column>=count) { published=before; return 0; }
             double viewWidth=RowWidth()-Math.Max(0,indent);
             double grown=table.Widths[column];
+            double grownMin=table.Minima[column];
             double withGrown=TableWidths(table.Widths,table.Minima,count,viewWidth,Options.WordWrap,Options.FontScale)[column];
             table.Widths[column]=before;
+            table.Minima[column]=beforeMin;
             double withOld=TableWidths(table.Widths,table.Minima,count,viewWidth,Options.WordWrap,Options.FontScale)[column];
             table.Widths[column]=grown;
+            table.Minima[column]=grownMin;
             published=withOld;
             return withGrown-withOld;
         }
@@ -10615,11 +11718,32 @@ internal static partial class MarkdownLivePreview {
             DiagMeasureTicks+=System.Diagnostics.Stopwatch.GetTimestamp()-started;
             return changed;
         }
+        // The typed cell's own width for GrowTypingColumn: the measured advance (out) and the
+        // same Preferred/Minimum basis TableWidths publishes. Never touches table.Metrics, so
+        // the typed prefixes cannot pile up as metric entries.
+        CellMetric MeasureSingleCell(LineInfo info, Cell cell, bool plain, bool raw, out double rawWidth) {
+            EnsureFormatter();
+            rawWidth=0;
+            bool digits=plain && cell.End>cell.Start;
+            for (int p=cell.Start;digits && p<cell.End;p++) digits=info.Text[p]>='0' && info.Text[p]<='9';
+            double advance;
+            if (digits && fastNumbers && glyphs.TryDigits(info.Text,cell.Start,cell.End,info.Header,out advance)) {
+                rawWidth=advance;
+                var fast=new CellMetric();
+                fast.Preferred=fast.Minimum=Math.Ceiling(advance+1);
+                return fast;
+            }
+            return MeasureCellMetric(info,cell,plain,raw,out rawWidth);
+        }
         // A styled cell (a <kbd> pad run, a code face, a sized span) can lay out wider in FormatLine
         // than FormatMinMaxParagraphWidth reports, so it is also measured as one unwrapped line; a
         // plain cell keeps the single min/max pass (large tables open at the old cost).
         CellMetric MeasureCellMetric(LineInfo info, Cell cell, bool plain) {
-            var text=new CellText(info,cell,this,false,0,null);
+            double rawMax;
+            return MeasureCellMetric(info, cell, plain, false, out rawMax);
+        }
+        CellMetric MeasureCellMetric(LineInfo info, Cell cell, bool plain, bool raw, out double rawMax) {
+            var text=new CellText(info,cell,this,raw,0,raw ? info.MathTouchKey : null);
             double lineHeight=Options.FontSize*Options.LinePercent/100;
             var paragraph=new CellParagraph(text.Default,lineHeight);
             var noWrapParagraph=new CellParagraph(text.Default,lineHeight,TextWrapping.NoWrap);
@@ -10636,7 +11760,7 @@ internal static partial class MarkdownLivePreview {
                         if (measured.MinWidth>minWidth) minWidth=measured.MinWidth;
                         if (!plain) using (TextLine line=Formatter.FormatLine(text,position,300000,noWrapParagraph,null,cache)) {
                             if (line.WidthIncludingTrailingWhitespace>maxWidth) maxWidth=line.WidthIncludingTrailingWhitespace;
-                            if (text.Pads!=null) {
+                            if (!raw && text.Pads!=null) {
                                 for (int p=position;p<text.FormatEnd;p++) {
                                     if (!text.IsPad(p) || text.IsClosePad(p)) continue;
                                     int q=p+1;
@@ -10656,6 +11780,7 @@ internal static partial class MarkdownLivePreview {
                     text.FormatEnd=breakAt<0 ? text.Text.Length : breakAt;
                 }
             } finally { text.FormatEnd=text.Text.Length; }
+            rawMax=maxWidth;
             return new CellMetric {
                 Preferred=maxWidth>0 ? Math.Ceiling(maxWidth+1.05) : 0,
                 Minimum=minWidth>0 ? Math.Ceiling(minWidth+1.05) : 0
@@ -11160,6 +12285,22 @@ internal static partial class MarkdownLivePreview {
             bool highlight;
             FormatAt(offset, out bold, out italic, out strike, out code, out highlight, out heading);
         }
+        // Line-relative offset whose inline style applies to the next character typed at `offset`.
+        internal int TypingStyleRelative(DocumentLine line, LineInfo info, int offset) {
+            if (line == null) return 0;
+            int relative = offset - line.Offset;
+            if (info == null || info.Text == null) return relative;
+            int start, end;
+            if (HiddenCloseRun(info, relative, out start, out end)) {
+                if (!AllClosingRunEnded(info, offset, start, end)) return start;
+                return relative;
+            }
+            if (closeSpacePending && offset == closeSpaceCaret &&
+                closeSpaceStart >= line.Offset && closeSpaceStart <= line.Offset + info.Text.Length &&
+                PendingCloseSpaceIntact())
+                return closeSpaceStart - line.Offset;
+            return relative;
+        }
         // The same answer with the highlight pair, which the format ribbon lights on its own button.
         internal void FormatAt(int offset, out bool bold, out bool italic, out bool strike, out bool code, out bool highlight, out int heading) {
             bold = italic = strike = code = highlight = false;
@@ -11168,15 +12309,7 @@ internal static partial class MarkdownLivePreview {
             DocumentLine line = Document.GetLineByOffset(offset);
             LineInfo info = Info(line);
             heading = info.Heading;
-            int relative = offset - line.Offset;
-            // At the outer edge of a hidden closing run the caret draws on the pair's inside, so
-            // the toolbar reports the format the next character would take.
-            int inside = HiddenCloseInside(info, relative);
-            if (inside >= 0) relative = inside;
-            // The closing-edge space is pending (rule C): the next character goes back inside the
-            // pair, so the toolbar shows the run's style lit after the space (O(markers)).
-            else if (closeSpacePending && offset == closeSpaceCaret && closeSpaceStart >= line.Offset && closeSpaceStart <= line.Offset + info.Text.Length && PendingCloseSpaceIntact())
-                relative = closeSpaceStart - line.Offset;
+            int relative = TypingStyleRelative(line, info, offset);
             foreach (StyledPart part in info.Styles) {
                 if (relative < part.Start || relative > part.Start + part.Length) continue;
                 bold |= (part.Style & Style.Bold) != 0;
@@ -11184,6 +12317,17 @@ internal static partial class MarkdownLivePreview {
                 strike |= (part.Style & Style.Strike) != 0;
                 code |= (part.Style & Style.Code) != 0;
                 highlight |= (part.Style & Style.Highlight) != 0;
+            }
+            // Styles the toggle just ended on this spot are off for the next character (closeEndCaret).
+            if (EndedCloseStateValid(offset)) {
+                for (int i = 0; i < closeEndMarkers.Count; i++) {
+                    string ended = closeEndMarkers[i];
+                    if (ended == "**" || ended == "__") bold = false;
+                    else if (ended == "*" || ended == "_") italic = false;
+                    else if (ended == "~~") strike = false;
+                    else if (ended == "==") highlight = false;
+                    else if (ended == "`") code = false;
+                }
             }
         }
 
@@ -11259,8 +12403,10 @@ internal static partial class MarkdownLivePreview {
             CloseDashRule();ClearDashTyping();ClearRuleTyping();
             CloseSetextRule();
             editableFenceLine = null; editableFenceVersion = null;
-            closeSpaceArm = closeSpacePending = false;
+            closeSpaceArm = closeSpacePending = closeSpacePaused = false;
             closeWordCaret = -1;closeWordDocument = null;closeWordVersion = null;
+            ClearStyleEnded();
+            commitLandedCaret = -1; commitLandedDocument = null; commitLandedVersion = null;
             CloseTableGap();
             Editor.CaretGuardChangedForTable = null;
             Editor.CellClamp = null;
@@ -12013,6 +13159,18 @@ internal static partial class MarkdownLivePreview {
         string text = info.Text;
         int budget = text.Length * 4;
         Dictionary<int, InlineHtml.Tag> html = InlineHtml.Parse(text);
+        int[] nextPipe = null;
+        if (info.Table) {
+            nextPipe = new int[text.Length + 1];
+            nextPipe[text.Length] = text.Length;
+            bool[] isPipe = new bool[text.Length];
+            for (int p = 0; p < text.Length; p++) {
+                if (text[p] == '\\') { p++; continue; }
+                if (text[p] == '|') isPipe[p] = true;
+            }
+            for (int p = text.Length - 1; p >= 0; p--)
+                nextPipe[p] = isPipe[p] ? p : nextPipe[p + 1];
+        }
         int[] opens = { -1, -1, -1, -1, -1, -1 };
         string[] tokens = { "**", "__", "*", "_", "~~", "==" };
         Style[] styles = { Style.Bold, Style.Bold, Style.Italic, Style.Italic, Style.Strike, Style.Highlight };
@@ -12058,7 +13216,9 @@ internal static partial class MarkdownLivePreview {
                 // not this label's markup: the label walk continues at "]"(linkResume) and would
                 // re-walk the hidden "](url)" tail if the jump went past it. Leave the backtick
                 // as literal text and let the walk reach the label end.
-                if (close >= 0 && !(linkResume >= 0 && close >= linkResume)) {
+                // Under GFM, an unescaped pipe splits a table cell even inside a code span, so
+                // backticks in different cells cannot pair across a cell pipe.
+                if (close >= 0 && !(linkResume >= 0 && close >= linkResume) && !(info.Table && nextPipe[i + run] < close)) {
                     info.Hide(i, run);
                     info.Hide(close, run);
                     // CommonMark strips one space from each end when a code span both starts and
@@ -12067,6 +13227,18 @@ internal static partial class MarkdownLivePreview {
                     if (close - i - run >= 2 && text[i + run] == ' ' && text[close - 1] == ' ' && !OnlySpaces(text, i + run, close)) {
                         info.Hide(i + run, 1);
                         info.Hide(close - 1, 1);
+                    }
+                    // Inside a table cell, an odd backslash run before "|" escapes the pipe for the
+                    // table parser (GFM); hide only the single "\" immediately before "|".
+                    if (info.Table) {
+                        int contentStart = i + run;
+                        for (int p = contentStart; p < close; p++) {
+                            if (text[p] == '|' && p > contentStart && text[p - 1] == '\\') {
+                                int bs = 0;
+                                for (int q = p - 1; q >= contentStart && text[q] == '\\'; q--) bs++;
+                                if ((bs & 1) == 1) info.Hide(p - 1, 1);
+                            }
+                        }
                     }
                     info.AddStyle(i + run, close - i - run, Style.Code, null);
                     i = close + run;
@@ -12082,7 +13254,7 @@ internal static partial class MarkdownLivePreview {
                 // holds a column pipe belongs to no cell, so it stays source; "\|" is the cell's escape for a pipe.
                 if (i + 1 < text.Length && text[i + 1] == '$') { i += 2; continue; }
                 int mathClose = MathRender.InlineEnd(text, i, ref budget);
-                if (mathClose > i + 1 && info.Table && HasCellPipe(text, i + 1, mathClose)) mathClose = -1;
+                if (mathClose > i + 1 && info.Table && nextPipe[i + 1] < mathClose) mathClose = -1;
                 if (mathClose > i + 1 && !(linkResume >= 0 && mathClose >= linkResume)) {
                     string mathSource = text.Substring(i + 1, mathClose - i - 1);
                     if (info.Table && mathSource.IndexOf("\\|", StringComparison.Ordinal) >= 0) mathSource = mathSource.Replace("\\|", "|");
@@ -12101,13 +13273,16 @@ internal static partial class MarkdownLivePreview {
                 int labelEnd = Find(text, "]", i + 2, ref budget);
                 int middle = labelEnd >= 0 && Matches(text, labelEnd, "](") ? labelEnd : -1;
                 int close = middle < 0 ? -1 : ImageEnd(text, middle + 2, ref budget);
-                if (close >= 0) {
+                if (close >= 0 && !(info.Table && nextPipe[i + 2] < close)) {
                     // A table row gets the same replacement: CellText turns it into one image
                     // object inside the cell (the projection has no element for a cell), and
                     // AddTableStops drops it when the span crosses a column separator.
+                    string alt = text.Substring(i + 2, middle - i - 2);
+                    string src = ImageSource(text.Substring(middle + 2, close - middle - 2));
+                    if (info.Table) { alt = UnescapeTablePipes(alt); src = UnescapeTablePipes(src); }
                     info.Replacements.Add(new Replacement {
                         Start=i, Length=close + 1 - i, Kind=ReplacementKind.Image,
-                        Label=text.Substring(i + 2, middle - i - 2), Source=ImageSource(text.Substring(middle + 2, close - middle - 2))
+                        Label=alt, Source=src
                     });
                     i = close + 1;
                     continue;
@@ -12116,7 +13291,7 @@ internal static partial class MarkdownLivePreview {
             if (c == '[' && i + 2 < text.Length && text[i + 1] == '^' && linkResume < 0) {
                 // Footnote reference [^id]; a definition "[^id]:" stays plain text.
                 int note = Find(text, "]", i + 2, ref budget);
-                if (note > i + 2 && (note + 1 >= text.Length || text[note + 1] != ':')) {
+                if (note > i + 2 && (note + 1 >= text.Length || text[note + 1] != ':') && !(info.Table && nextPipe[i + 2] < note)) {
                     info.Hide(i, 2);
                     info.Hide(note, 1);
                     info.AddStyle(i + 2, note - i - 2, Style.Link | Style.Superscript | Style.HtmlSup, null);/* 2.5.0: drawn at the <sup> height like the definition number */
@@ -12131,13 +13306,14 @@ internal static partial class MarkdownLivePreview {
                 int labelEnd = LinkLabelEnd(text, i, ref budget);
                 if (labelEnd > i + 1 && labelEnd + 1 < text.Length && text[labelEnd + 1] == '[') {
                     int idEnd = Find(text, "]", labelEnd + 2, ref budget);
-                    if (idEnd >= 0) {
+                    if (idEnd >= 0 && !(info.Table && nextPipe[i + 1] < idEnd)) {
                         info.Hide(i, 1);
                         info.Hide(labelEnd, idEnd + 1 - labelEnd);
                         info.AddStyle(i + 1, labelEnd - i - 1, Style.Link, null);
                         // The host resolves "ref:<id>" against the "[id]: url" definition on click.
                         string id = text.Substring(labelEnd + 2, idEnd - labelEnd - 2).Trim();
                         if (id.Length == 0) id = text.Substring(i + 1, labelEnd - i - 1);
+                        if (info.Table) id = UnescapeTablePipes(id);
                         if (info.Links == null) info.Links = new List<LinkPart>();
                         info.Links.Add(new LinkPart { Start=i, Length=idEnd + 1 - i, Url="ref:" + id });
                         // The label keeps its own inline markup; "][id]" is skipped whole.
@@ -12156,14 +13332,16 @@ internal static partial class MarkdownLivePreview {
                 // balanced pair ("..._(동음이의)") and a quoted title hold ")" characters of their
                 // own (the same scan an image target uses).
                 int close = middle < 0 ? -1 : ImageEnd(text, middle + 2, ref budget);
-                if (close >= 0) {
+                if (close >= 0 && !(info.Table && nextPipe[i + 1] < close)) {
                     info.Hide(i, 1);
                     info.Hide(middle, close + 1 - middle);
                     info.AddStyle(i + 1, middle - i - 1, Style.Link, null);
                     if (info.Links == null) info.Links = new List<LinkPart>();
                     // The optional title ("url \"title\"", "url 'title'", "<url>") is not part of
                     // the destination, so Ctrl+click opens the URL alone.
-                    info.Links.Add(new LinkPart { Start=i, Length=close + 1 - i, Url=ImageSource(text.Substring(middle + 2, close - middle - 2)) });
+                    string url = ImageSource(text.Substring(middle + 2, close - middle - 2));
+                    if (info.Table) url = UnescapeTablePipes(url);
+                    info.Links.Add(new LinkPart { Start=i, Length=close + 1 - i, Url=url });
                     // GFM parses the label's inline content ("[**bold**](url)" is bold link
                     // text). Walk the label here; the hidden "](url)" tail is skipped whole at
                     // linkResume, and the saved opening state keeps an unclosed marker inside
@@ -12180,7 +13358,8 @@ internal static partial class MarkdownLivePreview {
                 if (labelEnd > i + 1 &&
                     (labelEnd + 1 >= text.Length || text[labelEnd + 1] != '(' && text[labelEnd + 1] != '[')) {
                     string shortcut = ReferenceLabel(text.Substring(i + 1, labelEnd - i - 1));
-                    if (shortcut.Length > 0 && session != null && session.ReferenceLabelDefined(shortcut)) {
+                    if (info.Table) shortcut = UnescapeTablePipes(shortcut);
+                    if (shortcut.Length > 0 && !(info.Table && nextPipe[i + 1] < labelEnd) && session != null && session.ReferenceLabelDefined(shortcut)) {
                         info.Hide(i, 1);
                         info.Hide(labelEnd, 1);
                         info.AddStyle(i + 1, labelEnd - i - 1, Style.Link, null);
@@ -12196,7 +13375,7 @@ internal static partial class MarkdownLivePreview {
             }
             if (c == '<') {
                 InlineHtml.Tag tag;
-                if (html.TryGetValue(i, out tag) && (linkResume < 0 || tag.CloseEnd <= linkResume)) {
+                if (html.TryGetValue(i, out tag) && (linkResume < 0 || tag.CloseEnd <= linkResume) && !(info.Table && nextPipe[i] < tag.CloseEnd)) {
                     if (tag.Name == "span" || tag.Name == "font") {
                         string rawTag = text.Substring(i, tag.End - i);
                         Brush color = SpanColor(rawTag); double em;
@@ -12209,8 +13388,11 @@ internal static partial class MarkdownLivePreview {
                     } else if (tag.Name == "img" || tag.Name == "picture") {
                         InlineHtml.Tag image = tag.Name == "img" ? tag : InlineHtml.PictureImage(html, tag);
                         if (image != null) {
+                            string src = InlineHtml.Attribute(text, image, "src");
+                            string alt = InlineHtml.Attribute(text, image, "alt");
+                            if (info.Table) { src = UnescapeTablePipes(src); alt = UnescapeTablePipes(alt); }
                             info.Replacements.Add(new Replacement { Start=i, Length=tag.CloseEnd - i, Kind=ReplacementKind.Image,
-                                Source=InlineHtml.Attribute(text, image, "src"), Label=InlineHtml.Attribute(text, image, "alt"),
+                                Source=src, Label=alt,
                                 ImageWidth=InlineHtml.Dimension(text, image, "width"), ImageHeight=InlineHtml.Dimension(text, image, "height") });
                             i = tag.CloseEnd; continue;
                         }
@@ -12235,6 +13417,7 @@ internal static partial class MarkdownLivePreview {
                         info.AddStyle(tag.End, tag.CloseStart - tag.End, style, null);
                         if (tag.Name == "a") {
                             string href = InlineHtml.Attribute(text, tag, "href");
+                            if (info.Table) href = UnescapeTablePipes(href);
                             if (!string.IsNullOrEmpty(href)) {
                                 if (info.Links == null) info.Links = new List<LinkPart>();
                                 info.Links.Add(new LinkPart { Start=i, Length=tag.CloseEnd - i, Url=href });
@@ -12242,18 +13425,33 @@ internal static partial class MarkdownLivePreview {
                         }
                         if (tag.Name == "abbr" || tag.Name == "dfn" || tag.Name == "time") {
                             string hint = InlineHtml.Attribute(text, tag, tag.Name == "time" ? "datetime" : "title");
+                            if (info.Table) hint = UnescapeTablePipes(hint);
                             if (!string.IsNullOrEmpty(hint)) {
                                 if (info.Hints == null) info.Hints = new List<HintPart>();
                                 info.Hints.Add(new HintPart { Start=tag.End, Length=tag.CloseStart - tag.End, Text=hint });
                             }
                         }
                         // HTML code has the same literal content rule as a Markdown code span.
-                        i = InlineHtml.Code(tag.Name) ? tag.CloseEnd : tag.End;
+                        if (InlineHtml.Code(tag.Name)) {
+                            if (info.Table) {
+                                int contentStart = tag.End;
+                                for (int p = contentStart; p < tag.CloseStart; p++) {
+                                    if (text[p] == '|' && p > contentStart && text[p - 1] == '\\') {
+                                        int bs = 0;
+                                        for (int q = p - 1; q >= contentStart && text[q] == '\\'; q--) bs++;
+                                        if ((bs & 1) == 1) info.Hide(p - 1, 1);
+                                    }
+                                }
+                            }
+                            i = tag.CloseEnd;
+                        } else {
+                            i = tag.End;
+                        }
                         continue;
                     }
                 }
                 InlineHtml.Tag literal = InlineHtml.Read(text, i);
-                if (literal != null) { i = literal.End; continue; }
+                if (literal != null && !(info.Table && nextPipe[i] < literal.End)) { i = literal.End; continue; }
                 int lineBreak = LineBreakEnd(text, i);
                 if (lineBreak > i) {
                     // The caret line keeps the raw tag; every other line breaks, like the
@@ -12267,13 +13465,14 @@ internal static partial class MarkdownLivePreview {
                 // track, so it stays literal like every other raw tag.
                 if (Matches(text, i, "<!--")) {
                     int comment = Find(text, "-->", i + 4, ref budget);
-                    if (comment >= 0) { info.Hide(i, comment + 3 - i); i = comment + 3; continue; }
+                    if (comment >= 0 && !(info.Table && nextPipe[i + 4] < comment)) { info.Hide(i, comment + 3 - i); i = comment + 3; continue; }
                 }
                 // CommonMark angle autolink (<https://…>, <mailto:…>, <a@b.c>): the brackets are
                 // markup, and the target opens like a written link.
                 int autolink = AutolinkEnd(text, i);
-                if (autolink > i) {
+                if (autolink > i && !(info.Table && nextPipe[i + 1] < autolink - 1)) {
                     string address = text.Substring(i + 1, autolink - i - 2);
+                    if (info.Table) address = UnescapeTablePipes(address);
                     // An email autolink opens as a mail link (CommonMark's own destination).
                     if (address.IndexOf(':') < 0) address = "mailto:" + address;
                     info.Hide(i, 1);
@@ -12297,6 +13496,11 @@ internal static partial class MarkdownLivePreview {
                     i = emojiEnd;
                     continue;
                 }
+            }
+            if (info.Table && c == '|') {
+                for (int t = 0; t < opens.Length; t++) opens[t] = -1;
+                i++;
+                continue;
             }
             int kind = -1;
             for (int t = 0; t < tokens.Length; t++) if (Matches(text, i, tokens[t])) { kind = t; break; }
@@ -12433,6 +13637,24 @@ internal static partial class MarkdownLivePreview {
             }
         }
         return title < 0 ? value : value.Substring(0, title).TrimEnd();
+    }
+    static string UnescapeTablePipes(string value) {
+        if (String.IsNullOrEmpty(value) || value.IndexOf("\\|", StringComparison.Ordinal) < 0) return value;
+        var sb = new StringBuilder(value.Length);
+        bool escaped = false;
+        for (int i = 0; i < value.Length; i++) {
+            char c = value[i];
+            if (escaped) {
+                if (c != '|') sb.Append('\\');
+                sb.Append(c);
+                escaped = false;
+                continue;
+            }
+            if (c == '\\') { escaped = true; continue; }
+            sb.Append(c);
+        }
+        if (escaped) sb.Append('\\');
+        return sb.ToString();
     }
     // True when the range holds nothing but ASCII spaces: the basic view's UnpadCode test for
     // an inline code span that is only padding.
@@ -12611,7 +13833,7 @@ internal static partial class MarkdownLivePreview {
             // Raw table rows keep their source pipes; the same layout still supplies the
             // column stops that keep the caret row aligned with formatted neighbours.
             bool raw = session.Raw(line);
-            if (info.Table) { info.MathTouchKey = session.MathTouchKeyOf(line, info); session.NoteRowIme(line, info); }
+            if (info.Table) { info.MathTouchKey = session.MathTouchKeyOf(line, info); session.NoteRowIme(line, info, raw); }
             info.Row = info.Table && !info.Delimiter && info.Cells != null && info.Cells.Count > 0 ? session.LayoutRow(info, raw) : null;
             // A display formula folds the lines under its opener while it is drawn, and unfolds them when it is source.
             if (info.MathCount > 0) session.PrepareMath(line, !raw);

@@ -230,17 +230,26 @@ internal static partial class MarkdownLivePreview {
 
         // Called by the strut generator before a table row is laid out: records the editor's composition string for the row the caret is in
         // (ImeText/ImeAt/ImeCell/ImeKey on its LineInfo). Cost with no composition: one property read.
-        internal void NoteRowIme(DocumentLine line, LineInfo info) {
-            info.ImeText = null; info.ImeKey = null; info.ImeAttrs = null; info.ImeCell = -1;
-            string text = Editor.ImeCompositionText;
-            if (String.IsNullOrEmpty(text) || info.Delimiter || info.Cells == null || info.Cells.Count == 0) return;
+        internal void NoteRowIme(DocumentLine line, LineInfo info, bool raw) {
+            info.ImeText = null; info.ImeKey = null; info.ImeAttrs = null; info.ImeCell = -1; info.ImeLead = 0; info.LeadCell = -1;
+            if (info.Delimiter || info.Cells == null || info.Cells.Count == 0) return;
             if (disposed || Editor.Document != Document) return;
             int caret = Editor.CaretOffset;
             if (caret < line.Offset || caret > line.EndOffset) return;
+            string text = Editor.ImeCompositionText;
             int at;
             int cell = ImeCellOf(info, caret - line.Offset, out at);
             if (cell < 0) return;
+            if (String.IsNullOrEmpty(text)) {
+                if (raw) return;
+                // No composition: a caret after spaces typed at the cell's end still draws them, so it stands after them
+                // (11-22 user: "스페이스를 눌러도 커서 위치가 이전 글씨 위치에 있음"). Same spaces, same mapping as ImeLead.
+                int spaces = Editor.SelectionLength == 0 ? ImeLeadOf(info.Text, at, caret - line.Offset) : 0;
+                if (spaces > 0) { info.LeadCell = cell; info.ImeAt = at; info.ImeLead = spaces; }
+                return;
+            }
             info.ImeText = text; info.ImeAttrs = Editor.ImeCompositionAttrs; info.ImeCell = cell; info.ImeAt = at;
+            info.ImeLead = ImeLeadOf(info.Text, at, caret - line.Offset);
             info.ImeKey = ImeKeyOf(info);
             imeRowLine = line;
         }
@@ -269,17 +278,29 @@ internal static partial class MarkdownLivePreview {
             return cells.Count - 1;
         }
 
+        // Spaces from a cell's trimmed end (at) up to the caret: a space typed at the cell's end is outside the cell until text
+        // follows it, so a composition there would otherwise draw glued to the text and jump a space (or a row) when it commits.
+        // 0 when the caret is not after at, or anything but spaces/tabs lies between (O(gap)).
+        internal static int ImeLeadOf(string text, int at, int relative) {
+            if (text == null || relative <= at || at < 0 || relative > text.Length) return 0;
+            for (int k = at; k < relative; k++) if (text[k] != ' ' && text[k] != '\t') return 0;
+            return relative - at;
+        }
+
         // Names everything a composition cell is drawn from, so a changed string, clause or armed style rebuilds the row.
         string ImeKeyOf(LineInfo info) {
             var key = new System.Text.StringBuilder();
-            key.Append(info.ImeCell).Append('|').Append(info.ImeAt).Append('|').Append(info.ImeText).Append('|');
+            key.Append(info.ImeCell).Append('|').Append(info.ImeAt).Append('|').Append(info.ImeLead).Append('|').Append(info.ImeText).Append('|');
             if (info.ImeAttrs != null) foreach (byte b in info.ImeAttrs) key.Append((char)('0' + (b & 7)));
             key.Append('|');
             var ask = Editor.PendingImeStyle;
             ImePendingStyle style = null;
             if (ask != null) { try { style = ask(); } catch (Exception) { style = null; } }
             if (style != null) {
-                key.Append(style.Bold ? 'B' : '-').Append(style.Italic ? 'I' : '-').Append(style.Strike ? 'S' : '-').Append(style.Code ? 'C' : '-').Append(style.Size);
+                key.Append(style.Bold ? 'B' : '-').Append(style.Italic ? 'I' : '-').Append(style.Strike ? 'S' : '-')
+                    .Append(style.Highlight ? 'H' : '-').Append(style.Code ? 'C' : '-')
+                    .Append(style.NoBold ? 'b' : '-').Append(style.NoItalic ? 'i' : '-').Append(style.NoStrike ? 's' : '-')
+                    .Append(style.NoHighlight ? 'h' : '-').Append(style.Size);
                 if (style.Color != null) key.Append(style.Color.ToString());
             }
             return key.ToString();

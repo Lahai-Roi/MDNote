@@ -1643,27 +1643,9 @@ internal static class LargeDocAbuseProbe {
         while (at < text.Length) {
             char c = text[at];
             if (c == '\\') { at += 2; continue; }
-            if (c == '`') {
-                int run = 1;
-                while (at + run < text.Length && text[at + run] == '`') run++;
-                int close = FindBackticks(text, at + run, run);
-                at = close >= 0 ? close + run : at + run;
-                continue;
-            }
             if (c == '|') pipes.Add(at);
             at++;
         }
-    }
-    static int FindBackticks(string text, int from, int length) {
-        int at = from;
-        while (at < text.Length) {
-            if (text[at] != '`') { at++; continue; }
-            int run = 1;
-            while (at + run < text.Length && text[at + run] == '`') run++;
-            if (run == length) return at;
-            at += run;
-        }
-        return -1;
     }
     static bool HasPipe(string text) {
         var pipes = new List<int>();

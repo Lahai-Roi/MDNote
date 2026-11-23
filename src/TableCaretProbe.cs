@@ -806,6 +806,16 @@ internal static class TableCaretProbe {
             else{
                 string gap;int gapMode=GapMode(window,caret,out gap);
                 if(gapMode==1){expected=expected.Insert(caret,gap);caret+=gap.Length;}
+                // 11-22 H10 removal: typing non-blank text at a hidden closing run's outer edge
+                // enters the closing run (matching body text) instead of inserting after it.
+                if(gapMode==0&&!string.IsNullOrWhiteSpace(input)&&window.livePreview!=null){
+                    var curLine=document.GetLineByOffset(caret);
+                    int closeStart,closeEnd;
+                    if(MarkdownLivePreview.Session.HiddenCloseRun(window.livePreview.Info(curLine),caret-curLine.Offset,out closeStart,out closeEnd)){
+                        int rel=caret-curLine.Offset;
+                        if(rel>closeStart&&rel==closeEnd){int delta=rel-closeStart;caret-=delta;plainCaret-=delta;}
+                    }
+                }
                 expected=expected.Insert(caret,input);caret+=input.Length;plain=plain.Insert(plainCaret,input);plainCaret+=input.Length;
                 // Above a header the caret stays on the text, so the newline follows it without
                 // moving the caret past it.
@@ -1387,8 +1397,8 @@ internal static class TableCaretProbe {
     // closes a `code` span and pastes plain text straight after it: the pair keeps its closing run
     // and the pasted text goes after it ("`a`X", never "`aX`"). The hidden-marker paste snap pulls
     // a caret on a closing run's outer edge back inside the pair so pasted text keeps the style,
-    // but a cell is the input unit (H10 gives typed text the same exemption), so the cell's caret
-    // wins. Both views run: basic hides the markers, live reveals the caret row as source.
+    // but a cell is the input unit for paste, so the cell's caret wins. Both views run: basic
+    // hides the markers, live reveals the caret row as source.
     static void RunCellPasteSuite(int width){
         bool hide=hideMarkers,live=ProbeDefaults.Live;
         MainWindow window=null;

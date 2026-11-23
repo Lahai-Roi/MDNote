@@ -1190,10 +1190,10 @@ public partial class MainWindow {
         string plain=StripPastedPairs("**x** *y*",true,false,false);
         check("strip drops the same-kind pair and keeps the other",plain=="x *y*","got=["+plain+"]");
     }
-    // A pasted text that is one complete span ("**`a`**", bold around inline code) at a table cell's text end is not a
-    // character typed next to a closer (rule H10 stays for typing): it is inserted as-is where the caret is, after the
-    // cell's own closer, and draws as its own bold+code span, in both views. Before the fix the basic view snapped the
-    // caret into a closing "**" and StripEnclosingStyles dropped the paste's own markers ("| **x`a`** |").
+    // A pasted text that is one complete span ("**`a`**", bold around inline code) at a table cell's text end is
+    // inserted as-is where the caret is, after the cell's own closer, rather than snapping into the cell's own closer,
+    // and draws as its own bold+code span, in both views. Before the fix the basic view snapped the caret into a
+    // closing "**" and StripEnclosingStyles dropped the paste's own markers ("| **x`a`** |").
     static void VerifyCellSpanPaste(MainWindow window,Action<string,bool,string> check){
         bool oldHide=hideMarkers;
         try{

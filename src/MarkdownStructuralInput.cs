@@ -1189,8 +1189,8 @@ internal static class MarkdownStructuralInput {
 
     // Cell brackets of one row, as the renderer and MarkdownTableCommands read the same row:
     // MarkdownLivePreview.SplitCells (which MarkdownTableCommands.CellsAt also uses) names the
-    // cells, so a pipe escaped as "\|" and a pipe inside a `code` span are cell text and a row's
-    // leading or trailing pipe owns no cell. Around each cell only its padding and the one
+    // cells, so a pipe escaped as "\|" is cell text (while any unescaped pipe splits a cell even
+    // inside a `code` span) and a row's leading or trailing pipe owns no cell. Around each cell only its padding and the one
     // separator pipe are widened back into the bracket, so the gap scan needs no pipe rules of
     // its own: a caret in a cell's padding stays that cell's (the bracket begins after the pipe
     // in front of it and ends at the pipe behind it), and a trailing pipe leaves no empty slot.
@@ -1198,11 +1198,8 @@ internal static class MarkdownStructuralInput {
         List<int[]> cells = new List<int[]>();
         List<MarkdownLivePreview.Cell> spans = MarkdownLivePreview.SplitCells(text);
         for (int i = 0; i < spans.Count; i++) {
-            int from = spans[i].Start;
-            while (from > 0 && (text[from - 1] == ' ' || text[from - 1] == '\t')) from--;
-            while (from > 0 && text[from - 1] != '|') from--;
-            int end = spans[i].End;
-            while (end < text.Length && (text[end] == ' ' || text[end] == '\t')) end++;
+            int from, end;
+            MarkdownLivePreview.CellBounds(spans, i, out from, out end);
             cells.Add(new int[] { from, end });
         }
         return cells;

@@ -469,9 +469,9 @@ public static partial class Markdown {
     // renderer and the TXT converter accept, so "---" under "이름 | 나이" is a setext underline here
     // too and never opens a table.
     static bool TableDelimiterLine(string line){return MarkdownPlainText.TableDelimiter(line);}
-    // The print/rich-copy split is the live renderer's own rule (MarkdownLivePreview.TablePipes):
-    // an ODD backslash run escapes the pipe, and a `code` span closes only on the same-length
-    // backtick run, so a pipe inside one stays cell text. MarkdownPlainText.Cells is that scan.
+    // The print/rich-copy split is the live renderer's own GFM rule (MarkdownLivePreview.TablePipes):
+    // an ODD backslash run escapes the pipe, and every "\|" becomes "|" before inline parsing
+    // (including inside `code` spans). MarkdownPlainText.Cells is that scan.
     static string[] Cells(string line){return MarkdownPlainText.Cells(line);}
     // #5: a source row can carry more or fewer cells than the header (a merged-cell paste or a
     // hand-edited row). A WPF table column is fixed by the header, so a data row pads with empty
@@ -888,6 +888,7 @@ public static class Program {
         if(args.Length==2&&args[0]=="--memory-probe"){IsSelfTest=true;return MainWindow.VerifyMemory(args[1]);}
         if(args.Length==2&&args[0]=="--live-typing-probe"){IsSelfTest=true;return MainWindow.VerifyLiveTypingStability(args[1]);}
         if(args.Length==2&&args[0]=="--table-caret-probe"){IsSelfTest=true;return MainWindow.VerifyTableCaret(args[1]);}
+        if(args.Length==2&&args[0]=="--table-edge-probe"){IsSelfTest=true;return MainWindow.VerifyTableEdge(args[1]);}
         if(args.Length==2&&args[0]=="--settings-probe"){IsSelfTest=true;return MainWindow.RunSettingsMatrixProbe(args[1]);}
         if(args.Length==2&&args[0]=="--table-commands-probe"){IsSelfTest=true;return MainWindow.VerifyTableCommands(args[1]);}
         if(args.Length==2&&args[0]=="--live-table-review-probe"){IsSelfTest=true;return LiveTableReviewProbe.Run(args[1]);}

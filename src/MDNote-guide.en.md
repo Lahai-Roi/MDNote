@@ -165,7 +165,7 @@ This guide explains MDNote's menus and screen in the order of the top menu bar. 
 
 The second row of a table (the `---` delimiter row) cannot be edited directly in the editing screen. Use the alignment buttons on the table toolbar (or the Source view) to change column alignment.
 
-Outer `|` characters at the left and right edges of a table are optional. Typing `|` inside a cell automatically saves it as `\|` so the table does not break, while `|` typed inside `code` stays as-is without splitting the cell.
+Outer `|` characters at the left and right edges of a table are optional. Typing `|` inside a cell—whether inside or outside `code`—automatically saves it as `\|` so the table does not break, and displays it as `|`.
 
 - If there is no list directly above the table, the indent button on the table toolbar is dimmed.
 

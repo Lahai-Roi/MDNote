@@ -537,7 +537,7 @@ internal static class LiveTableReviewProbe {
                     Check("revealed inline code closer stays text",editor.Text=="`ab`x\n\ntail\n",
                         "text=["+editor.Text.Replace("\n","\\n")+"]");
                 }
-                // H10: the end of a cell is the cell's boundary, even when a closer ends there.
+                // 11-22 rule: a non-blank character typed at a cell's end after a closing run continues the run, like body text.
                 string boldCell="| h | b |\n| --- | --- |\n| **bold** | y |\n\ntail\n";
                 editor.Text=boldCell;editor.CaretIndex=0;Pump();
                 line=editor.Document.GetLineByNumber(3);info=session.Info(line);
@@ -545,7 +545,7 @@ internal static class LiveTableReviewProbe {
                 editor.TextArea.PerformTextInput("Q");Pump();
                 row=editor.Document.GetText(editor.Document.GetLineByNumber(3));
                 info=session.Info(editor.Document.GetLineByNumber(3));
-                Check("typed text at a bold cell end stays at the cell end "+mode,row=="| **bold**Q | y |"&&info.Cells.Count==2,
+                Check("typed text at a bold cell end enters the closing run "+mode,row=="| **boldQ** | y |"&&info.Cells.Count==2,
                     "row=["+row+"], cells="+(info.Cells==null?-1:info.Cells.Count));
                 // Typing over a selection that sits in a row's padding/pipe keeps the row.
                 string padSel="| a | b |\n| --- | --- |\n| c | d |\n\ntail\n";
