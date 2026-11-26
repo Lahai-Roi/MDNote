@@ -38,7 +38,7 @@ internal sealed class DocumentActivation:IDisposable {
         if(System.Threading.Interlocked.Exchange(ref CrashLogInstalled,1)==0)AppDomain.CurrentDomain.UnhandledException+=delegate(object sender,UnhandledExceptionEventArgs e){AppendCrashLog(e.ExceptionObject as Exception,false);};
         if(app!=null&&System.Threading.Interlocked.Exchange(ref DispatcherCrashLogInstalled,1)==0)app.DispatcherUnhandledException+=delegate(object sender,System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e){AppendCrashLog(e.Exception,true);e.Handled=false;};
     }
-    internal static string CrashLogPath{get{return Path.Combine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"MDNote"),"crash-log.txt");}}
+    internal static string CrashLogPath{get{return Path.Combine(AppDataPaths.Root,"crash-log.txt");}}
     internal static void AppendCrashLog(Exception error,bool dispatcher){
         try{
             string path=CrashLogPath;string folder=Path.GetDirectoryName(path);if(!String.IsNullOrEmpty(folder))Directory.CreateDirectory(folder);

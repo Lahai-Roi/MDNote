@@ -5,7 +5,7 @@ internal static class RecoveryStore {
 const int Magic=0x39444D52;static readonly object gate=new object();static readonly Dictionary<string,int> versions=new Dictionary<string,int>();static readonly SemaphoreSlim writer=new SemaphoreSlim(1,1);static readonly Dictionary<string,CancellationTokenSource> pendingWriters=new Dictionary<string,CancellationTokenSource>();static readonly string owner=Guid.NewGuid().ToString("N");static FileStream ownerLock;static string lockRoot;internal static string TestRoot=null;internal static Exception LastError;
 internal static bool Enabled {get{return !Program.IsSelfTest||TestRoot!=null;}}
 internal static SemaphoreSlim TestWriter {get{if(!Program.IsSelfTest)throw new InvalidOperationException();return writer;}}
-internal static string Root {get{return TestRoot??Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"MDNote","Recovery");}}
+internal static string Root {get{return TestRoot??Path.Combine(AppDataPaths.Root,"Recovery");}}
 static string Target(string id){return Path.Combine(Root,owner+"-"+id+".draft");}
 static void OwnerLock(string root){lock(gate){if(ownerLock!=null&&lockRoot==root)return;if(ownerLock!=null)ownerLock.Dispose();Directory.CreateDirectory(root);ownerLock=new FileStream(Path.Combine(root,owner+".lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);lockRoot=root;}}
 static void Put(BinaryWriter output,string value){byte[] bytes=Encoding.UTF8.GetBytes(value??"");if(bytes.Length>128*1024)throw new InvalidDataException("Recovery metadata is too long");output.Write(bytes.Length);output.Write(bytes);}

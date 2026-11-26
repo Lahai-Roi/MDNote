@@ -11,7 +11,7 @@
 !ifndef OUTPUT
  !error "OUTPUT is required"
 !endif
-!define VERSION "2.5.3"
+!define VERSION "2.5.4"
 !ifdef TEST_BUILD
  !define APP_NAME "MDNote (설치 검사)"
  !define APP_KEY "MDNoteInstallerSmokeTest"
@@ -39,7 +39,7 @@ SetOverwrite on
 ShowInstDetails show
 ShowUninstDetails show
 ManifestDPIAware true
-VIProductVersion "2.5.3.0"
+VIProductVersion "2.5.4.0"
 VIAddVersionKey /LANG=1042 "ProductName" "$(MDNoteText16)"
 VIAddVersionKey /LANG=1042 "FileDescription" "${APP_NAME} 설치 프로그램"
 VIAddVersionKey /LANG=1042 "FileVersion" "${VERSION}"
@@ -86,6 +86,8 @@ UninstPage custom un.SettingsPage un.SettingsLeave
 
 Var RemoveSettings
 Var SettingsCheckbox
+Var RemoveDrafts
+Var DraftsCheckbox
 Var AutoUpdateCheckbox
 
 Function FinishPageShow
@@ -323,6 +325,7 @@ Function un.onInit
  SetShellVarContext ${SHELL_CONTEXT}
  SetRegView 64
  StrCpy $RemoveSettings 0
+ StrCpy $RemoveDrafts 0
  ReadINIStr $0 "$INSTDIR\install-info.ini" "MDNote" "AppId"
  ${If} $0 != "${APP_KEY}"
   MessageBox MB_ICONSTOP "$(MDNoteText12)" /SD IDOK
@@ -341,12 +344,16 @@ Function un.SettingsPage
  Pop $0
  ${NSD_CreateCheckbox} 0 48u 100% 14u "$(MDNoteText15)"
  Pop $SettingsCheckbox
- ${NSD_CreateLabel} 0 76u 100% 36u "$(MDNoteText22)"
+ ; 2.5.4 (user 11-26): unsaved drafts are removed only on request, off by default.
+ ${NSD_CreateCheckbox} 0 64u 100% 14u "$(MDNoteText24)"
+ Pop $DraftsCheckbox
+ ${NSD_CreateLabel} 0 86u 100% 36u "$(MDNoteText22)"
  Pop $0
  nsDialogs::Show
 FunctionEnd
 Function un.SettingsLeave
  ${NSD_GetState} $SettingsCheckbox $RemoveSettings
+ ${NSD_GetState} $DraftsCheckbox $RemoveDrafts
 FunctionEnd
 
 Section "Uninstall"
@@ -369,11 +376,24 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\MDNote\MDNote.lnk"
   Delete "$SMPROGRAMS\MDNote\제거.lnk"
   RMDir "$SMPROGRAMS\MDNote"
+  SetShellVarContext current
+  ${If} $LOCALAPPDATA == ""
+   ; no profile folder: never let the paths below become "\MDNote\..." on the current drive
+   StrCpy $RemoveSettings 0
+   StrCpy $RemoveDrafts 0
+  ${EndIf}
   ${If} $RemoveSettings == ${BST_CHECKED}
-   SetShellVarContext current
    Delete "$LOCALAPPDATA\MDNote\settings.xml"
+   Delete "$LOCALAPPDATA\MDNote\settings.xml.bak"
+   Delete "$LOCALAPPDATA\MDNote\crash-log.txt"
    RMDir "$LOCALAPPDATA\MDNote"
   ${EndIf}
+  ; Recovery\ holds unsaved text: only its own checkbox (off by default) removes it.
+  ${If} $RemoveDrafts == ${BST_CHECKED}
+   RMDir /r "$LOCALAPPDATA\MDNote\Recovery"
+   RMDir "$LOCALAPPDATA\MDNote"
+  ${EndIf}
+  SetShellVarContext ${SHELL_CONTEXT}
  !endif
  DeleteRegKey ${REG_ROOT} "${REG_UNINSTALL}"
  DeleteRegKey ${REG_ROOT} "${REG_APP}"

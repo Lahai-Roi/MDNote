@@ -249,7 +249,7 @@ public partial class MainWindow {
     // 보기 > 제목 단계 표시: static like hideMarkers (one preference for every window and tab).
     // headingMarkStyle: 0 slash bars, 1 "#" symbols, 2 off; headingMarkLast: the style a row click turns on with.
     static int headingMarkStyle,headingMarkLast;
-    internal static string PreferencesPath {get{return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"MDNote","settings.xml");}}
+    internal static string PreferencesPath {get{return Path.Combine(AppDataPaths.Root,"settings.xml");}}
     /* Several windows - and a second MDNote instance - share one settings file. The atomic replace
        keeps the file whole; this mutex keeps one window's read-merge-write from interleaving with
        another's, which used to let an older snapshot roll back a change written a moment before it

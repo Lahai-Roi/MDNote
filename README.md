@@ -23,6 +23,7 @@ A fast, lightweight Markdown and TXT editor for Windows—just like Notepad.
 
 - Installer (`MDNote-Setup-<version>.exe`): Choose your language on the first screen of the setup.
 - Portable version, no installation required (`MDNote-<version>-portable.zip`): Extract the ZIP and run `MDNote.exe`.
+- Self-contained portable version that stores settings inside the folder (`MDNote-<version>-portable-usb.zip`): Saves settings and autosave files in the `data` folder inside the extracted folder. You can carry the entire folder on a USB drive or similar, and on first launch, any existing settings saved on this PC are copied over.
 - Requires Windows 10/11 64-bit and .NET Framework 4.8 (pre-installed on Windows).
 - Because the executable is not digitally signed, Windows may show a warning on first launch. Click **More info → Run anyway**.
 
@@ -81,7 +82,7 @@ This is because the executable is not digitally signed. Click **More info → Ru
 Yes. Download the file ending in `-portable.zip` from the latest release, extract it, and run `MDNote.exe`.
 
 **How do I uninstall it?**
-For the installed version, uninstall it from the Apps list in Windows Settings. If you manually placed any files in the installation folder, only those files will remain. For the portable version, simply delete the extracted folder.
+For the installed version, uninstall it from the Apps list in Windows Settings. If you manually placed any files in the installation folder, only those files will remain. For the portable version, simply delete the extracted folder. For the portable-usb version, settings are stored inside that folder and are deleted along with it.
 
 ## Privacy
 

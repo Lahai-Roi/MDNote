@@ -28,6 +28,10 @@ internal static string ImageTempFolderOverride=null;
 static string PastedImageTempFolder(){
     string forced=ImageTempFolderOverride;
     if(!String.IsNullOrEmpty(forced))return forced;
+    /* 2.5.4 (#6 review): the folder build keeps staged images next to its own Recovery\ drafts, so each copy's
+       ImageTempCleanup only weighs images against the drafts that can reference them (a shared Documents folder
+       let one copy recycle an image another copy's draft still used). */
+    if(AppDataPaths.Portable)return Path.Combine(AppDataPaths.Root,"images");
     string documents=Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
     if(String.IsNullOrEmpty(documents))documents=Path.GetTempPath();
     return Path.Combine(Path.Combine(documents,"MDNote"),"images");
